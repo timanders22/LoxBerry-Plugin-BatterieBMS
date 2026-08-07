@@ -1,0 +1,113 @@
+Eigene Geraeteprofile
+=====================
+
+In DIESEM Ordner liegen die eigenen Geraeteprofile. Jede Datei mit der Endung
+.json wird beim Start der Oberflaeche und des Dienstes eingelesen.
+
+Diese Datei traegt bewusst die Endung .txt und wird deshalb NICHT eingelesen.
+Sie ist nur die Beschreibung.
+
+Woher nehme ich eine Vorlage?
+-----------------------------
+Reiter Einstellungen, Abschnitt Geraeteprofile, Knopf "Als JSON laden". Damit
+laesst sich jedes vorhandene Profil herunterladen, anpassen und hier wieder
+ablegen.
+
+Wie heisst die Datei?
+---------------------
+Der Dateiname ohne .json ist der Schluessel des Profils. Erlaubt sind
+Kleinbuchstaben, Ziffern und Unterstrich; alles andere wird entfernt.
+
+   sungrow_sbr.json      -> Schluessel sungrow_sbr
+   byd_battery_box.json  -> ersetzt das EINGEBAUTE Profil gleichen Namens
+
+Eine eigene Datei ersetzt ein eingebautes Profil VOLLSTAENDIG. Das ist
+gewollt: wer ein Profil korrigiert, soll nicht mit einer halb ueberschriebenen
+Mischung dastehen.
+
+Aufbau
+------
+{
+  "name":      "Sungrow SBR (Beispiel, ungeprueft)",
+  "transport": "modbus_tcp",          modbus_tcp | modbus_rtu_tcp | pylontech_rs485
+  "port":      502,
+  "unit":      1,
+  "ip":        "",                    Vorgabe, kann je Geraet ueberschrieben werden
+  "stand":     "unbestaetigt",        dokumentiert | unbestaetigt
+  "quelle":    "Handbuch Seite 42",   PFLICHT. Wo die Adressen herkommen.
+  "bloecke": [
+    { "fc": 3, "start": 13000, "anzahl": 40 }
+  ],
+  "felder": {
+    "SOC":  { "reg": 13022, "typ": "u16", "faktor": 0.1,  "nk": 1 },
+    "SOH":  { "reg": 13023, "typ": "u16", "faktor": 0.1,  "nk": 1 },
+    "UBAT": { "reg": 13019, "typ": "u16", "faktor": 0.1,  "nk": 1 },
+    "PBAT": { "reg": 13021, "typ": "s32", "faktor": 1,    "nk": 0, "wort": "nieder" }
+  },
+  "rechnung":  {},
+  "zellen":    {},
+  "steuerung": {}
+}
+
+Die Namen der Messgroessen sind fest vorgegeben. Ein Profil darf keine eigenen
+erfinden - nur diese werden uebernommen:
+
+  SOC SOH UBAT IBAT PBAT TMAX TMIN UZMAX UZMIN UZDIFF ZYKLEN KAPAZ
+  MODULE ZELLEN FEHLER WARNUNG LADENMAX ENTLMAX MODUS
+
+Genau darin liegt der Sinn: die Loxone-Seite sieht bei jedem Hersteller gleich
+aus. Wer den Speicher tauscht, tauscht das Profil - nicht die Bausteine.
+
+Registerbeschreibung
+--------------------
+  reg       Registeradresse (dezimal in der JSON-Datei)
+  typ       u16 | s16 | u32 | s32 | u16hi | u16lo
+  faktor    Multiplikator auf den Rohwert
+  nk        Nachkommastellen der Ausgabe
+  wort      nur bei 32 Bit: "hoch" (Vorgabe) oder "nieder"
+  maske     UND-Maske auf den Rohwert, etwa 15 fuer die unteren vier Bit
+  schieben  Anzahl Bits, um die nach der Maske nach rechts geschoben wird
+
+Berechnete Groessen
+-------------------
+"rechnung" kennt bisher eine Art: das Produkt zweier Register. Damit laesst
+sich eine Leistung aus Strom und Spannung bilden, wenn das Geraet sie nicht
+selbst meldet:
+
+  "rechnung": {
+    "PBAT": { "art": "produkt",
+              "a": 1284, "a_typ": "s16", "a_faktor": 0.1,
+              "b": 1296, "b_typ": "u16", "b_faktor": 0.01, "nk": 0 }
+  }
+
+Schreibbefehle
+--------------
+"steuerung" ist eine Liste von Schrittfolgen. Jeder Schritt schreibt ein
+Register. Der Platzhalter "@watt" steht fuer den uebergebenen Sollwert.
+
+  "steuerung": {
+    "laden": {
+      "text": "Ladeleistung setzen",
+      "schritte": [
+        { "reg": 13050, "typ": "u16", "wert": 2 },
+        { "reg": 13051, "typ": "u32", "wert": "@watt" }
+      ]
+    },
+    "automatik": {
+      "text": "zurueck in die Automatik",
+      "schritte": [ { "reg": 13050, "typ": "u16", "wert": 0 } ]
+    }
+  }
+
+Fehlt "steuerung" oder ist es leer, nimmt das Geraet keine Befehle entgegen -
+und das Plugin meldet das ausdruecklich, statt es zu versuchen.
+
+Zuerst pruefen, dann glauben
+----------------------------
+Ein neues Profil bekommt "stand": "unbestaetigt". Erst mit dem
+Rohregister-Leser im Reiter Test nachsehen, was tatsaechlich in dem Register
+steht, und den Wert gegen die Anzeige des Herstellers halten. Stimmt er, darf
+"dokumentiert" hinein - zusammen mit der Fundstelle unter "quelle".
+
+Eine unlesbare Profildatei wird uebergangen und in der Logdatei gemeldet. Sie
+wird NICHT stillschweigend halb eingelesen.

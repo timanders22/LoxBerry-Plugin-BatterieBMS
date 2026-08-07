@@ -1,0 +1,5 @@
+#!/bin/sh
+# Batterie-Heimspeicher (BMS) - Waechter, minuetlich.
+# Startet den Dienst neu, wenn er laufen soll, aber nicht laeuft.
+# REPLACELBPBINDIR wird bei der Installation durch den bin-Pfad des Plugins ersetzt.
+"REPLACELBPBINDIR/dienst.sh" waechter >/dev/null 2>&1

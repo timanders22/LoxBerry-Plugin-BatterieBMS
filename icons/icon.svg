@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Batterie-Heimspeicher (BMS) - Plugin-Symbol.
+
+     Hausstandard: runde Scheibe in LoxBerry-Gruen #6dac20, Motiv am echten
+     Geraet orientiert, keine fremden Wortmarken oder Logos - auch nicht
+     angedeutet.
+
+     Motiv: ein stehender Hausspeicher, wie ihn die Turmbauweise zeigt - eine
+     Steuereinheit oben, darunter gestapelte Batteriemodule. Im mittleren
+     Modul stehen die Zellspannungen als Balken; die niedrigste Zelle ist
+     abgesetzt. Genau darum geht es in diesem Plugin: nicht um die Leistung am
+     Wechselrichter, sondern um den Blick in die einzelne Zelle. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <circle cx="256" cy="256" r="256" fill="#6dac20"/>
+
+  <!-- Steuereinheit (BCU) oben -->
+  <rect x="150" y="86" width="212" height="58" rx="16" ry="16" fill="#ffffff" opacity="0.96"/>
+  <rect x="150" y="86" width="212" height="58" rx="16" ry="16"
+        fill="none" stroke="#3d6412" stroke-width="10"/>
+  <rect x="176" y="106" width="72" height="14" rx="7" ry="7" fill="#3d6412"/>
+  <circle cx="330" cy="115" r="12" fill="#3d6412"/>
+
+  <!-- Modul 1 -->
+  <rect x="150" y="158" width="212" height="72" rx="12" ry="12" fill="#ffffff" opacity="0.96"/>
+  <rect x="150" y="158" width="212" height="72" rx="12" ry="12"
+        fill="none" stroke="#3d6412" stroke-width="10"/>
+
+  <!-- Modul 2: das aufgeschnittene, mit den Zellspannungen -->
+  <rect x="150" y="244" width="212" height="98" rx="12" ry="12" fill="#ffffff" opacity="0.96"/>
+  <rect x="150" y="244" width="212" height="98" rx="12" ry="12"
+        fill="none" stroke="#3d6412" stroke-width="10"/>
+  <!-- Balken: gleichmaessig hoch bis auf eine abfallende Zelle -->
+  <rect x="176" y="282" width="16" height="42" rx="4" ry="4" fill="#3d6412"/>
+  <rect x="202" y="276" width="16" height="48" rx="4" ry="4" fill="#3d6412"/>
+  <rect x="228" y="280" width="16" height="44" rx="4" ry="4" fill="#3d6412"/>
+  <rect x="254" y="304" width="16" height="20" rx="4" ry="4" fill="#e0620d"/>
+  <rect x="280" y="278" width="16" height="46" rx="4" ry="4" fill="#3d6412"/>
+  <rect x="306" y="282" width="16" height="42" rx="4" ry="4" fill="#3d6412"/>
+  <rect x="332" y="277" width="16" height="47" rx="4" ry="4" fill="#3d6412"/>
+
+  <!-- Modul 3 -->
+  <rect x="150" y="356" width="212" height="72" rx="12" ry="12" fill="#ffffff" opacity="0.96"/>
+  <rect x="150" y="356" width="212" height="72" rx="12" ry="12"
+        fill="none" stroke="#3d6412" stroke-width="10"/>
+</svg>
