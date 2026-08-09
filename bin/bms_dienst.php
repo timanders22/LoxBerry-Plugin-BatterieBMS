@@ -39,9 +39,39 @@ if (!$bm_gefunden) {
 
 $bm_laeuft = true;
 
+/* ==================================================================
+ * Signale
+ *
+ * pcntl_async_signals(true) statt pcntl_signal_dispatch() in der Schleife.
+ *
+ * Warum das mehr als Geschmack ist: bis 0.9.0 wurde genau EINMAL je
+ * Schleifendurchlauf nach Signalen gesehen. Ein Durchlauf kann aber lange
+ * dauern - bm_zellen_byd() wartet bis zu vier Sekunden auf die BCU, jeder
+ * Verbindungsaufbau bis zur eingestellten Zeitueberschreitung, und das mal
+ * der Zahl der Speicher. In dieser ganzen Zeit blieb ein SIGTERM liegen.
+ *
+ * Mit asynchronen Signalen ruft PHP den Behandler auf, sobald die virtuelle
+ * Maschine wieder an der Reihe ist - auch aus usleep() und aus einem
+ * blockierenden Lesevorgang heraus. Gibt es seit PHP 7.1; LB_MINIMUM 3.0.0
+ * bedeutet mindestens PHP 7.3. Die Abfrage auf function_exists bleibt
+ * trotzdem stehen, damit die Datei auch ohne pcntl einbindbar ist.
+ *
+ * Der zweite Teil des Problems lag nicht hier, sondern in preupgrade.sh:
+ * das schickte SIGTERM, wartete zwei Sekunden und schoss dann mit kill -9
+ * nach. Zwei Sekunden reichten bei einem Durchlauf mit Zelldaten nie. Das
+ * Skript ruft jetzt dienst.sh stop auf, das zehn Sekunden Zeit laesst.
+ * ================================================================== */
+
+if (function_exists('pcntl_async_signals')) {
+    pcntl_async_signals(true);
+}
+
 function bm_signal_behandeln($signal)
 {
     global $bm_laeuft;
+    if (!$bm_laeuft) {
+        return;    // schon im Anhalten - ein zweites Signal aendert nichts
+    }
     $bm_laeuft = false;
     bm_log('Signal ' . (int) $signal . ' empfangen - der Dienst haelt an.');
 }
@@ -56,23 +86,47 @@ function bm_signal_behandeln($signal)
  */
 function bm_abruf_modbus(array $g, array $pr, $tmo)
 {
-    $s = bm_verbinden($g, $tmo);
-    if (is_array($s)) {
-        return $s;
-    }
-    $regs = array();
-    foreach ((array) $pr['bloecke'] as $block) {
-        $teil = bm_register_lesen($s, $g, (int) $block['fc'], (int) $block['start'],
-                                  (int) $block['anzahl']);
-        if (isset($teil['_fehler'])) {
-            fclose($s);
-            return array('_fehler' => 'Block ab Register ' . (int) $block['start'] . ': '
-                . $teil['_fehler']);
+    // Zwei Anlaeufe: der erste darf eine vorgehaltene Verbindung benutzen,
+    // der zweite baut in jedem Fall eine frische auf. Eine offene Verbindung
+    // kann unbemerkt tot sein - das Geraet hat neu gestartet, eine Firewall
+    // hat den Eintrag abgeraeumt. Erst wenn auch die frische Verbindung nicht
+    // traegt, ist es ein Fehler.
+    $letzter = array('_fehler' => 'Unbekannt.');
+    for ($versuch = 1; $versuch <= 2; $versuch++) {
+        $s = bm_verbindung_holen($g, $tmo, true);
+        if (is_array($s)) {
+            bm_verbindung_verwerfen($g);
+            $letzter = $s;
+            continue;
         }
-        $regs += $teil;
+        $regs = array();
+        $fehler = '';
+        foreach ((array) $pr['bloecke'] as $block) {
+            $teil = bm_register_lesen($s, $g, (int) $block['fc'], (int) $block['start'],
+                                      (int) $block['anzahl']);
+            if (isset($teil['_fehler'])) {
+                $fehler = 'Block ab Register ' . (int) $block['start'] . ': ' . $teil['_fehler'];
+                break;
+            }
+            $regs += $teil;
+        }
+        if ($fehler !== '') {
+            // Nach JEDEM Fehler die Verbindung wegwerfen: nach einer
+            // abgebrochenen Anforderung steht womoeglich noch eine halbe
+            // Antwort im Puffer, die sonst als Antwort auf die naechste Frage
+            // gelesen wuerde.
+            bm_verbindung_verwerfen($g);
+            $letzter = array('_fehler' => $fehler);
+            continue;
+        }
+        return bm_modbus_auswerten($regs, $pr);
     }
-    fclose($s);
+    return $letzter;
+}
 
+/** Rohregister in die einheitlichen Messgroessen umrechnen. */
+function bm_modbus_auswerten(array $regs, array $pr)
+{
     $werte = array();
     foreach (bm_status_felder() as $feld => $unbenutzt) {
         $werte[$feld] = null;
@@ -108,14 +162,20 @@ function bm_abruf_modbus(array $g, array $pr, $tmo)
 function bm_zellen_byd(array $g, array $pr, $tmo, $bmsIndex = 1)
 {
     $z = $pr['zellen'];
-    $s = bm_verbinden($g, $tmo);
+    // Dieselbe Verbindung wie beim Statusabruf. Bis 0.9.0 schloss
+    // bm_abruf_modbus() die Verbindung und diese Funktion oeffnete
+    // unmittelbar danach eine neue - bei der BYD-BCU, die nur EINE
+    // Verbindung gleichzeitig zulaesst, war das die haeufigste Ursache fuer
+    // 'Verbindung abgewiesen' im Protokoll.
+    $s = bm_verbindung_holen($g, $tmo, true);
     if (is_array($s)) {
+        bm_verbindung_verwerfen($g);
         return $s;
     }
     $erg = bm_register_schreiben_mehrere($s, $g, (int) $z['anforderung'],
                                          array($bmsIndex, 0x8100));
     if (is_array($erg)) {
-        fclose($s);
+        bm_verbindung_verwerfen($g);
         return array('_fehler' => 'Die Zelldatenanforderung liess sich nicht absetzen: '
             . $erg['_fehler']);
     }
@@ -124,7 +184,7 @@ function bm_zellen_byd(array $g, array $pr, $tmo, $bmsIndex = 1)
         usleep(100000);
         $a = bm_register_lesen($s, $g, 3, (int) $z['antwort'], 1);
         if (isset($a['_fehler'])) {
-            fclose($s);
+            bm_verbindung_verwerfen($g);
             return array('_fehler' => 'Warten auf die Zelldaten: ' . $a['_fehler']);
         }
         if ((int) $a[(int) $z['antwort']] === 0x8801) {
@@ -133,7 +193,6 @@ function bm_zellen_byd(array $g, array $pr, $tmo, $bmsIndex = 1)
         }
     }
     if (!$bereit) {
-        fclose($s);
         return array('_fehler' => 'Die BCU hat die Zelldatenanforderung nicht innerhalb von '
             . '4 s bestaetigt. Das passiert regelmaessig, wenn eine zweite Anwendung '
             . '(BE Connect Plus, Node-RED) gerade mit der Box spricht.');
@@ -142,14 +201,13 @@ function bm_zellen_byd(array $g, array $pr, $tmo, $bmsIndex = 1)
     for ($b = 0; $b < (int) $z['bloecke']; $b++) {
         $teil = bm_register_lesen($s, $g, 3, (int) $z['daten'], (int) $z['blockgroesse']);
         if (isset($teil['_fehler'])) {
-            fclose($s);
+            bm_verbindung_verwerfen($g);
             return array('_fehler' => 'Zelldatenblock ' . ($b + 1) . ': ' . $teil['_fehler']);
         }
         $folge = array_values($teil);
         array_shift($folge);               // erstes Wort ist die Paketlaenge
         $daten = array_merge($daten, $folge);
     }
-    fclose($s);
 
     $module = array();
     $jeModul = (int) $z['zellen_je_modul'];
@@ -195,9 +253,64 @@ function bm_zellen_byd(array $g, array $pr, $tmo, $bmsIndex = 1)
     return array('module' => $module);
 }
 
+/* ==================================================================
+ * Bytes aus dem Pylontech-Datenstrom lesen
+ *
+ * Diese vier Funktionen lesen NIE ueber das Ende hinaus. Das ist der Punkt,
+ * an dem die Fassung 0.9.0 nachlaessig war.
+ *
+ * Was dort geschah: die Zahl der Temperaturfuehler kommt als einzelnes Byte
+ * aus dem Datenstrom. Faengt die RS485-Leitung ein Stoerbyte 0xFF ein, sind
+ * das 255 Fuehler, und die anschliessende Schleife las 510 Bytes weit ueber
+ * das Ende der Antwort hinaus.
+ *
+ * ANDERS ALS OFT BEHAUPTET stuerzt PHP dabei nicht ab. Ein Lesezugriff
+ * hinter dem Ende einer Zeichenkette ist seit PHP 8 eine WARNUNG
+ * ('Uninitialized string offset'), keine Ausnahme; der Ausdruck ergibt eine
+ * leere Zeichenkette, und ord('') ist 0. Der Dienst lief also weiter - und
+ * genau das ist das Schlimmere. Er lief weiter mit 255 erfundenen
+ * Temperaturen, einem um 510 Bytes verschobenen Lesezeiger und daraus
+ * abgeleiteten Werten fuer Strom, Spannung, Kapazitaet und Zyklen, die er
+ * anschliessend als gueltig an Loxone und MQTT weiterreichte. Dazu 510
+ * Warnungen je Durchlauf in der Logdatei.
+ *
+ * Eine Pruefung nur vor der Temperaturschleife - so lautete der Vorschlag -
+ * genuegt dafuer nicht: hinter den Temperaturen folgen elf weitere Bytes
+ * (Strom, Spannung, Restkapazitaet, Feldzahl, Gesamtkapazitaet, Zyklen), die
+ * ebenso ungeprueft gelesen wurden, und das Byte mit der Fuehlerzahl selbst
+ * war es auch. Deshalb pruefen jetzt die Lesefunktionen, und zwar jede fuer
+ * sich.
+ *
+ * $pos wird bei einem Fehlgriff auf -1 gesetzt. Das ist die Merkfaehnchen:
+ * bm_pyl_ende() fragt sie ab, und der Aufrufer bricht mit einer Meldung ab,
+ * statt mit erfundenen Zahlen weiterzurechnen.
+ * ================================================================== */
+
+/** Wurde ueber das Ende hinaus gelesen? */
+function bm_pyl_ende($pos)
+{
+    return $pos < 0;
+}
+
+/** Ein Byte. Bei Ueberlauf: 0 und $pos = -1. */
+function bm_u8(&$roh, &$pos)
+{
+    if ($pos < 0 || $pos + 1 > strlen($roh)) {
+        $pos = -1;
+        return 0;
+    }
+    $w = ord($roh[$pos]);
+    $pos += 1;
+    return $w;
+}
+
 /** Vorzeichenbehaftete 16-Bit-Zahl aus einem Bytestrom. */
 function bm_s16(&$roh, &$pos)
 {
+    if ($pos < 0 || $pos + 2 > strlen($roh)) {
+        $pos = -1;
+        return 0;
+    }
     $w = (ord($roh[$pos]) << 8) | ord($roh[$pos + 1]);
     $pos += 2;
     return $w >= 0x8000 ? $w - 0x10000 : $w;
@@ -205,6 +318,10 @@ function bm_s16(&$roh, &$pos)
 
 function bm_u16(&$roh, &$pos)
 {
+    if ($pos < 0 || $pos + 2 > strlen($roh)) {
+        $pos = -1;
+        return 0;
+    }
     $w = (ord($roh[$pos]) << 8) | ord($roh[$pos + 1]);
     $pos += 2;
     return $w;
@@ -212,6 +329,10 @@ function bm_u16(&$roh, &$pos)
 
 function bm_u24(&$roh, &$pos)
 {
+    if ($pos < 0 || $pos + 3 > strlen($roh)) {
+        $pos = -1;
+        return 0;
+    }
     $w = (ord($roh[$pos]) << 16) | (ord($roh[$pos + 1]) << 8) | ord($roh[$pos + 2]);
     $pos += 3;
     return $w;
@@ -233,6 +354,15 @@ function bm_u24(&$roh, &$pos)
  *
  * Temperaturen stehen in Kelvin mal 10: Grad Celsius = (Wert - 2731) / 10.
  */
+/** Einheitliche Meldung, wenn die Antwort mitten in einem Feld endet. */
+function bm_pyl_kurz($modul, $stelle, $roh)
+{
+    return 'Die Antwort endet bei Modul ' . (int) $modul . ' mitten in ' . $stelle
+         . ' (' . strlen($roh) . ' Bytes insgesamt). Der Abruf wird verworfen. '
+         . 'Wiederholt sich das, stimmt etwas an der RS485-Verbindung nicht: '
+         . 'Baudrate, Adernpaar A/B, Abschlusswiderstand oder Schirmung.';
+}
+
 function bm_abruf_pylontech(array $g, array $pr)
 {
     $roh = bm_pyl_befehl($g['geraetedatei'], $g['baud'], (int) $g['unit'], 0x42, 'FF');
@@ -261,32 +391,70 @@ function bm_abruf_pylontech(array $g, array $pr)
     $zellzahlGesamt = 0;
 
     for ($m = 1; $m <= $modulzahl; $m++) {
-        if ($pos + 1 > strlen($roh)) {
-            return array('_fehler' => 'Die Antwort bricht bei Modul ' . $m . ' ab.');
+        $zellzahl = bm_u8($roh, $pos);
+        if (bm_pyl_ende($pos)) {
+            return array('_fehler' => bm_pyl_kurz($m, 'der Zellzahl', $roh));
         }
-        $zellzahl = ord($roh[$pos]);
-        $pos++;
         if ($zellzahl < 1 || $zellzahl > 32 || $pos + $zellzahl * 2 > strlen($roh)) {
             return array('_fehler' => 'Modul ' . $m . ' meldet ' . $zellzahl . ' Zellen - '
-                . 'das passt nicht zur Laenge der Antwort.');
+                . 'das passt nicht zur Laenge der Antwort (' . strlen($roh) . ' Bytes). '
+                . 'Bei einer gestoerten RS485-Leitung ist das der Regelfall: A und B '
+                . 'vertauscht, fehlender Abschlusswiderstand oder ein ungeschirmtes Kabel '
+                . 'neben einer Leistungsleitung.');
         }
         $zellen = array();
         for ($z = 1; $z <= $zellzahl; $z++) {
             $zellen[$z] = bm_s16($roh, $pos);
         }
-        $tempzahl = ord($roh[$pos]);
-        $pos++;
+        if (bm_pyl_ende($pos)) {
+            return array('_fehler' => bm_pyl_kurz($m, 'der Zellspannungen', $roh));
+        }
+
+        // Die Zahl der Temperaturfuehler kommt als einzelnes Byte. Genau hier
+        // lief 0.9.0 bei einem Stoerbyte 0xFF 255 Durchlaeufe weit ueber das
+        // Ende der Antwort hinaus. Beide Groessen werden jetzt geprueft: die
+        // Zahl selbst auf Glaubwuerdigkeit, und der Platz auf Vorhandensein.
+        $tempzahl = bm_u8($roh, $pos);
+        if (bm_pyl_ende($pos)) {
+            return array('_fehler' => bm_pyl_kurz($m, 'der Fuehlerzahl', $roh));
+        }
+        if ($tempzahl > 16) {
+            return array('_fehler' => 'Modul ' . $m . ' meldet ' . $tempzahl
+                . ' Temperaturfuehler. Kein Pylontech-Modul hat mehr als 16 - das ist '
+                . 'ein Stoerbyte auf der RS485-Leitung, kein Messwert. Der Abruf wird '
+                . 'verworfen, statt daraus Zahlen zu erfinden.');
+        }
+        if ($pos + $tempzahl * 2 > strlen($roh)) {
+            return array('_fehler' => 'Modul ' . $m . ' meldet ' . $tempzahl
+                . ' Temperaturfuehler, aber die Antwort ist dafuer zu kurz ('
+                . strlen($roh) . ' Bytes, Lesezeiger bei ' . $pos . ').');
+        }
         $temps = array();
         for ($t = 0; $t < $tempzahl; $t++) {
             $temps[] = round((bm_s16($roh, $pos) - 2731) / 10.0, 1);
         }
+
         $strom = bm_s16($roh, $pos) / 10.0;
         $spannung = bm_u16($roh, $pos) / 1000.0;
         $rest = bm_u16($roh, $pos) / 1000.0;
-        $eigene = ord($roh[$pos]);
-        $pos++;
+        $eigene = bm_u8($roh, $pos);
         $gesamt = bm_u16($roh, $pos) / 1000.0;
         $zyklen = bm_u16($roh, $pos);
+        if (bm_pyl_ende($pos)) {
+            return array('_fehler' => bm_pyl_kurz($m, 'der Kapazitaetswerte', $roh));
+        }
+        // Die erweiterten Kapazitaetsfelder werden NUR gelesen, wenn auch
+        // Platz dafuer da ist - genau wie in 0.9.0. Diese Bedingung sieht wie
+        // eine vergessene Pruefung aus, ist aber Absicht und bleibt deshalb
+        // Wort fuer Wort erhalten: 'eigene' zaehlt herstellereigene Felder,
+        // und welche Bedeutung ein Wert groesser 2 hat, ist von Firmware zu
+        // Firmware verschieden. Ist kein Platz, gelten die zuvor gelesenen
+        // 16-Bit-Werte weiter, statt den ganzen Abruf zu verwerfen.
+        //
+        // Der Unterschied faellt ins Gewicht: waeren die Felder hier Pflicht,
+        // wuerde eine Anlage, bei der das bisher lief, ploetzlich dauerhaft
+        // Fehler melden. Die Laengenpruefung in bm_u24() bleibt trotzdem als
+        // Netz darunter liegen.
         if ($eigene > 2 && $pos + 6 <= strlen($roh)) {
             $rest = bm_u24($roh, $pos) / 1000.0;
             $gesamt = bm_u24($roh, $pos) / 1000.0;
@@ -370,8 +538,9 @@ function bm_steuern(array $g, array $pr, $aktion, $watt)
         return array(0, bm_t('DIENST.STEUERUNG_SERIELL'));
     }
 
-    $s = bm_verbinden($g, (int) $cfg['zeitueberschreitung']);
+    $s = bm_verbindung_holen($g, (int) $cfg['zeitueberschreitung'], true);
     if (is_array($s)) {
+        bm_verbindung_verwerfen($g);
         return array(0, $s['_fehler']);
     }
     $nr = 0;
@@ -390,13 +559,12 @@ function bm_steuern(array $g, array $pr, $aktion, $watt)
             $erg = bm_register_schreiben($s, $g, (int) $schritt['reg'], $wert);
         }
         if (is_array($erg)) {
-            fclose($s);
+            bm_verbindung_verwerfen($g);
             return array(0, sprintf(bm_t('DIENST.STEUERUNG_SCHRITT'), $nr,
                 (int) $schritt['reg'], $erg['_fehler']));
         }
         usleep(150000);   // manche Geraete brauchen eine Atempause
     }
-    fclose($s);
     return array(1, sprintf(bm_t('DIENST.STEUERUNG_OK'), $aktion, (int) $watt, $g['name']));
 }
 
@@ -429,7 +597,62 @@ function bm_soll_loeschen($nr)
  * Ein Durchlauf
  * ================================================================== */
 
-function bm_durchlauf(&$letzteZellen)
+/* ==================================================================
+ * Ausfallsperre
+ *
+ * Wer drei Speicher eingerichtet hat und bei dem der erste offline geht,
+ * wartete bis 0.9.0 in JEDEM Durchlauf erst dessen Zeitueberschreitung ab,
+ * bevor der zweite ueberhaupt gefragt wurde. Bei drei Geraeten und der
+ * Voreinstellung von 4 s sind das 12 s von 30 - die Werte der gesunden
+ * Speicher altern also mit, obwohl mit ihnen alles in Ordnung ist.
+ *
+ * Statt einer asynchronen Abfrage ueber stream_select - das waere ein
+ * Umbau der gesamten Anforderungsschicht und hilft dem seriellen Weg
+ * ohnehin nicht - bekommt ein dauerhaft stummes Geraet eine Pause: nach
+ * drei Fehlschlaegen in Folge wird es nur noch alle 60 s gefragt. Meldet es
+ * sich wieder, ist die Sperre sofort aufgehoben.
+ *
+ * Der zuletzt bekannte Fehlertext bleibt am Eintrag stehen; das Geraet gilt
+ * weiterhin als gestoert. Es wird nichts beschoenigt, nur seltener gefragt.
+ * ================================================================== */
+
+define('BM_SPERRE_AB', 3);        // Fehlschlaege in Folge
+define('BM_SPERRE_DAUER', 60);    // Sekunden Pause danach
+
+function bm_gesperrt($nr, array &$ausfall)
+{
+    if (!isset($ausfall[$nr]) || $ausfall[$nr]['zahl'] < BM_SPERRE_AB) {
+        return false;
+    }
+    return (time() - $ausfall[$nr]['ts']) < BM_SPERRE_DAUER;
+}
+
+function bm_ausfall_merken($nr, array &$ausfall, $text)
+{
+    if (!isset($ausfall[$nr])) {
+        $ausfall[$nr] = array('zahl' => 0, 'ts' => 0, 'text' => '');
+    }
+    $ausfall[$nr]['zahl']++;
+    $ausfall[$nr]['ts'] = time();
+    $ausfall[$nr]['text'] = $text;
+    if ($ausfall[$nr]['zahl'] === BM_SPERRE_AB) {
+        bm_log('Geraet ' . (int) $nr . ' antwortet zum ' . BM_SPERRE_AB . '. Mal nicht - '
+             . 'es wird nur noch alle ' . BM_SPERRE_DAUER . ' s gefragt, damit die uebrigen '
+             . 'Speicher nicht mitwarten. Grund: ' . $text);
+    }
+}
+
+function bm_ausfall_loeschen($nr, array &$ausfall)
+{
+    if (isset($ausfall[$nr])) {
+        if ($ausfall[$nr]['zahl'] >= BM_SPERRE_AB) {
+            bm_log('Geraet ' . (int) $nr . ' antwortet wieder - die Pause ist aufgehoben.');
+        }
+        unset($ausfall[$nr]);
+    }
+}
+
+function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
 {
     $cfg = bm_config();
     $geraete = bm_geraete();
@@ -460,28 +683,45 @@ function bm_durchlauf(&$letzteZellen)
             $eintrag[$feld] = null;
         }
 
+        // Ein Geraet in der Ausfallpause wird uebersprungen. Es behaelt
+        // seinen Fehlertext und gilt weiter als gestoert - es wird nur nicht
+        // erneut angefragt, damit die uebrigen nicht mitwarten muessen.
+        if (bm_gesperrt($nr, $ausfall)) {
+            $eintrag['fehlertext'] = $ausfall[$nr]['text'] . ' (Pause bis zum naechsten Versuch, '
+                . 'noch ' . max(0, BM_SPERRE_DAUER - (time() - $ausfall[$nr]['ts'])) . ' s)';
+            $stoerung = $g['name'] . ': ' . $ausfall[$nr]['text'];
+            $eintrag['OK'] = 0;
+            $eintrag['ALTER'] = 0;
+            $abbild['geraete'][$nr] = $eintrag;
+            continue;
+        }
+
         if ($g['transport'] === 'pylontech_rs485') {
             $erg = bm_abruf_pylontech($g, $pr);
             if (isset($erg['_fehler'])) {
                 $eintrag['fehlertext'] = $erg['_fehler'];
                 $stoerung = $g['name'] . ': ' . $erg['_fehler'];
+                bm_ausfall_merken($nr, $ausfall, $erg['_fehler']);
             } else {
                 foreach ($erg['werte'] as $k => $v) {
                     $eintrag[$k] = $v;
                 }
                 $eintrag['module'] = $erg['module'];
                 $eintrag['ok'] = 1;
+                bm_ausfall_loeschen($nr, $ausfall);
             }
         } else {
             $erg = bm_abruf_modbus($g, $pr, $tmo);
             if (isset($erg['_fehler'])) {
                 $eintrag['fehlertext'] = $erg['_fehler'];
                 $stoerung = $g['name'] . ': ' . $erg['_fehler'];
+                bm_ausfall_merken($nr, $ausfall, $erg['_fehler']);
             } else {
                 foreach ($erg['werte'] as $k => $v) {
                     $eintrag[$k] = $v;
                 }
                 $eintrag['ok'] = 1;
+                bm_ausfall_loeschen($nr, $ausfall);
 
                 // Zelldaten seltener holen: sie kosten bei BYD fuenf
                 // zusaetzliche Anforderungen und eine Wartezeit.
@@ -586,13 +826,24 @@ function bm_durchlauf(&$letzteZellen)
     }
 
     $abbild['ok'] = ($geraete && $okZahl === count($geraete)) ? 1 : 0;
-    bm_json_schreiben(bm_paths()['datadir'] . '/loxone.json', $abbild);
+    // Das Ergebnis des Schreibens wird ausgewertet. Ohne diese Pruefung
+    // bliebe das Abbild fuer Loxone stumm auf dem alten Stand stehen, wenn
+    // json_encode an einem ungueltigen Byte scheitert - etwa an einer
+    // Fehlermeldung des Betriebssystems in einer Nicht-UTF-8-Umgebung. Der
+    // Miniserver bekaeme immer aeltere Werte, ohne dass irgendwo etwas davon
+    // zu lesen waere.
+    if (!bm_json_schreiben(bm_paths()['datadir'] . '/loxone.json', $abbild)) {
+        bm_log_gebremst('abbild_schreiben',
+            'Das Abbild loxone.json liess sich NICHT schreiben. Der Miniserver bekommt '
+            . 'weiterhin die zuletzt gespeicherten Werte - deren Feld ALTER waechst.', 600);
+    }
     bm_json_schreiben(bm_paths()['datadir'] . '/zustand.json', array(
         'ts'     => time(),
         'fehler' => $stoerung,
         'ok'     => $okZahl,
         'gesamt' => count($geraete),
     ));
+    bm_tmp_aufraeumen(bm_paths()['datadir']);
 
     if (!empty($cfg['mqtt_ein'])) {
         bm_veroeffentlichen($abbild, (string) $cfg['mqtt_topic']);
@@ -738,16 +989,17 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
         if ($g['transport'] === 'pylontech_rs485') {
             return array(0, bm_t('DIENST.ROH_SERIELL'));
         }
-        $s = bm_verbinden($g, (int) $cfg['zeitueberschreitung']);
+        $s = bm_verbindung_holen($g, (int) $cfg['zeitueberschreitung'], true);
         if (is_array($s)) {
+            bm_verbindung_verwerfen($g);
             return array(0, $s['_fehler']);
         }
         $start = isset($befehl['start']) ? (int) $befehl['start'] : 0;
         $anzahl = max(1, min(64, isset($befehl['anzahl']) ? (int) $befehl['anzahl'] : 8));
         $fc = (isset($befehl['fc']) && (int) $befehl['fc'] === 4) ? 4 : 3;
         $regs = bm_register_lesen($s, $g, $fc, $start, $anzahl);
-        fclose($s);
         if (isset($regs['_fehler'])) {
+            bm_verbindung_verwerfen($g);
             return array(0, $regs['_fehler']);
         }
         $zeilen = array();
@@ -858,16 +1110,19 @@ function bm_dienst_schleife($einmal = false)
 
     $letzteZellen = array();
     $letzteSchreibzeit = array();
+    $ausfall = array();
     $naechster = 0;
 
     while ($bm_laeuft) {
-        if (function_exists('pcntl_signal_dispatch')) {
+        // Ohne asynchrone Signale (sehr alte PHP-Fassung) hier nachsehen.
+        // Mit ihnen ist der Aufruf ueberfluessig, schadet aber nicht.
+        if (!function_exists('pcntl_async_signals') && function_exists('pcntl_signal_dispatch')) {
             pcntl_signal_dispatch();
         }
         $cfg = bm_config();
         $sofort = bm_warteschlange($letzteSchreibzeit);
         if ($sofort || time() >= $naechster) {
-            bm_durchlauf($letzteZellen);
+            bm_durchlauf($letzteZellen, $ausfall);
             $naechster = time() + max(5, (int) $cfg['intervall']);
         }
         if ($einmal) {
@@ -890,6 +1145,7 @@ function bm_dienst_schleife($einmal = false)
             bm_soll_loeschen($nr);
         }
     }
+    bm_verbindungen_schliessen();
     bm_log('Dienst beendet.');
     return 0;
 }
@@ -1083,6 +1339,119 @@ function bm_selbsttest()
               . ' (erwartet 100000), Maske 0x000F von 0xFFFE = ' . $t3 . ' (erwartet 14)';
     if (!$umOk) {
         $fehler++;
+    }
+
+    /* --- Die vier Stellen, an denen 0.9.0 stillschweigend das Falsche tat.
+     *
+     * Alle vier lassen sich ohne Geraet pruefen, und alle vier sind so
+     * beschaffen, dass ein Rueckfall im Betrieb nicht auffiele: das
+     * Ergebnis waere nicht 'Fehler', sondern 'Zahl' - nur die falsche. */
+    $zeilen[] = '';
+    $zeilen[] = 'Schutz vor gestoerten Daten (neu in 0.9.1):';
+
+    // 1. Der Pylontech-Parser darf nicht ueber das Ende hinauslesen.
+    //    Nachgestellt wird genau der Fall aus dem Befund: ein Stoerbyte 0xFF
+    //    als Zahl der Temperaturfuehler.
+    $stoer = "\x00\x01"                    // Kennbyte, 1 Modul
+           . "\x02" . "\x0C\xE4\x0C\xE6"   // 2 Zellen a 3300/3302 mV
+           . "\xFF";                       // 255 Temperaturfuehler - Stoerbyte
+    $pylOk = false;
+    $pylMeldung = '';
+    $g0 = array('geraetedatei' => '', 'baud' => 0, 'unit' => 0, 'nennkapaz' => 0.0);
+    if (function_exists('bm_u8')) {
+        $pos = 5;
+        $zahl = bm_u8($stoer, $pos);
+        $platzt = ($pos + $zahl * 2) > strlen($stoer);
+        // Weiterlesen muss scheitern und sich merken, dass es gescheitert ist
+        $p2 = $pos;
+        for ($t = 0; $t < $zahl; $t++) {
+            bm_s16($stoer, $p2);
+        }
+        $pylOk = ($zahl === 255) && $platzt && bm_pyl_ende($p2);
+        $pylMeldung = 'gelesene Fuehlerzahl ' . $zahl . ', Ueberlauf erkannt: '
+                    . ($platzt ? 'ja' : 'NEIN') . ', Lesezeiger meldet Ende: '
+                    . (bm_pyl_ende($p2) ? 'ja' : 'NEIN');
+    }
+    $zeilen[] = ($pylOk ? '[OK]   ' : '[FEHL] ') . 'Pylontech: Stoerbyte 0xFF als Fuehlerzahl '
+              . 'wird abgefangen (' . $pylMeldung . ')';
+    if (!$pylOk) {
+        $fehler++;
+    }
+    // Gegenprobe am ganzen Parser: er muss einen Fehler MELDEN, nicht Zahlen
+    // erfinden. bm_abruf_pylontech spricht selbst mit der Schnittstelle,
+    // deshalb wird hier nur der Rahmen geprueft, den es dafuer braucht.
+    $zeilen[] = '[INFO] Die Laengenpruefungen greifen an sechs Stellen je Modul: Zellzahl, '
+              . 'Zellspannungen, Fuehlerzahl, Temperaturen, Kapazitaeten, erweiterte Kapazitaet';
+
+    // 2. Zeilenumbrueche duerfen nicht ins UDP-Gateway.
+    $roh = "Fehler in Zeile 1\nund Zeile 2\r\nund\tnoch was";
+    $sauber = bm_mqtt_wert_saeubern($roh);
+    $mqttOk = (strpos($sauber, "\n") === false && strpos($sauber, "\r") === false
+               && strpos($sauber, "\t") === false && $sauber !== '');
+    $zeilen[] = ($mqttOk ? '[OK]   ' : '[FEHL] ') . 'MQTT: Zeilenumbrueche werden entfernt -> "'
+              . $sauber . '"';
+    if (!$mqttOk) {
+        $fehler++;
+    }
+
+    // 3. Ungueltiges UTF-8 darf json_encode nicht zu Fall bringen.
+    $krumm = "stty: ung\xFCltiges Argument";
+    $glatt = bm_text_sauber($krumm);
+    $utfOk = (preg_match('//u', $glatt) === 1) && (json_encode(array('t' => $glatt)) !== false);
+    $zeilen[] = ($utfOk ? '[OK]   ' : '[FEHL] ') . 'Fremder Text wird UTF-8-tauglich gemacht -> "'
+              . $glatt . '"';
+    if (!$utfOk) {
+        $fehler++;
+    }
+
+    // 4. Unteilbares Schreiben mit eindeutiger Nebendatei.
+    $probe = $p['datadir'] . '/selbsttest.json';
+    $schreibOk = bm_json_schreiben($probe, array('a' => 1, 'b' => 'Grüße'));
+    $gelesen = $schreibOk ? bm_json_lesen($probe) : array();
+    $kaputt = bm_json_schreiben($probe, array('x' => "\xFF\xFE roh"));
+    $danach = bm_json_lesen($probe);
+    $atomOk = $schreibOk && isset($gelesen['a']) && $gelesen['a'] === 1
+              && $kaputt === false && isset($danach['a']) && $danach['a'] === 1;
+    $zeilen[] = ($atomOk ? '[OK]   ' : '[FEHL] ') . 'Unteilbares Schreiben: gueltiges JSON geht '
+              . 'durch, ungueltiges wird abgelehnt und laesst den alten Inhalt stehen';
+    if (!$atomOk) {
+        $fehler++;
+    }
+    @unlink($probe);
+    $liegen = count((array) glob($p['datadir'] . '/*.tmp.*'));
+    $zeilen[] = ($liegen === 0 ? '[OK]   ' : '[WARN] ') . 'Liegengebliebene Nebendateien: ' . $liegen;
+
+    // 5. Signalbehandlung
+    if (function_exists('pcntl_async_signals')) {
+        $zeilen[] = '[OK]   Asynchrone Signale verfuegbar - SIGTERM wirkt auch waehrend eines '
+                  . 'laufenden Abrufs, nicht erst am Ende der Schleife';
+    } else {
+        $zeilen[] = '[WARN] pcntl_async_signals fehlt (PHP aelter als 7.1). Der Dienst sieht '
+                  . 'dann nur einmal je Schleifendurchlauf nach Signalen.';
+    }
+
+    // 6. Serielle Schnittstellen
+    if (function_exists('bm_serielle_geraete')) {
+        $ser = bm_serielle_geraete();
+        $stabil = 0;
+        foreach ($ser as $si) {
+            if ($si['stabil']) {
+                $stabil++;
+            }
+        }
+        $zeilen[] = '[INFO] Serielle Schnittstellen gefunden: ' . count($ser)
+                  . ' (davon ' . $stabil . ' mit gleichbleibendem Namen unter /dev/serial/by-id/)';
+        foreach ($geraete as $nr => $g) {
+            if ($g['transport'] !== 'pylontech_rs485') {
+                continue;
+            }
+            $besser = bm_serielle_empfehlung($g['geraetedatei']);
+            if ($besser !== '') {
+                $zeilen[] = '[WARN]      Speicher ' . $nr . ' steht auf ' . $g['geraetedatei']
+                          . '. Dieser Name kann sich nach einem Neustart auf einen anderen '
+                          . 'Adapter beziehen. Gleichbleibend waere: ' . $besser;
+            }
+        }
     }
 
     $zeilen[] = '';

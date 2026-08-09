@@ -442,15 +442,15 @@ if ($bm_rahmen) {
      Reiter verlinkbar, Eingaben in anderen Reitern gehen nicht verloren, und
      faellt das Skript aus, ist die Seite weiterhin bedienbar. -->
 <div class="sm-tabs">
-	<a class="sm-tab" data-ziel="tab-settings" href="index.php?form=settings"><?= bm_e(bm_t('REITER.EINSTELLUNGEN')) ?></a>
-	<a class="sm-tab" data-ziel="tab-mqtt"     href="index.php?form=mqtt">MQTT</a>
-	<a class="sm-tab" data-ziel="tab-loxone"   href="index.php?form=loxone"><?= bm_e(bm_t('REITER.LOXONE')) ?></a>
-	<a class="sm-tab" data-ziel="tab-test"     href="index.php?form=test"><?= bm_e(bm_t('REITER.TEST')) ?></a>
-	<a class="sm-tab" data-ziel="tab-log"      href="index.php?form=log"><?= bm_e(bm_t('REITER.LOG')) ?></a>
+	<a class="sm-tab<?= $bm_tab === 'tab-settings' ? ' sm-active' : '' ?>" data-ziel="tab-settings" href="index.php?form=settings"><?= bm_e(bm_t('REITER.EINSTELLUNGEN')) ?></a>
+	<a class="sm-tab<?= $bm_tab === 'tab-mqtt' ? ' sm-active' : '' ?>" data-ziel="tab-mqtt"     href="index.php?form=mqtt"><?= bm_e(bm_t('REITER.MQTT')) ?></a>
+	<a class="sm-tab<?= $bm_tab === 'tab-loxone' ? ' sm-active' : '' ?>" data-ziel="tab-loxone"   href="index.php?form=loxone"><?= bm_e(bm_t('REITER.LOXONE')) ?></a>
+	<a class="sm-tab<?= $bm_tab === 'tab-test' ? ' sm-active' : '' ?>" data-ziel="tab-test"     href="index.php?form=test"><?= bm_e(bm_t('REITER.TEST')) ?></a>
+	<a class="sm-tab<?= $bm_tab === 'tab-log' ? ' sm-active' : '' ?>" data-ziel="tab-log"      href="index.php?form=log"><?= bm_e(bm_t('REITER.LOG')) ?></a>
 </div>
 
 <!-- ================= Reiter: Einstellungen ================= -->
-<div class="sm-seite" id="tab-settings">
+<div class="sm-seite<?= $bm_tab === 'tab-settings' ? ' sm-active' : '' ?>" id="tab-settings">
 
 <h2><?= bm_e(bm_t('EINST.H_DIENST')) ?></h2>
 <p class="sm-hilfe"><?= bm_t('EINST.DIENST_ERKLAERUNG') ?></p>
@@ -510,7 +510,7 @@ for ($bm_i = 0; $bm_i < 6; $bm_i++) {
 <td><input data-role="none" type="text" name="g_ip[]" value="<?= bm_e($bm_v('ip')) ?>" size="13"></td>
 <td><input data-role="none" type="text" name="g_port[]" value="<?= bm_e($bm_v('port')) ?>" size="4"></td>
 <td><input data-role="none" type="text" name="g_unit[]" value="<?= bm_e($bm_v('unit')) ?>" size="3"></td>
-<td><input data-role="none" type="text" name="g_dev[]" value="<?= bm_e($bm_v('geraetedatei')) ?>" size="11"></td>
+<td><input data-role="none" type="text" name="g_dev[]" value="<?= bm_e($bm_v('geraetedatei')) ?>" size="11" list="bm_serielle"></td>
 <td><input data-role="none" type="text" name="g_baud[]" value="<?= bm_e($bm_v('baud')) ?>" size="5"></td>
 <td><input data-role="none" type="text" name="g_nennkapaz[]" value="<?= bm_e($bm_v('nennkapaz')) ?>" size="4"></td>
 <td><input data-role="none" type="text" name="g_max_laden[]" value="<?= bm_e($bm_v('max_laden')) ?>" size="4"></td>
@@ -526,6 +526,46 @@ for ($bm_i = 0; $bm_i < 6; $bm_i++) {
 </tr>
 <?php } ?>
 </table>
+<?php
+/* Die tatsaechlich vorhandenen seriellen Schnittstellen zur Auswahl anbieten.
+ *
+ * /dev/ttyUSB0 ist keine Eigenschaft des Adapters, sondern eine
+ * Reihenfolge - sie richtet sich danach, welches Geraet beim Hochfahren
+ * zuerst erkannt wurde. Steckt neben dem RS485-Adapter noch ein EnOcean-
+ * oder Zigbee-Stick, kann der Speicher nach jedem Neustart woanders liegen,
+ * und das Plugin meldet 'keine Antwort', obwohl nichts kaputt ist.
+ *
+ * Die Namen unter /dev/serial/by-id/ haengen am Geraet selbst und bleiben
+ * gleich. Sie stehen deshalb oben in der Liste. Umgestellt wird nichts von
+ * selbst: was hier eingetragen ist, bleibt stehen, bis jemand es aendert. */
+$bm_ser = function_exists('bm_serielle_geraete') ? bm_serielle_geraete() : array();
+?>
+<?php if ($bm_ser) { ?>
+<datalist id="bm_serielle">
+<?php foreach ($bm_ser as $bm_sp => $bm_si) { ?>
+    <option value="<?= bm_e($bm_sp) ?>"><?= bm_e($bm_si['stabil'] ? bm_t('EINST.SER_STABIL') : bm_t('EINST.SER_WECHSELND')) ?><?= $bm_si['zeigt'] !== '' ? ' → ' . bm_e($bm_si['zeigt']) : '' ?></option>
+<?php } ?>
+</datalist>
+<div class="sm-hilfe"><b><?= bm_e(bm_t('EINST.SER_H_TITEL')) ?></b> <?= bm_t('EINST.SER_H_TEXT') ?>
+<?php
+$bm_hinweise = array();
+foreach ($bm_geraete as $bm_gn => $bm_gg) {
+    if ($bm_gg['transport'] !== 'pylontech_rs485') {
+        continue;
+    }
+    $bm_besser = function_exists('bm_serielle_empfehlung')
+        ? bm_serielle_empfehlung($bm_gg['geraetedatei']) : '';
+    if ($bm_besser !== '') {
+        $bm_hinweise[] = sprintf(bm_t('EINST.SER_H_EMPFEHLUNG'), (int) $bm_gn,
+            bm_e($bm_gg['geraetedatei']), bm_e($bm_besser));
+    }
+}
+foreach ($bm_hinweise as $bm_h) {
+    echo '<br>' . $bm_h;
+}
+?>
+</div>
+<?php } ?>
 <div class="sm-hilfe"><?= bm_t('EINST.GERAETE_HILFE') ?></div>
 
 <h2><?= bm_e(bm_t('EINST.H_TAKT')) ?></h2>
@@ -634,7 +674,7 @@ for ($bm_i = 0; $bm_i < 6; $bm_i++) {
 </div>
 
 <!-- ================= Reiter: MQTT ================= -->
-<div class="sm-seite" id="tab-mqtt">
+<div class="sm-seite<?= $bm_tab === 'tab-mqtt' ? ' sm-active' : '' ?>" id="tab-mqtt">
 <h2><?= bm_e(bm_t('MQTT.H_ZUSTAND')) ?></h2>
 <p class="sm-hilfe"><?= bm_t('MQTT.GATEWAY_ERKLAERUNG') ?></p>
 <?php if (!$bm_mqtt['gefunden']) { ?>
@@ -673,7 +713,7 @@ for ($bm_i = 0; $bm_i < 6; $bm_i++) {
 </div>
 
 <!-- ================= Reiter: Einbindung in Loxone ================= -->
-<div class="sm-seite" id="tab-loxone">
+<div class="sm-seite<?= $bm_tab === 'tab-loxone' ? ' sm-active' : '' ?>" id="tab-loxone">
 <h2><?= bm_e(bm_t('LOX.H_TITEL')) ?></h2>
 <p><?= bm_t('LOX.EINLEITUNG') ?></p>
 
@@ -857,7 +897,7 @@ function bm_bausteine()
 </div>
 
 <!-- ================= Reiter: Test ================= -->
-<div class="sm-seite" id="tab-test">
+<div class="sm-seite<?= $bm_tab === 'tab-test' ? ' sm-active' : '' ?>" id="tab-test">
 <h2><?= bm_e(bm_t('TEST.H_SELBSTPRUEFUNG')) ?></h2>
 <p class="sm-hilfe"><?= bm_t('TEST.EINLEITUNG') ?></p>
 <table class="sm-tbl">
@@ -978,7 +1018,7 @@ function bm_bausteine()
 </div>
 
 <!-- ================= Reiter: Logdateien ================= -->
-<div class="sm-seite" id="tab-log">
+<div class="sm-seite<?= $bm_tab === 'tab-log' ? ' sm-active' : '' ?>" id="tab-log">
 <h2><?= bm_e(bm_t('LOG.H_TITEL')) ?></h2>
 <?php
 if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {

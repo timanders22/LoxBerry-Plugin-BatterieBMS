@@ -508,24 +508,67 @@ function bm_json_lesen($pfad)
     return is_array($d) ? $d : array();
 }
 
-/** Erst in eine Nebendatei, dann umbenennen - so liest niemand eine halb
- *  geschriebene Datei. */
+/**
+ * Erst in eine Nebendatei, dann umbenennen - so liest niemand eine halb
+ * geschriebene Datei.
+ *
+ * Der Name der Nebendatei traegt seit 0.9.1 die Prozessnummer und einen
+ * Zufallsanteil. Vorher hiess sie schlicht <datei>.tmp, und die ist NICHT
+ * eindeutig: der Dienst schreibt loxone.json im Takt, die Oberflaeche kann
+ * im selben Augenblick speichern. Beide schrieben dann in dieselbe
+ * Nebendatei, und was am Ende umbenannt wurde, war eine Mischung aus zwei
+ * JSON-Dokumenten - also keines.
+ *
+ * Warum das Ergebnis von json_encode geprueft wird: bei ungueltigem UTF-8
+ * liefert es false, und file_put_contents macht daraus eine LEERE Datei -
+ * mit Rueckgabe 0, also nicht false. Die Pruefung 'geschrieben === false'
+ * greift dann nie, und der Verlust wird als Erfolg gemeldet.
+ */
 function bm_json_schreiben($pfad, $daten, $rechte = null)
 {
     $ordner = dirname($pfad);
     if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) {
         return false;
     }
-    $tmp = $pfad . '.tmp';
     $json = json_encode($daten, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    if ($json === false || @file_put_contents($tmp, $json) === false) {
+    if ($json === false) {
+        // Nicht still scheitern. Ein einzelnes ungueltiges Byte - etwa aus
+        // der Ausgabe von stty in einer Nicht-UTF-8-Umgebung - liesse sonst
+        // das Abbild fuer Loxone auf ewig auf dem alten Stand stehen, ohne
+        // dass irgendwo etwas davon zu lesen waere.
+        bm_log_gebremst('json_' . basename($pfad),
+            'Die Datei ' . basename($pfad) . ' liess sich nicht als JSON schreiben: '
+            . json_last_error_msg() . '. Der bisherige Inhalt bleibt unveraendert.', 600);
+        return false;
+    }
+    $tmp = $pfad . '.tmp.' . getmypid() . '.' . bin2hex(random_bytes(4));
+    if (@file_put_contents($tmp, $json) !== strlen($json)) {
         @unlink($tmp);
         return false;
     }
     if ($rechte !== null) {
         @chmod($tmp, $rechte);
     }
-    return @rename($tmp, $pfad);
+    if (!@rename($tmp, $pfad)) {
+        @unlink($tmp);
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Liegengebliebene Nebendateien wegraeumen.
+ *
+ * Ein zur Unzeit abgeschossener Prozess hinterlaesst eine .tmp.*-Datei. Eine
+ * einzelne stoert nicht, tausend schon.
+ */
+function bm_tmp_aufraeumen($ordner, $alter = 3600)
+{
+    foreach ((array) glob($ordner . '/*.tmp.*') as $t) {
+        if (is_file($t) && (time() - filemtime($t)) > $alter) {
+            @unlink($t);
+        }
+    }
 }
 
 function bm_config()
@@ -641,13 +684,57 @@ function bm_token_erzeugen($laenge = 24)
     return $t;
 }
 
+/**
+ * Das Aktionstoken holen, bei Bedarf erzeugen.
+ *
+ * Die Erzeugung liegt hinter einer Dateisperre. Ohne sie koennen zwei
+ * gleichzeitige Aufrufe - zwei offene Reiter der Oberflaeche genuegen - je
+ * ein eigenes Token erzeugen und nacheinander speichern. Der zuerst
+ * angezeigte Wert waere dann schon ueberholt, und die daraus gebaute
+ * Loxone-Vorlage traege ein Token, das nicht mehr gilt. Der Miniserver
+ * bekaeme spaeter HTTP 403 und niemand wuesste, warum.
+ *
+ * Nach dem Sperren wird die Konfiguration ERNEUT gelesen: der Prozess, der
+ * die Sperre vor uns hatte, hat womoeglich schon eines geschrieben.
+ *
+ * Der Endpunkt index.php erzeugt uebrigens NIE ein Token - er liest nur und
+ * antwortet mit 403, solange keines da ist. Diese Funktion laeuft
+ * ausschliesslich in der angemeldeten Oberflaeche.
+ */
 function bm_token()
 {
     $cfg = bm_config();
-    if (trim((string) $cfg['aktionstoken']) === '') {
+    if (trim((string) $cfg['aktionstoken']) !== '') {
+        return (string) $cfg['aktionstoken'];
+    }
+    $p = bm_paths();
+    if (!is_dir($p['datadir'])) {
+        @mkdir($p['datadir'], 0775, true);
+    }
+    $sperre = $p['datadir'] . '/token.lock';
+    $fp = @fopen($sperre, 'c+');
+    if ($fp === false) {
+        // Ohne Sperre lieber trotzdem eines erzeugen als gar keines - ohne
+        // Token laeuft der Miniserver-Endpunkt ueberhaupt nicht.
+        bm_log('Die Sperrdatei ' . $sperre . ' liess sich nicht anlegen - das Token '
+             . 'wird ohne Sperre erzeugt.');
         $cfg['aktionstoken'] = bm_token_erzeugen();
         bm_config_speichern($cfg);
+        return (string) $cfg['aktionstoken'];
     }
+    if (@flock($fp, LOCK_EX)) {
+        $cfg = bm_config();                      // zweiter Blick unter der Sperre
+        if (trim((string) $cfg['aktionstoken']) === '') {
+            $cfg['aktionstoken'] = bm_token_erzeugen();
+            if (!bm_config_speichern($cfg)) {
+                bm_log('Das neu erzeugte Aktionstoken liess sich NICHT speichern. '
+                     . 'Beim naechsten Aufruf wird ein anderes erzeugt - die '
+                     . 'Loxone-Adressen muessten dann erneut uebernommen werden.');
+            }
+        }
+        @flock($fp, LOCK_UN);
+    }
+    fclose($fp);
     return (string) $cfg['aktionstoken'];
 }
 
@@ -678,18 +765,49 @@ function bm_alter()
 
 /* ---------------- Protokollierung ---------------- */
 
+/**
+ * Eine Zeile ins Protokoll.
+ *
+ * LOCK_EX ist hier Pflicht, nicht Zierde: in diese eine Datei schreiben der
+ * Dienst, der Miniserver-Endpunkt, die Oberflaeche und das Startskript -
+ * teils gleichzeitig. Ohne Sperre koennen sich zwei Zeilen ineinander
+ * schieben, und im Log stehen dann Bruchstuecke, an denen die Fehlersuche
+ * scheitert.
+ *
+ * Auch die Rotation braucht die Sperre. Sie ist Lesen-Aendern-Schreiben:
+ * ohne Sperre kann ein zweiter Prozess zwischen dem Lesen und dem
+ * Zurueckschreiben Zeilen anhaengen, die dann verloren sind - oder er
+ * rotiert gleichzeitig und die Datei wird doppelt gekuerzt.
+ */
 function bm_log($text)
 {
     $p = bm_paths();
     if (!is_dir($p['logdir'])) {
         @mkdir($p['logdir'], 0775, true);
     }
+    $zeile = '[' . date('Y-m-d H:i:s') . '] ' . $text . "\n";
+
     if (is_file($p['log']) && filesize($p['log']) > 512000) {
-        // Rotation: die letzten 400 Zeilen behalten
-        $rest = array_slice(file($p['log'], FILE_IGNORE_NEW_LINES) ?: array(), -400);
-        @file_put_contents($p['log'], implode("\n", $rest) . "\n");
+        $fp = @fopen($p['log'], 'c+');
+        if ($fp !== false) {
+            if (@flock($fp, LOCK_EX)) {
+                // Unter der Sperre neu bemessen - ein anderer Prozess kann
+                // inzwischen rotiert haben.
+                clearstatcache(true, $p['log']);
+                if (filesize($p['log']) > 512000) {
+                    $inhalt = stream_get_contents($fp, -1, 0);
+                    $rest = array_slice(explode("\n", (string) $inhalt), -400);
+                    ftruncate($fp, 0);
+                    rewind($fp);
+                    fwrite($fp, implode("\n", $rest) . "\n");
+                    fflush($fp);
+                }
+                @flock($fp, LOCK_UN);
+            }
+            fclose($fp);
+        }
     }
-    @file_put_contents($p['log'], '[' . date('Y-m-d H:i:s') . '] ' . $text . "\n", FILE_APPEND);
+    @file_put_contents($p['log'], $zeile, FILE_APPEND | LOCK_EX);
 }
 
 /** Dieselbe Meldung hoechstens einmal je Zeitfenster - sonst wird die
@@ -737,8 +855,69 @@ function bm_dienst($befehl)
     }
     $ausgabe = array();
     $code = 0;
-    @exec(escapeshellcmd($skript) . ' ' . escapeshellarg($befehl) . ' 2>&1', $ausgabe, $code);
+    // escapeshellarg, nicht escapeshellcmd: letzteres maskiert nur einzelne
+    // Sonderzeichen und laesst ein Leerzeichen im Pfad unangetastet - der
+    // Aufruf zerfiele dann in zwei Worte. Hausregel aus AudiConnect.
+    @exec(escapeshellarg($skript) . ' ' . escapeshellarg($befehl) . ' 2>&1', $ausgabe, $code);
     return array($code === 0 ? 1 : 0, implode("\n", $ausgabe));
+}
+
+/* ==================================================================
+ * Serielle Schnittstellen finden
+ *
+ * /dev/ttyUSB0 ist keine Zusage, sondern eine Reihenfolge: sie richtet sich
+ * danach, welcher Adapter beim Hochfahren zuerst erkannt wurde. Steckt neben
+ * dem RS485-Adapter noch ein EnOcean- oder Zigbee-Stick, kann der Speicher
+ * nach jedem Neustart woanders liegen - und das Plugin meldet dann
+ * 'keine Antwort', obwohl alles heil ist.
+ *
+ * Die Namen unter /dev/serial/by-id/ haengen dagegen am Geraet selbst und
+ * bleiben gleich. Die Oberflaeche bietet sie deshalb zur Auswahl an.
+ * ================================================================== */
+function bm_serielle_geraete()
+{
+    $out = array();
+    foreach (array('/dev/serial/by-id') as $ordner) {
+        foreach ((array) @glob($ordner . '/*') as $pfad) {
+            $ziel = @readlink($pfad);
+            $out[$pfad] = array(
+                'pfad'   => $pfad,
+                'zeigt'  => $ziel ? basename($ziel) : '',
+                'stabil' => 1,
+            );
+        }
+    }
+    foreach ((array) @glob('/dev/tty{USB,ACM,AMA,S}[0-9]*', GLOB_BRACE) as $pfad) {
+        if (!isset($out[$pfad])) {
+            $out[$pfad] = array('pfad' => $pfad, 'zeigt' => '', 'stabil' => 0);
+        }
+    }
+    ksort($out);
+    return $out;
+}
+
+/**
+ * Zu einem klassischen Namen den gleichwertigen stabilen suchen.
+ * Rueckgabe: der by-id-Pfad oder '' - es wird NICHTS umgestellt, nur
+ * vorgeschlagen. Ein Pfad, den der Anwender eingetragen hat, wird nicht
+ * hinter seinem Ruecken ausgetauscht.
+ */
+function bm_serielle_empfehlung($pfad)
+{
+    $pfad = trim((string) $pfad);
+    if ($pfad === '' || strpos($pfad, '/dev/serial/by-id/') === 0) {
+        return '';
+    }
+    $echt = @realpath($pfad);
+    if ($echt === false) {
+        return '';
+    }
+    foreach ((array) @glob('/dev/serial/by-id/*') as $kand) {
+        if (@realpath($kand) === $echt) {
+            return $kand;
+        }
+    }
+    return '';
 }
 
 /* ---------------- Befehlswarteschlange ----------------
@@ -848,8 +1027,50 @@ function bm_crc16($daten)
  * antwortet) oder EHOSTUNREACH (kein Weg dorthin) - und die wahrscheinlichste
  * Ursache gehoert dazugesagt.
  */
+/**
+ * Fremden Text so zurechtmachen, dass er durch json_encode passt.
+ *
+ * Alles, was von aussen kommt - die Ausgabe eines Systembefehls, ein
+ * Fehlertext des Betriebssystems, ein Geraetename aus einer Antwort - kann
+ * Bytes enthalten, die kein gueltiges UTF-8 sind. Ein einziges davon laesst
+ * json_encode false zurueckgeben, und dann laesst sich weder das Abbild
+ * schreiben noch der JSON-Endpunkt beantworten.
+ *
+ * Deshalb wird solcher Text an der EINTRITTSSTELLE bereinigt, nicht erst
+ * beim Ausgeben. Zusaetzlich fliegen Steuerzeichen heraus: sie haetten in
+ * einer Meldung nichts verloren und wuerden ueber den UDP-Weg zum
+ * MQTT-Gateway ohnehin stoeren.
+ */
+function bm_text_sauber($text, $hoechstens = 400)
+{
+    $t = (string) $text;
+    if (!preg_match('//u', $t)) {
+        if (function_exists('iconv')) {
+            $neu = @iconv('WINDOWS-1252', 'UTF-8//TRANSLIT', $t);
+            if ($neu !== false) {
+                $t = $neu;
+            }
+        }
+        if (!preg_match('//u', $t)) {
+            $t = preg_replace('/[\x80-\xFF]/', '?', $t);
+        }
+    }
+    $t = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $t);
+    $t = trim(preg_replace('/\s+/u', ' ', $t));
+    if ($hoechstens > 0 && strlen($t) > $hoechstens) {
+        $t = substr($t, 0, $hoechstens);
+        // Nicht mitten in einem Mehrbyte-Zeichen abschneiden.
+        while ($t !== '' && !preg_match('//u', $t)) {
+            $t = substr($t, 0, -1);
+        }
+        $t .= ' …';
+    }
+    return $t;
+}
+
 function bm_fehlertext($text, $errno = 0)
 {
+    $text = bm_text_sauber($text);
     $t = strtolower((string) $text);
     if ($errno === 111 || strpos($t, 'connection refused') !== false) {
         return 'Verbindung abgewiesen: der Rechner ist erreichbar, aber auf diesem Port '
@@ -888,6 +1109,97 @@ function bm_verbinden(array $g, $tmo)
     }
     stream_set_timeout($s, (int) $tmo, 0);
     return $s;
+}
+
+/* ==================================================================
+ * Offene Verbindungen wiederverwenden
+ *
+ * Bis 0.9.0 oeffnete JEDER Abruf eine eigene TCP-Verbindung und schloss sie
+ * gleich wieder. Bei der BYD-Box hiess das: bm_abruf_modbus() macht auf,
+ * liest, macht zu - und bm_zellen_byd() macht im selben Atemzug wieder auf.
+ * Die BCU laesst aber nur EINE Verbindung gleichzeitig zu und gibt die alte
+ * nicht in derselben Millisekunde frei; der zweite Verbindungsaufbau lief
+ * deshalb regelmaessig ins Leere, und im Protokoll stand 'Verbindung
+ * abgewiesen', obwohl niemand sonst mit der Box sprach.
+ *
+ * Deshalb wird eine offene Verbindung je Geraet vorgehalten und ueber die
+ * Durchlaeufe hinweg weiterbenutzt.
+ *
+ * Zur Einordnung der oft genannten Sorge vor TIME_WAIT: bei dem
+ * voreingestellten Takt von 30 s waren das rund zwei Verbindungen je Minute.
+ * Das erschoepft keinen TCP-Stapel. Der Gewinn liegt woanders - im Wegfall
+ * des zweiten Verbindungsaufbaus bei Geraeten, die nur einen zulassen, und
+ * in der geringeren Verzoegerung je Durchlauf.
+ *
+ * Eine wiederverwendete Verbindung kann natuerlich unbemerkt tot sein: das
+ * Geraet startet neu, eine Firewall raeumt den Eintrag ab. Darum gilt die
+ * Regel: schlaegt eine Anforderung auf einer wiederverwendeten Verbindung
+ * fehl, wird sie verworfen und GENAU EINMAL frisch aufgebaut. Erst wenn auch
+ * das misslingt, ist es ein Fehler.
+ * ================================================================== */
+
+function &bm_verbindungsliste()
+{
+    static $liste = array();
+    return $liste;
+}
+
+function bm_verbindungsschluessel(array $g)
+{
+    return $g['transport'] . '|' . $g['ip'] . '|' . (int) $g['port'] . '|' . (int) $g['unit'];
+}
+
+/**
+ * Verbindung zu einem Geraet holen - vorhandene wiederverwenden.
+ * Rueckgabe: Stream oder array('_fehler' => Text).
+ */
+function bm_verbindung_holen(array $g, $tmo, $wiederverwenden = true)
+{
+    $liste = &bm_verbindungsliste();
+    $k = bm_verbindungsschluessel($g);
+    if ($wiederverwenden && isset($liste[$k])) {
+        $s = $liste[$k];
+        if (is_resource($s) && !feof($s)) {
+            return $s;
+        }
+        if (is_resource($s)) {
+            @fclose($s);
+        }
+        unset($liste[$k]);
+    }
+    $s = bm_verbinden($g, $tmo);
+    if (is_array($s)) {
+        return $s;
+    }
+    if ($wiederverwenden) {
+        $liste[$k] = $s;
+    }
+    return $s;
+}
+
+/** Eine Verbindung verwerfen - nach jedem Fehler darauf. */
+function bm_verbindung_verwerfen(array $g)
+{
+    $liste = &bm_verbindungsliste();
+    $k = bm_verbindungsschluessel($g);
+    if (isset($liste[$k])) {
+        if (is_resource($liste[$k])) {
+            @fclose($liste[$k]);
+        }
+        unset($liste[$k]);
+    }
+}
+
+/** Alle offenen Verbindungen schliessen (beim Anhalten des Dienstes). */
+function bm_verbindungen_schliessen()
+{
+    $liste = &bm_verbindungsliste();
+    foreach ($liste as $k => $s) {
+        if (is_resource($s)) {
+            @fclose($s);
+        }
+        unset($liste[$k]);
+    }
 }
 
 /** Genau $anzahl Bytes lesen oder mit einer Meldung aufgeben. */
@@ -1188,7 +1500,15 @@ function bm_seriell_einstellen($geraetedatei, $baud)
     @exec('stty -F ' . escapeshellarg($geraetedatei) . ' ' . (int) $baud
         . ' cs8 -cstopb -parenb -icanon -echo -ixon min 0 time 20 2>&1', $ausgabe, $code);
     if ($code !== 0) {
-        return 'stty konnte die Schnittstelle nicht einstellen: ' . implode(' ', $ausgabe);
+        // Die Ausgabe von stty haengt an der Spracheinstellung des Systems.
+        // Auf einem LoxBerry mit de_DE.ISO-8859-1 kommen von dort Bytes, die
+        // kein UTF-8 sind - und dieser Text wandert als Fehlermeldung in das
+        // Abbild fuer Loxone, das als JSON geschrieben wird. Ein einziges
+        // solches Byte liess bis 0.9.0 json_encode scheitern: das Abbild
+        // blieb stumm auf dem alten Stand, und ?aktion=roh lieferte eine
+        // leere Seite.
+        return 'stty konnte die Schnittstelle nicht einstellen: '
+             . bm_text_sauber(implode(' ', $ausgabe));
     }
     return '';
 }
@@ -1347,11 +1667,32 @@ function bm_mqtt_senden(array $paare, $praefix)
         if ($v === null || $v === '') {
             continue;   // fehlender Wert: nichts senden statt eine erfundene 0
         }
-        $msg = 'publish ' . $praefix . '/' . $k . ' ' . $v;
+        // Der UDP-Eingang des Gateways wertet einen Zeilenumbruch als Ende
+        // des Befehls. Ein mehrzeiliger Wert - etwa eine Fehlermeldung des
+        // Betriebssystems oder die Ausgabe von stty - zerlegt die Uebertragung
+        // deshalb in Bruchstuecke, aus denen das Gateway erfundene Topics
+        // bildet. Auch ein Tabulator hat dort nichts zu suchen: Leerzeichen
+        // trennt Thema und Wert.
+        $wert = str_replace(array("\r\n", "\r", "\n", "\t"), ' ', (string) $v);
+        $wert = trim(preg_replace('/ {2,}/', ' ', $wert));
+        if ($wert === '') {
+            continue;
+        }
+        $msg = 'publish ' . $praefix . '/' . $k . ' ' . $wert;
         @socket_sendto($s, $msg, strlen($msg), 0, '127.0.0.1', $z['udpport']);
     }
     socket_close($s);
     return true;
+}
+
+/**
+ * Dieselbe Bereinigung wie beim Senden - fuer die Selbstpruefung, damit sich
+ * nachweisen laesst, dass sie greift.
+ */
+function bm_mqtt_wert_saeubern($v)
+{
+    $wert = str_replace(array("\r\n", "\r", "\n", "\t"), ' ', (string) $v);
+    return trim(preg_replace('/ {2,}/', ' ', $wert));
 }
 
 /** Alle Themen, die der Dienst veroeffentlicht, mit ihrer Bedeutung. */

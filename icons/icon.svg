@@ -1,45 +1,66 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- Batterie-Heimspeicher (BMS) - Plugin-Symbol.
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="512" height="512" viewBox="0 0 512 512" version="1.1" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg-grad" cx="50%" cy="50%" r="50%" fx="35%" fy="35%">
+      <stop offset="0%" stop-color="#7dc424" />
+      <stop offset="65%" stop-color="#6dac20" />
+      <stop offset="100%" stop-color="#568819" />
+    </radialGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#000000" flood-opacity="0.25"/>
+    </filter>
+  </defs>
 
-     Hausstandard: runde Scheibe in LoxBerry-Gruen #6dac20, Motiv am echten
-     Geraet orientiert, keine fremden Wortmarken oder Logos - auch nicht
-     angedeutet.
+  <!-- Outer Badge Ring -->
+  <circle cx="256" cy="256" r="246" fill="url(#bg-grad)" />
+  <circle cx="256" cy="256" r="232" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="3" />
 
-     Motiv: ein stehender Hausspeicher, wie ihn die Turmbauweise zeigt - eine
-     Steuereinheit oben, darunter gestapelte Batteriemodule. Im mittleren
-     Modul stehen die Zellspannungen als Balken; die niedrigste Zelle ist
-     abgesetzt. Genau darum geht es in diesem Plugin: nicht um die Leistung am
-     Wechselrichter, sondern um den Blick in die einzelne Zelle. -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <circle cx="256" cy="256" r="256" fill="#6dac20"/>
+  <g filter="url(#shadow)" fill="#ffffff">
+    <!-- Main Battery Body -->
+    <!-- Battery Top Terminal / Nipple -->
+    <rect x="232" y="70" width="48" height="16" rx="6" fill="#ffffff" />
 
-  <!-- Steuereinheit (BCU) oben -->
-  <rect x="150" y="86" width="212" height="58" rx="16" ry="16" fill="#ffffff" opacity="0.96"/>
-  <rect x="150" y="86" width="212" height="58" rx="16" ry="16"
-        fill="none" stroke="#3d6412" stroke-width="10"/>
-  <rect x="176" y="106" width="72" height="14" rx="7" ry="7" fill="#3d6412"/>
-  <circle cx="330" cy="115" r="12" fill="#3d6412"/>
+    <!-- Battery Main Outer Frame -->
+    <rect x="176" y="86" width="160" height="205" rx="20" fill="#ffffff" />
 
-  <!-- Modul 1 -->
-  <rect x="150" y="158" width="212" height="72" rx="12" ry="12" fill="#ffffff" opacity="0.96"/>
-  <rect x="150" y="158" width="212" height="72" rx="12" ry="12"
-        fill="none" stroke="#3d6412" stroke-width="10"/>
+    <!-- Inner Cutouts / Charge Cell Bars -->
+    <rect x="191" y="101" width="130" height="38" rx="8" fill="#6dac20" />
+    <rect x="191" y="145" width="130" height="38" rx="8" fill="#6dac20" />
+    <rect x="191" y="189" width="130" height="38" rx="8" fill="#6dac20" />
+    <rect x="191" y="233" width="130" height="38" rx="8" fill="#6dac20" />
 
-  <!-- Modul 2: das aufgeschnittene, mit den Zellspannungen -->
-  <rect x="150" y="244" width="212" height="98" rx="12" ry="12" fill="#ffffff" opacity="0.96"/>
-  <rect x="150" y="244" width="212" height="98" rx="12" ry="12"
-        fill="none" stroke="#3d6412" stroke-width="10"/>
-  <!-- Balken: gleichmaessig hoch bis auf eine abfallende Zelle -->
-  <rect x="176" y="282" width="16" height="42" rx="4" ry="4" fill="#3d6412"/>
-  <rect x="202" y="276" width="16" height="48" rx="4" ry="4" fill="#3d6412"/>
-  <rect x="228" y="280" width="16" height="44" rx="4" ry="4" fill="#3d6412"/>
-  <rect x="254" y="304" width="16" height="20" rx="4" ry="4" fill="#e0620d"/>
-  <rect x="280" y="278" width="16" height="46" rx="4" ry="4" fill="#3d6412"/>
-  <rect x="306" y="282" width="16" height="42" rx="4" ry="4" fill="#3d6412"/>
-  <rect x="332" y="277" width="16" height="47" rx="4" ry="4" fill="#3d6412"/>
+    <!-- Lightning Bolt / Energy Pulse Overlay -->
+    <polygon points="266,105 232,185 258,185 242,270 282,175 254,175" fill="#ffffff" />
 
-  <!-- Modul 3 -->
-  <rect x="150" y="356" width="212" height="72" rx="12" ry="12" fill="#ffffff" opacity="0.96"/>
-  <rect x="150" y="356" width="212" height="72" rx="12" ry="12"
-        fill="none" stroke="#3d6412" stroke-width="10"/>
+    <!-- Left Symbol: Microcontroller / Management Chip -->
+    <g transform="translate(132, 180)">
+      <circle cx="0" cy="0" r="22" fill="#ffffff" />
+      <rect x="-8" y="-8" width="16" height="16" fill="#6dac20" />
+      <line x1="-12" y1="-4" x2="-8" y2="-4" stroke="#6dac20" stroke-width="3" stroke-linecap="round" />
+      <line x1="-12" y1="4" x2="-8" y2="4" stroke="#6dac20" stroke-width="3" stroke-linecap="round" />
+      <line x1="8" y1="-4" x2="12" y2="-4" stroke="#6dac20" stroke-width="3" stroke-linecap="round" />
+      <line x1="8" y1="4" x2="12" y2="4" stroke="#6dac20" stroke-width="3" stroke-linecap="round" />
+      <line x1="-4" y1="-12" x2="-4" y2="-8" stroke="#6dac20" stroke-width="3" stroke-linecap="round" />
+      <line x1="4" y1="-12" x2="4" y2="-8" stroke="#6dac20" stroke-width="3" stroke-linecap="round" />
+      <line x1="-4" y1="8" x2="-4" y2="12" stroke="#6dac20" stroke-width="3" stroke-linecap="round" />
+      <line x1="4" y1="8" x2="4" y2="12" stroke="#6dac20" stroke-width="3" stroke-linecap="round" />
+    </g>
+
+    <!-- Right Symbol: Polarity Gauge (+/-) -->
+    <g transform="translate(380, 180)">
+      <circle cx="0" cy="0" r="22" fill="#ffffff" />
+      <!-- Plus sign -->
+      <line x1="-10" y1="-8" x2="2" y2="-8" stroke="#6dac20" stroke-width="4" stroke-linecap="round" />
+      <line x1="-4" y1="-14" x2="-4" y2="-2" stroke="#6dac20" stroke-width="4" stroke-linecap="round" />
+      <!-- Minus sign -->
+      <line x1="-2" y1="8" x2="10" y2="8" stroke="#6dac20" stroke-width="4" stroke-linecap="round" />
+    </g>
+
+    <!-- Dashed Line -->
+    <path d="M 150 345 L 362 345" stroke="#ffffff" stroke-width="4" stroke-dasharray="6 8" opacity="0.8" />
+  </g>
+
+  <!-- Typography -->
+  <text x="256" y="388" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-weight="900" font-size="29" letter-spacing="1">BMS - BATTERIE</text>
+  <text x="256" y="424" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-weight="bold" font-size="20" letter-spacing="3">LOXBERRY</text>
 </svg>

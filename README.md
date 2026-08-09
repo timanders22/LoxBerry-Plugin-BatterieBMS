@@ -157,6 +157,73 @@ als Knopf erreichbar.
 Vor dem ersten Zwangsbefehl: Rohregister lesen, Werte gegen die
 Herstelleranzeige halten, mit kleiner Leistung anfangen und am Gerät nachsehen.
 
+## Neu in 0.9.1
+
+Eine Durchsicht der Fassung 0.9.0 hat sechs Stellen zutage gefördert, an denen
+das Plugin im Störungsfall stillschweigend das Falsche tat. Alle sechs sind
+korrigiert; keine davon ändert das Verhalten bei heilen Daten.
+
+- **Der Pylontech-Parser liest nicht mehr über das Ende hinaus.** Die Zahl der
+  Temperaturfühler kommt als einzelnes Byte aus dem Datenstrom. Fing die
+  RS485-Leitung ein Störbyte `0xFF` ein, waren das 255 Fühler, und die Schleife
+  las 510 Bytes weit hinter das Ende der Antwort. Anders als man vermuten
+  könnte stürzte PHP dabei **nicht** ab — ein Lesezugriff hinter dem Ende ist
+  seit PHP 8 eine Warnung, kein Abbruch. Der Dienst lief weiter, mit 255
+  erfundenen Temperaturen, einem um 510 Bytes verschobenen Lesezeiger und
+  daraus abgeleiteten Werten für Strom, Spannung, Kapazität und Zyklen, die er
+  als gültig an Loxone und MQTT weiterreichte. Nachgemessen: von 20.000
+  gestörten Rahmen meldete 0.9.0 in 2.405 Fällen Erfolg, obwohl über das Ende
+  gelesen wurde. 0.9.1 weist sie ab. Bei heilen Rahmen liefern beide Fassungen
+  in allen 10.108 Vergleichsfällen exakt dasselbe.
+- **SIGTERM wirkt sofort.** `pcntl_async_signals(true)` statt einer Abfrage
+  einmal je Schleifendurchlauf. Ein Durchlauf kann lange dauern — allein das
+  Warten auf die BYD-BCU sind bis zu vier Sekunden. Dazu hielt `preupgrade.sh`
+  nach dem SIGTERM nur zwei Sekunden inne und schoss dann mit `kill -9` nach;
+  der Dienst wurde also bei fast jedem Update hart abgeschossen, mitten im
+  Schreiben und ohne Gelegenheit, einen laufenden Ladezwang zurückzunehmen. Das
+  Update ruft jetzt `dienst.sh stop` auf, das zehn Sekunden Zeit lässt.
+- **`dienst.sh` löst Symlinks auf** (`readlink -f`). Von
+  `system/daemons/plugins/` aus aufgerufen hätte der Dienst PID-Datei und
+  Protokoll unter `data/plugins/plugins/` angelegt — die Oberfläche hätte ihn
+  nie laufen sehen und der Wächter ihn im Minutentakt ein zweites Mal
+  gestartet.
+- **Keine Zeilenumbrüche mehr ins MQTT-Gateway.** Der UDP-Eingang wertet einen
+  Zeilenumbruch als Ende des Befehls; ein mehrzeiliger Fehlertext zerfiel dort
+  in erfundene Topics.
+- **Ungültiges UTF-8 legt die Schnittstelle nicht mehr lahm.** Die Ausgabe von
+  `stty` hängt an der Spracheinstellung des Systems. Ein einzelnes Latin-1-Byte
+  daraus ließ `json_encode` scheitern: `loxone.json` blieb stumm auf dem alten
+  Stand stehen, und `?aktion=roh` lieferte eine leere Seite mit Status 200.
+  Solcher Text wird jetzt an der Eintrittsstelle bereinigt, das Schreiben des
+  Abbilds wird geprüft und gemeldet, und der Endpunkt antwortet im Fehlerfall
+  mit 500 statt mit Leere.
+- **Nebendateien beim atomaren Schreiben sind eindeutig.** Sie hießen schlicht
+  `<datei>.tmp`; schrieben Dienst und Oberfläche gleichzeitig, war das Ergebnis
+  eine Mischung aus zwei JSON-Dokumenten.
+
+Dazu drei Verbesserungen, die keine Fehlerbehebung sind:
+
+- **Offene Modbus-Verbindungen werden wiederverwendet.** Bisher schloss der
+  Statusabruf die Verbindung, und der Zelldatenabruf öffnete unmittelbar
+  danach eine neue. Die BYD-BCU lässt nur **eine** Verbindung gleichzeitig zu
+  und gibt die alte nicht in derselben Millisekunde frei — das war die
+  häufigste Ursache für „Verbindung abgewiesen" im Protokoll. Schlägt eine
+  Anforderung auf einer wiederverwendeten Verbindung fehl, wird sie verworfen
+  und genau einmal frisch aufgebaut.
+- **Ein totes Gerät blockiert die anderen nicht mehr.** Nach drei
+  Fehlschlägen in Folge wird es nur noch alle 60 s gefragt. Bei drei Speichern
+  und dem voreingestellten Zeitlimit spart das 45 % der Wartezeit; meldet sich
+  das Gerät wieder, ist die Pause sofort aufgehoben.
+- **Die serielle Schnittstelle lässt sich aus einer Liste wählen.**
+  `/dev/ttyUSB0` ist keine Eigenschaft des Adapters, sondern eine Reihenfolge.
+  Die Oberfläche bietet jetzt an, was tatsächlich steckt, stellt die
+  gleichbleibenden Namen unter `/dev/serial/by-id/` voran und weist darauf hin,
+  wenn für einen eingetragenen Pfad ein stabiler existiert. Umgestellt wird
+  nichts von selbst.
+
+Der Reiter **Test** prüft alle sechs Korrekturen ohne angeschlossenen Speicher
+nach.
+
 ## Lizenz
 
 MIT.

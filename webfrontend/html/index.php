@@ -104,7 +104,25 @@ $bm_g = isset($bm_alle[$bm_nr]) ? $bm_alle[$bm_nr] : null;
 
 if ($bm_aktion === 'roh') {
     header('Content-Type: application/json; charset=utf-8');
-    echo json_encode($bm_lox, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $bm_json = json_encode($bm_lox, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($bm_json === false) {
+        // json_encode gibt bei ungueltigem UTF-8 false zurueck. Ungeprueft
+        // waere die Antwort eine voellig leere Seite mit Status 200 - und
+        // eine leere Antwort mit Erfolgsmeldung ist das Schlechteste, was
+        // eine Schnittstelle liefern kann: die Gegenstelle haelt sie fuer
+        // gueltig. Woher solche Bytes kommen: aus der Ausgabe eines
+        // Systembefehls (stty) in einer Umgebung ohne UTF-8-Zeichensatz, die
+        // als Fehlertext bis hierher durchgereicht wird.
+        http_response_code(500);
+        echo json_encode(array(
+            'ok'     => 0,
+            'fehler' => 'Das Abbild liess sich nicht als JSON ausgeben: ' . json_last_error_msg(),
+            'hinweis' => 'Vermutlich steht in einem Fehlertext ein Byte, das kein UTF-8 ist. '
+                       . 'Der Reiter Logdateien zeigt, welcher Abruf ihn erzeugt hat.',
+        ));
+        exit;
+    }
+    echo $bm_json;
     exit;
 }
 
@@ -141,6 +159,21 @@ if ($bm_aktion === 'zellen') {
     exit;
 }
 
+/* DIE REIHENFOLGE DER FELDER DARF SICH NICHT AENDERN.
+ *
+ * Loxone sucht bei einem 'Virtuellen HTTP-Eingang Befehl' den Suchtext
+ * WOERTLICH und nimmt den ERSTEN Treffer in der Zeile. Der Suchtext
+ * \iALTER=\i\v steckt aber auch in SOLLALTER=. Dass der Baustein trotzdem
+ * den richtigen Wert bekommt, liegt einzig daran, dass ALTER aus
+ * bm_status_felder() VOR den beiden angehaengten Sollwertfeldern steht.
+ *
+ * Wer die Reihenfolge umstellt oder ein Feld nach vorn zieht, dessen Name
+ * ein bestehendes als Anfangsstueck enthaelt, liefert stillschweigend
+ * falsche Zahlen an bestehende Loxone-Projekte - ohne dass irgendwo ein
+ * Fehler auftaucht. Neue Felder deshalb immer HINTEN anhaengen, und wenn ein
+ * Name sich nicht vermeiden laesst, den Baustein mit fuehrendem Semikolon
+ * suchen lassen (\i;FELD=\i\v).
+ */
 if ($bm_aktion === 'status') {
     $teile = array('BMS');
     foreach (bm_status_felder() as $feld => $unbenutzt) {
