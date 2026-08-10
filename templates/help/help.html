@@ -1,66 +1,30 @@
-<h2>Batterie-Heimspeicher (BMS)</h2>
+<h2><TMPL_VAR HILFE.K01></h2>
 
-<p>Liest das <b>Batterie-Management-System</b> eines Hausspeichers unmittelbar
-aus &mdash; Zellspannungen, Zelltemperaturen, Zyklenzahl und Gesundheitszustand
-&mdash; und kann den Speicher auf Wunsch zum Laden oder Entladen zwingen.</p>
+<p><TMPL_VAR HILFE.K02></p>
 
-<p>Der Wechselrichter reicht davon meist nur einen Bruchteil durch. Wer wissen
-will, ob eine einzelne Zelle abf&auml;llt, muss das BMS selbst fragen.</p>
+<p><TMPL_VAR HILFE.K03></p>
 
-<h3>Drei &Uuml;bertragungswege</h3>
-<p><b>Modbus TCP</b> &mdash; Huawei LUNA2000 &uuml;ber den SUN2000-Wechselrichter,
-Port 502 am Smart Dongle.</p>
-<p><b>Modbus RTU im TCP-Strom</b> &mdash; die BYD-BCU auf
-<span class="sm-mono">192.168.16.254:8080</span>. Das ist kein Schreibfehler:
-die Box spricht RTU-Rahmen ohne MBAP-Kopf. Sie liegt au&szlig;erdem in einem
-eigenen Teilnetz, also braucht der Router eine <b>statische Route</b> auf
-<span class="sm-mono">192.168.16.0/24</span>. Und es kommt immer nur
-<b>eine</b> Anwendung gleichzeitig an die Box: solange BE Connect Plus oder ein
-Node-RED-Ablauf l&auml;uft, bleibt dieses Plugin drau&szlig;en.</p>
-<p><b>RS485-Konsole</b> &mdash; Pylontech US2000, US3000, US5000 und Force.
-Kein Modbus, sondern ein eigenes ASCII-Protokoll. Ein USB-RS485-Adapter am
-LoxBerry gen&uuml;gt; der Benutzer <span class="sm-mono">loxberry</span> muss
-in der Gruppe <span class="sm-mono">dialout</span> sein.</p>
+<h3><TMPL_VAR HILFE.K04></h3>
+<p><TMPL_VAR HILFE.K05></p>
+<p><TMPL_VAR HILFE.K06></p>
+<p><TMPL_VAR HILFE.K07></p>
 
-<h3>So gehen Sie vor</h3>
+<h3><TMPL_VAR HILFE.K08></h3>
 <ol>
-<li><b>Einstellungen:</b> Speicher eintragen, Profil w&auml;hlen, speichern,
-dann <i>Dienst starten</i>.</li>
-<li><b>Test:</b> Die Selbstpr&uuml;fung sagt Zeile f&uuml;r Zeile, ob es
-tr&auml;gt. Jedes Kreuz nennt die Abhilfe mit.</li>
-<li><b>Test, Rohregister lesen:</b> Bevor Sie einem Profil glauben &mdash;
-Register lesen und den Wert gegen die Anzeige des Herstellers halten.</li>
-<li><b>MQTT:</b> Das Abo im MQTT-Gateway eintragen. Ohne diesen Eintrag kommt
-am Miniserver nichts an.</li>
-<li><b>Einbindung in Loxone:</b> Schritt f&uuml;r Schritt, mit vollst&auml;ndiger
-Baustein-Liste und einem Knopf, der die Importdatei f&uuml;r Loxone Config
-erzeugt.</li>
+<li><TMPL_VAR HILFE.K09></li>
+<li><TMPL_VAR HILFE.K10></li>
+<li><TMPL_VAR HILFE.K11></li>
+<li><TMPL_VAR HILFE.K12></li>
+<li><TMPL_VAR HILFE.K13></li>
 </ol>
 
-<h3>Profile</h3>
-<p>Jedes Ger&auml;teprofil sagt, <b>woher seine Registeradressen stammen</b> und
-ob sie gegen ein Ger&auml;t gepr&uuml;ft sind. Profile mit dem Stand
-<i>ungepr&uuml;ft</i> sind im Umlauf, aber nicht gemessen &mdash; sie werden
-angeboten, damit man sie ausprobieren kann, nicht damit man ihnen glaubt.</p>
-<p>Ein eigenes Profil ist eine <b>JSON-Datei</b> im Ordner
-<span class="sm-mono">data/plugins/batteriebms/profile/</span> und braucht keine
-&Auml;nderung am Quelltext. Im Reiter Einstellungen l&auml;dt ein Knopf jedes
-vorhandene Profil als Vorlage herunter.</p>
+<h3><TMPL_VAR HILFE.K14></h3>
+<p><TMPL_VAR HILFE.K15></p>
+<p><TMPL_VAR HILFE.K16></p>
 
-<h3>Steuerung und Totmannschaltung</h3>
-<p>Schreibende Befehle brauchen <b>zwei</b> Freigaben: den Haken im Reiter
-Einstellungen und die Spalte <i>Schreiben</i> beim einzelnen Speicher. Ein
-Wert &uuml;ber der eingestellten Grenze wird <b>abgewiesen</b>, nicht gekappt.</p>
-<p>Ein laufender Zwang endet von selbst, wenn l&auml;nger als die
-<b>Totmannzeit</b> kein Lebenszeichen kommt. Loxone sendet dieses Lebenszeichen
-im Takt eines Impulsgebers &mdash; f&auml;llt der Miniserver aus, das Netz weg
-oder wird der Dienst angehalten, geht der Speicher in die Automatik
-zur&uuml;ck. Ohne diesen Teil bliebe ein Ladezwang stehen, bis jemand ihn
-bemerkt.</p>
+<h3><TMPL_VAR HILFE.K17></h3>
+<p><TMPL_VAR HILFE.K18></p>
+<p><TMPL_VAR HILFE.K19></p>
 
-<h3>Was diese Fassung nicht belegen kann</h3>
-<p>Sie ist an <b>keinem</b> Speicher gemessen worden. Belegt sind die
-Protokolle (Rahmenbau und Pr&uuml;fsummen sind gegen die Originalfassungen
-gehalten) und die Registeradressen der Profile mit dem Stand
-<i>dokumentiert</i>. Nicht belegt ist, ob sie zu Ihrer Ger&auml;tefirmware
-passen und ob die Schreibbefehle dort tun, was ihr Name sagt.</p>
+<h3><TMPL_VAR HILFE.K20></h3>
+<p><TMPL_VAR HILFE.K21></p>
