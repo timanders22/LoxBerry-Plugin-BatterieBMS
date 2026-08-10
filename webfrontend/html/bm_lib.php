@@ -54,6 +54,35 @@ if (!function_exists('bm_e')) {
     }
 }
 
+
+/* Den LoxBerry-Wurzelordner ohne festen Systempfad bestimmen.
+ *
+ * Vom eigenen Ablageort aufwaerts, bis ein Verzeichnis gefunden ist, das
+ * config/plugins UND webfrontend enthaelt. Das trifft die uebliche
+ * Installation genauso wie eine an einem anderen Ort - und es trifft auch
+ * den Fall, dass das Plugin noch als entpacktes Archiv daliegt (dann findet
+ * es nichts und gibt einen Leerstring zurueck, was der Aufrufer ohnehin
+ * abfangen muss).
+ *
+ * Der Name traegt kein Plugin-Kuerzel und ist deshalb abgesichert: zwei
+ * Bibliotheken landen nie im selben Prozess, aber die Pruefung kostet nichts.
+ */
+if (!function_exists('lb_wurzel_ermitteln')) {
+    function lb_wurzel_ermitteln()
+    {
+        $d = __DIR__;
+        for ($i = 0; $i < 8; $i++) {
+            if (is_dir($d . '/config/plugins') && is_dir($d . '/webfrontend')) {
+                return $d;
+            }
+            $eltern = dirname($d);
+            if ($eltern === $d) { break; }
+            $d = $eltern;
+        }
+        return '';
+    }
+}
+
 function bm_paths()
 {
     static $p = null;
@@ -62,7 +91,7 @@ function bm_paths()
     }
     $home = getenv('LBHOMEDIR');
     if (!$home || !is_dir($home)) {
-        foreach (array('/opt/loxberry', '/home/loxberry/loxberry') as $k) {
+        foreach (array(lb_wurzel_ermitteln(), '/home/loxberry/loxberry') as $k) {
             if (is_dir($k)) {
                 $home = $k;
                 break;
@@ -496,6 +525,11 @@ function bm_vorgaben()
         'wartezeit'      => 8,
         'zeitueberschreitung' => 4, // Sekunden je Modbus-Anforderung
         'drift_warnung'  => 50,     // mV Zellspannungsdrift, ab der gewarnt wird
+        // EVCC. Aus, bis es jemand einschaltet - es sind zusaetzliche Themen,
+        // und wer EVCC nicht benutzt, soll sie nicht im Broker stehen haben.
+        'evcc_ein'       => 0,
+        'evcc_geraet'    => 1,      // welcher Speicher EVCC als Hausspeicher gilt
+        'evcc_ladewatt'  => 0,      // Leistung fuer Betriebsart 3, 0 = watt ist Pflicht
     );
 }
 
@@ -580,7 +614,13 @@ function bm_config()
         @mkdir($p['configdir'], 0775, true);
         @copy($p['sicherung'], $p['config']);
     }
-    return array_merge(bm_vorgaben(), bm_json_lesen($p['config']));
+    $cfg = array_merge(bm_vorgaben(), bm_json_lesen($p['config']));
+    // Die EVCC-Felder werden hier begrenzt und nicht erst beim Benutzen: sie
+    // koennen auch aus einer von Hand bearbeiteten Datei kommen.
+    $cfg['evcc_ein']      = empty($cfg['evcc_ein']) ? 0 : 1;
+    $cfg['evcc_geraet']   = max(1, min(99, (int) $cfg['evcc_geraet']));
+    $cfg['evcc_ladewatt'] = max(0, min(30000, (int) $cfg['evcc_ladewatt']));
+    return $cfg;
 }
 
 function bm_config_speichern($cfg)
@@ -1726,7 +1766,135 @@ function bm_mqtt_themen()
         'geraetN/modul/M/uzdiff'   => 'BM_MQTT.M_UZDIFF',
         'geraetN/modul/M/tmax'     => 'BM_MQTT.M_TMAX',
         'geraetN/modul/M/zelle/Z'  => 'BM_MQTT.M_ZELLE',
+        // Nur wenn EVCC eingeschaltet ist. Eigener Zweig, weil EVCC genau
+        // diese Groessen liest und das Vorzeichen ANDERS zaehlt - siehe
+        // bm_evcc_leistung().
+        'evcc/soc'                 => 'BM_MQTT.EVCC_SOC',
+        'evcc/power'               => 'BM_MQTT.EVCC_POWER',
+        'evcc/capacity'            => 'BM_MQTT.EVCC_CAPACITY',
+        'evcc/mode'                => 'BM_MQTT.EVCC_MODE',
     );
+}
+
+/* ==================================================================
+ * EVCC
+ *
+ * EVCC steuert das Laden von Elektroautos und will dabei wissen, was der
+ * Hausspeicher gerade tut - und ihn waehrend einer Schnellladung anhalten
+ * koennen, damit der Speicher nicht ins Auto entlaedt.
+ *
+ * DREI DINGE, DIE MAN VORHER WISSEN MUSS:
+ *
+ * 1. DAS VORZEICHEN IST GENAU ANDERSHERUM. Dieses Plugin fuehrt PBAT nach
+ *    der Hausvorgabe "positiv = laden". EVCC zaehlt bei einem
+ *    Batteriezaehler "negativ = laden, positiv = entladen". Wer PBAT
+ *    unveraendert nach EVCC gibt, bekommt dort eine Anlage, die genau dann
+ *    laedt, wenn sie entlaedt - und EVCC trifft daraufhin die falschen
+ *    Entscheidungen, ohne dass irgendwo ein Fehler auftaucht.
+ *
+ *    Deshalb gibt es evcc/power: dasselbe wie pbat, nur mit umgedrehtem
+ *    Vorzeichen. Wer lieber pbat nimmt, schreibt in der EVCC-Konfiguration
+ *    "scale: -1" dazu. Beides ist richtig, eines von beiden ist Pflicht.
+ *
+ * 2. SOC, LEISTUNG UND KAPAZITAET GAB ES SCHON. Sie stehen seit jeher unter
+ *    geraetN/soc, geraetN/pbat und geraetN/kapaz. Der Zweig evcc/ ist keine
+ *    neue Messgroesse, sondern eine zweite Anschrift fuer dieselben Werte -
+ *    an EINER Stelle, ohne Geraetenummer, im Vorzeichen von EVCC.
+ *
+ * 3. ANHALTEN IST NICHT ABSCHALTEN. EVCC kennt drei Betriebsarten:
+ *      1 normal   der Speicher regelt selbst
+ *      2 hold     nicht entladen (laden darf er)
+ *      3 charge   aus dem Netz laden
+ *
+ *    "hold" wird hier als erzwungenes Entladen mit NULL WATT umgesetzt. Das
+ *    ist kein Kunstgriff, sondern der einzige Weg, der ohne ein einziges
+ *    neues Register auskommt: gefahren wird die Schrittfolge "entladen" des
+ *    Profils mit @watt = 0. Ein Geraet, das erzwungenes Entladen kennt, kann
+ *    auch null Watt entladen - und genau das heisst "nicht entladen".
+ *    Erfundene Register waeren die Alternative gewesen; die gibt es hier
+ *    nicht.
+ *
+ *    Die Totmannschaltung gilt unveraendert: bleibt das Lebenszeichen aus,
+ *    faellt der Speicher nach der eingestellten Zeit in die Automatik
+ *    zurueck. Ein Hausspeicher, der stehen bleibt, weil ein anderes Programm
+ *    abgestuerzt ist, waere im Winter teuer.
+ * ================================================================== */
+
+/** Die Leistung in der Zaehlweise von EVCC: negativ = laden. */
+function bm_evcc_leistung($pbat)
+{
+    if ($pbat === null || $pbat === '' || !is_numeric($pbat)) {
+        return null;
+    }
+    $w = -(float) $pbat;
+    // Die Null bekommt kein Vorzeichen: -0 laesst sich in JSON darstellen und
+    // sieht in einem Protokoll aus wie ein Fehler.
+    return $w == 0 ? 0 : $w;
+}
+
+/**
+ * Die Werte, die EVCC von einem Batteriezaehler liest.
+ *
+ * Rueckgabe: array('soc','power','capacity','controllable','mode','ok','name')
+ * Fehlende Groessen sind null - EVCC bekommt lieber nichts als eine erfundene 0.
+ */
+function bm_evcc_werte($nr = null)
+{
+    $cfg = bm_config();
+    if ($nr === null) {
+        $nr = (int) $cfg['evcc_geraet'];
+    }
+    $nr = max(1, (int) $nr);
+    $alle = bm_werte();
+    $aus = array('soc' => null, 'power' => null, 'capacity' => null,
+                 'controllable' => 0, 'mode' => 'normal', 'ok' => 0, 'name' => '');
+    if (!isset($alle[$nr])) {
+        return $aus;
+    }
+    $g = $alle[$nr];
+    $aus['ok']   = (int) $g['ok'];
+    $aus['name'] = isset($g['name']) ? (string) $g['name'] : '';
+    $aus['soc']      = (isset($g['SOC'])   && is_numeric($g['SOC']))   ? 0 + $g['SOC']   : null;
+    $aus['capacity'] = (isset($g['KAPAZ']) && is_numeric($g['KAPAZ'])) ? 0 + $g['KAPAZ'] : null;
+    $aus['power']    = bm_evcc_leistung(isset($g['PBAT']) ? $g['PBAT'] : null);
+
+    /* Steuerbar ist der Speicher nur, wenn beide Haken stehen UND das Profil
+     * ueberhaupt eine Schrittfolge fuers Entladen kennt. Ohne diese Pruefung
+     * meldete das Plugin eine Steuerung, die es nicht gibt - EVCC schickte
+     * dann Betriebsartwechsel, die nichts bewirken, und nichts davon waere
+     * von aussen zu sehen. */
+    $geraet = bm_geraet($nr);
+    $profil = $geraet ? bm_profil($geraet['profil']) : null;
+    $aus['controllable'] = (!empty($cfg['steuerung_ein'])
+        && $geraet && !empty($geraet['schreiben'])
+        && $profil && !empty($profil['steuerung']['entladen']['schritte'])) ? 1 : 0;
+
+    $soll = isset($g['sollwert']) ? (string) $g['sollwert'] : '';
+    if (strpos($soll, 'sperren') === 0) {
+        $aus['mode'] = 'hold';
+    } elseif (strpos($soll, 'laden') === 0) {
+        $aus['mode'] = 'charge';
+    }
+    return $aus;
+}
+
+/**
+ * Eine EVCC-Betriebsart in eine Aktion dieses Plugins uebersetzen.
+ *
+ * EVCC schickt je nach Anbindung die Zahl oder das Wort. Beides wird
+ * angenommen; alles andere ergibt einen leeren Rueckgabewert und wird vom
+ * Endpunkt abgewiesen - nicht auf "normal" zurechtgebogen. Ein
+ * missverstandener Betriebsartwechsel waere schlimmer als ein abgelehnter.
+ */
+function bm_evcc_modus($eingabe)
+{
+    $tabelle = array(
+        '1' => 'automatik', 'normal' => 'automatik', 'unknown' => 'automatik',
+        '2' => 'sperren',   'hold'   => 'sperren',
+        '3' => 'laden',     'charge' => 'laden',
+    );
+    $e = strtolower(trim((string) $eingabe));
+    return isset($tabelle[$e]) ? $tabelle[$e] : '';
 }
 
 /* ==================================================================
@@ -1944,7 +2112,7 @@ function bm_t($schluessel)
     if ($texte === null) {
         $home = getenv('LBHOMEDIR');
         if (!$home || !is_dir($home)) {
-            foreach (array('/opt/loxberry', '/home/loxberry/loxberry') as $k) {
+            foreach (array(lb_wurzel_ermitteln(), '/home/loxberry/loxberry') as $k) {
                 if (is_dir($k)) {
                     $home = $k;
                     break;

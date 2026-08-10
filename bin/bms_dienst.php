@@ -531,6 +531,24 @@ function bm_steuern(array $g, array $pr, $aktion, $watt)
         return array(0, sprintf(bm_t('DIENST.STEUERUNG_GERAET_AUS'), $g['name']));
     }
     $st = isset($pr['steuerung']) && is_array($pr['steuerung']) ? $pr['steuerung'] : array();
+
+    /* 'sperren' (EVCC: hold) ist kein eigener Registersatz, sondern die
+     * Schrittfolge fuers Entladen mit NULL WATT. Ein Geraet, das erzwungenes
+     * Entladen kennt, kann auch null Watt entladen - und das heisst "nicht
+     * entladen".
+     *
+     * Bewusst KEINE eigenen Register: die muesste man je Profil erfinden, und
+     * ein erfundenes Register schreibt in eine fremde Anlage. Ein Profil, das
+     * eine eigene Sperre kennt, darf sie trotzdem hinterlegen - dann greift
+     * sie, weil zuerst nach $st['sperren'] gesehen wird. */
+    if ($aktion === 'sperren' && !isset($st['sperren']['schritte'])) {
+        if (!isset($st['entladen']['schritte'])) {
+            return array(0, sprintf(bm_t('DIENST.STEUERUNG_UNBEKANNT'), $aktion, $pr['name']));
+        }
+        $aktion = 'entladen';
+        $watt = 0;
+    }
+
     if (!isset($st[$aktion]['schritte']) || !is_array($st[$aktion]['schritte'])) {
         return array(0, sprintf(bm_t('DIENST.STEUERUNG_UNBEKANNT'), $aktion, $pr['name']));
     }
@@ -921,6 +939,28 @@ function bm_veroeffentlichen(array $abbild, $topic)
             }
         }
     }
+    /* Der EVCC-Zweig. Dieselben Werte, eine Anschrift ohne Geraetenummer und
+     * das Vorzeichen umgedreht - siehe bm_evcc_leistung(). Nur wenn
+     * eingeschaltet: wer EVCC nicht benutzt, soll die Themen nicht im Broker
+     * stehen haben. */
+    $cfg = bm_config();
+    if (!empty($cfg['evcc_ein'])) {
+        $nr = max(1, (int) $cfg['evcc_geraet']);
+        if (isset($abbild['geraete'][$nr])) {
+            $e = $abbild['geraete'][$nr];
+            $paare['evcc/soc']      = $e['SOC'];
+            $paare['evcc/capacity'] = $e['KAPAZ'];
+            $paare['evcc/power']    = bm_evcc_leistung($e['PBAT']);
+            $soll = isset($e['sollwert']) ? (string) $e['sollwert'] : '';
+            $paare['evcc/mode'] = (strpos($soll, 'sperren') === 0) ? 'hold'
+                : ((strpos($soll, 'laden') === 0) ? 'charge' : 'normal');
+        } else {
+            bm_log_gebremst('evcc_geraet_fehlt', 'EVCC: Speicher Nummer ' . $nr
+                . ' ist eingestellt, aber nicht eingerichtet - es wird nichts '
+                . 'unter evcc/ veroeffentlicht.');
+        }
+    }
+
     bm_mqtt_senden($paare, $topic);
 }
 
@@ -1026,6 +1066,20 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
         }
         bm_soll_schreiben($nr, $soll['aktion'], (int) $soll['watt']);
         return array(1, sprintf(bm_t('DIENST.LEBENSZEICHEN_OK'), (int) $cfg['totmann']));
+    }
+
+    if ($aktion === 'sperren') {
+        /* Anders als bei laden/entladen wird hier NICHT gegen soc_min
+         * geprueft. Es wird nichts entnommen - die Sperre kann den Speicher
+         * nicht leerer machen, als er ist. Eine Grenzpruefung haette hier nur
+         * die Wirkung, dass ein fast leerer Speicher nicht angehalten werden
+         * koennte, und das ist genau verkehrt herum. */
+        list($ok, $meldung) = bm_steuern($g, $pr, 'sperren', 0);
+        if ($ok) {
+            bm_soll_schreiben($nr, 'sperren', 0);
+            $sofortAbruf = true;
+        }
+        return array($ok, $meldung);
     }
 
     if ($aktion !== 'laden' && $aktion !== 'entladen') {

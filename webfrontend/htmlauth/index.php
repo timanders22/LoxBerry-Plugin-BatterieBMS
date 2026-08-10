@@ -222,6 +222,30 @@ if ($bm_post && isset($_POST['speichern'])) {
 
     $bm_cfg['mqtt_ein'] = isset($_POST['mqtt_ein']) ? 1 : 0;
     $bm_cfg['steuerung_ein'] = isset($_POST['steuerung_ein']) ? 1 : 0;
+    $bm_cfg['evcc_ein'] = isset($_POST['evcc_ein']) ? 1 : 0;
+
+    foreach (array('evcc_geraet' => array(1, 99), 'evcc_ladewatt' => array(0, 30000))
+             as $bm_ef => $bm_eg) {
+        $bm_ew = isset($_POST[$bm_ef]) ? trim((string) $_POST[$bm_ef]) : '';
+        if ($bm_ew === '') { continue; }
+        if (!preg_match('/^[0-9]+$/', $bm_ew)) {
+            $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_ZAHL'), bm_t('EINST.L_' . strtoupper($bm_ef)));
+            continue;
+        }
+        if ((int) $bm_ew < $bm_eg[0] || (int) $bm_ew > $bm_eg[1]) {
+            $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_BEREICH'),
+                bm_t('EINST.L_' . strtoupper($bm_ef)), $bm_eg[0], $bm_eg[1]);
+            continue;
+        }
+        $bm_cfg[$bm_ef] = (int) $bm_ew;
+    }
+    /* Ein eingeschaltetes EVCC, das auf einen nicht eingerichteten Speicher
+     * zeigt, veroeffentlicht nichts - und niemand sieht, warum. Lieber jetzt
+     * beanstanden. */
+    if (!empty($bm_cfg['evcc_ein'])
+        && !isset($bm_cfg['geraete'][(int) $bm_cfg['evcc_geraet'] - 1])) {
+        $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_EVCC_GERAET'), (int) $bm_cfg['evcc_geraet']);
+    }
 
     $bm_topic = bm_saeubern($_POST['mqtt_topic'] ?? '');
     if ($bm_topic === '' || !preg_match('#^[A-Za-z0-9_/\-]{1,64}$#', $bm_topic)) {
@@ -639,6 +663,26 @@ foreach ($bm_hinweise as $bm_h) {
   <label for="mqtt_topic"><?= bm_e(bm_t('EINST.L_MQTT_TOPIC')) ?></label>
   <input data-role="none" type="text" id="mqtt_topic" name="mqtt_topic" value="<?= bm_e($bm_cfg['mqtt_topic']) ?>" placeholder="batteriebms">
 </div>
+
+<h2>EVCC</h2>
+<div class="sm-step"><?= bm_t('EINST.EVCC_ERKLAERUNG') ?></div>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;">
+    <input data-role="none" type="checkbox" name="evcc_ein" value="1" <?= !empty($bm_cfg['evcc_ein']) ? 'checked' : '' ?>>
+    <?= bm_e(bm_t('EINST.L_EVCC_EIN')) ?>
+  </label>
+</div>
+<div class="sm-feld">
+  <label for="evcc_geraet"><?= bm_e(bm_t('EINST.L_EVCC_GERAET')) ?></label>
+  <input data-role="none" type="number" id="evcc_geraet" name="evcc_geraet" value="<?= (int) $bm_cfg['evcc_geraet'] ?>" min="1" max="99">
+  <span class="sm-hilfe"><?= bm_t('EINST.H_EVCC_GERAET') ?></span>
+</div>
+<div class="sm-feld">
+  <label for="evcc_ladewatt"><?= bm_e(bm_t('EINST.L_EVCC_LADEWATT')) ?></label>
+  <input data-role="none" type="number" id="evcc_ladewatt" name="evcc_ladewatt" value="<?= (int) $bm_cfg['evcc_ladewatt'] ?>" min="0" max="30000" step="100">
+  <span class="sm-hilfe"><?= bm_t('EINST.H_EVCC_LADEWATT') ?></span>
+</div>
+<div class="sm-warnung"><?= bm_t('EINST.EVCC_VORZEICHEN') ?></div>
 
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= bm_e(bm_t('ALLG.SPEICHERN')) ?></button>

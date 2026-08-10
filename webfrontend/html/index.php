@@ -20,7 +20,14 @@
  *   entladen       &watt=W  [&geraet=N]   Entladen erzwingen
  *   automatik               [&geraet=N]   Zwang sofort beenden
  *   lebenszeichen           [&geraet=N]   Sollwert am Leben halten (Totmannschaltung)
+ *   sperren                 [&geraet=N]   nicht entladen (erzwungenes Entladen mit 0 W)
  *   abruf                                 sofort abrufen statt auf den Takt zu warten
+ *
+ * Fuer EVCC:
+ *   evcc           [&geraet=N]            soc, power, capacity als JSON -
+ *                                         power im Vorzeichen von EVCC
+ *   batteriemodus  &modus=1|2|3           1 normal, 2 hold (nicht entladen),
+ *                  [&watt=W] [&geraet=N]  3 charge (aus dem Netz laden)
  *
  * Der Endpunkt spricht NIE selbst mit einem Speicher. Lesende Aufrufe
  * beantwortet er aus dem Zwischenspeicher, schaltende legt er in einer
@@ -54,8 +61,9 @@ if (!hash_equals($bm_soll, $bm_ist)) {
 }
 
 /* ---------------- Aktion (Weissliste) ---------------- */
-$bm_lesend = array('status', 'zellen', 'liste', 'roh');
-$bm_schaltend = array('laden', 'entladen', 'automatik', 'lebenszeichen', 'abruf');
+$bm_lesend = array('status', 'zellen', 'liste', 'roh', 'evcc');
+$bm_schaltend = array('laden', 'entladen', 'automatik', 'lebenszeichen', 'abruf',
+                      'sperren', 'batteriemodus');
 $bm_aktion = isset($_GET['aktion']) ? (string) $_GET['aktion'] : 'status';
 if (!in_array($bm_aktion, array_merge($bm_lesend, $bm_schaltend), true)) {
     http_response_code(400);
@@ -123,6 +131,20 @@ if ($bm_aktion === 'roh') {
         exit;
     }
     echo $bm_json;
+    exit;
+}
+
+if ($bm_aktion === 'evcc') {
+    /* Genau die Groessen, die ein Batteriezaehler in EVCC braucht - nicht
+     * mehr. Wer alles will, nimmt 'roh'.
+     *
+     * Diese Aktion ist LESEND und braucht deshalb weder den Steuerungshaken
+     * noch einen laufenden Dienst: EVCC soll den Ladezustand auch dann sehen,
+     * wenn nichts geschaltet werden darf. */
+    header('Content-Type: application/json; charset=utf-8');
+    $bm_e = bm_evcc_werte($bm_nr === '' ? null : (int) $bm_nr);
+    $bm_e['alter'] = $bm_alter;
+    echo json_encode($bm_e, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 }
 
@@ -210,6 +232,36 @@ if (bm_dienst_pid() === 0) {
     echo "SET;OK=0;GRUND=DIENST_LAEUFT_NICHT\n";
     echo "Der Abrufdienst laeuft nicht. Reiter Einstellungen, Knopf 'Dienst starten'.\n";
     exit;
+}
+
+/* Betriebsart von EVCC in eine Aktion dieses Plugins uebersetzen.
+ *
+ * Abgewiesen wird, was nicht in der Tabelle steht - nicht auf 'normal'
+ * zurechtgebogen. Ein missverstandener Betriebsartwechsel ist schlimmer als
+ * ein abgelehnter: EVCC haelt den Speicher dann fuer angehalten, waehrend er
+ * weiter entlaedt. */
+if ($bm_aktion === 'batteriemodus') {
+    $bm_modus = isset($_GET['modus']) ? (string) $_GET['modus'] : '';
+    $bm_ziel = bm_evcc_modus($bm_modus);
+    if ($bm_ziel === '') {
+        http_response_code(400);
+        echo "SET;OK=0;GRUND=MODUS_UNBEKANNT\n";
+        echo "Erlaubt sind 1/normal, 2/hold und 3/charge.\n";
+        exit;
+    }
+    if ($bm_ziel === 'laden' && $bm_watt === '') {
+        // Aus dem Netz laden ohne Leistungsangabe waere geraten. Entweder
+        // steht sie im Aufruf oder in den Einstellungen - sonst Abbruch.
+        $bm_vorgabe = (int) $bm_cfg['evcc_ladewatt'];
+        if ($bm_vorgabe <= 0) {
+            http_response_code(400);
+            echo "SET;OK=0;GRUND=WATT_FEHLT\n";
+            echo "Fuer modus=3 braucht es watt=W oder eine Vorgabe in den Einstellungen.\n";
+            exit;
+        }
+        $bm_watt = (string) $bm_vorgabe;
+    }
+    $bm_aktion = $bm_ziel;
 }
 
 $bm_befehl = array('aktion' => $bm_aktion, 'geraet' => (int) $bm_nr);
