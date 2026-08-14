@@ -220,7 +220,6 @@ if ($bm_post && isset($_POST['speichern'])) {
         $bm_fehler[] = bm_t('EINST.FEHLER_SOC_FENSTER');
     }
 
-    $bm_cfg['mqtt_ein'] = isset($_POST['mqtt_ein']) ? 1 : 0;
     $bm_cfg['steuerung_ein'] = isset($_POST['steuerung_ein']) ? 1 : 0;
     $bm_cfg['evcc_ein'] = isset($_POST['evcc_ein']) ? 1 : 0;
 
@@ -247,12 +246,6 @@ if ($bm_post && isset($_POST['speichern'])) {
         $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_EVCC_GERAET'), (int) $bm_cfg['evcc_geraet']);
     }
 
-    $bm_topic = bm_saeubern($_POST['mqtt_topic'] ?? '');
-    if ($bm_topic === '' || !preg_match('#^[A-Za-z0-9_/\-]{1,64}$#', $bm_topic)) {
-        $bm_fehler[] = bm_t('EINST.FEHLER_TOPIC');
-    } else {
-        $bm_cfg['mqtt_topic'] = trim($bm_topic, '/');
-    }
 
     if (!$bm_fehler) {
         if (bm_config_speichern($bm_cfg)) {
@@ -262,6 +255,37 @@ if ($bm_post && isset($_POST['speichern'])) {
         }
     }
     $bm_tab = 'tab-settings';
+
+    /* mqtt_ein und mqtt_topic werden hier bewusst NICHT angefasst: sie wohnen im
+     * Reiter MQTT und haben dort ein eigenes Formular. Die Konfiguration
+     * kommt aus bm_config(), die Werte ueberleben also unveraendert. Stuende
+     * hier weiter "isset($_POST['mqtt_ein']) ? 1 : 0", wuerde jedes Speichern
+     * der Einstellungen MQTT stillschweigend abschalten. */
+}
+
+/* ---------------- MQTT (eigener Reiter, eigenes Formular) ----------------
+ *
+ * Eigenes Formular UND eigener Handler gehoeren zusammen. Loesten beide
+ * Formulare denselben Handler aus, setzte dieser die Haken des jeweils
+ * nicht abgeschickten Formulars per isset() auf 0 - der Benutzer verloere
+ * Werte, die er nie gesehen hat. Der Handler laedt darum den Bestand und
+ * ruehrt ausschliesslich die MQTT-Werte an. */
+if ($bm_post && isset($_POST['save_mqtt'])) {
+    $bm_mcfg = bm_config();
+    $bm_mcfg['mqtt_ein'] = isset($_POST['mqtt_ein']) ? 1 : 0;
+    $bm_mtopic = trim(preg_replace('/[\x00-\x1F\x7F"\']/', '',
+        (string) (isset($_POST['mqtt_topic']) ? $_POST['mqtt_topic'] : '')));
+    if ($bm_mtopic === '' || !preg_match('#^[A-Za-z0-9_/\-]{1,64}$#', $bm_mtopic)) {
+        $bm_fehler[] = bm_t('EINST.FEHLER_TOPIC');
+    } else {
+        $bm_mcfg['mqtt_topic'] = trim($bm_mtopic, '/');
+    }
+    if (!$bm_fehler) {
+        if (bm_config_speichern($bm_mcfg)) {
+        $bm_meldungen[] = bm_t('EINST.GESPEICHERT');
+        }
+    }
+    $bm_tab = 'tab-mqtt';
 }
 
 /* ---------------- Dienst ---------------- */
@@ -652,17 +676,8 @@ foreach ($bm_hinweise as $bm_h) {
   <div class="sm-hilfe"><?= bm_t('EINST.H_WARTEZEIT') ?></div>
 </div>
 
-<h2>MQTT</h2>
-<div class="sm-feld">
-  <label style="display:inline-flex;align-items:center;gap:8px;">
-    <input data-role="none" type="checkbox" name="mqtt_ein" value="1" <?= !empty($bm_cfg['mqtt_ein']) ? 'checked' : '' ?>>
-    <?= bm_e(bm_t('EINST.L_MQTT_EIN')) ?>
-  </label>
-</div>
-<div class="sm-feld">
-  <label for="mqtt_topic"><?= bm_e(bm_t('EINST.L_MQTT_TOPIC')) ?></label>
-  <input data-role="none" type="text" id="mqtt_topic" name="mqtt_topic" value="<?= bm_e($bm_cfg['mqtt_topic']) ?>" placeholder="batteriebms">
-</div>
+<?php /* MQTT stand hier bis zu dieser Fassung. Es wohnt jetzt
+         vollstaendig im Reiter MQTT - eine Sache, eine Stelle. */ ?>
 
 <h2>EVCC</h2>
 <div class="sm-step"><?= bm_t('EINST.EVCC_ERKLAERUNG') ?></div>
@@ -719,6 +734,26 @@ foreach ($bm_hinweise as $bm_h) {
 
 <!-- ================= Reiter: MQTT ================= -->
 <div class="sm-seite<?= $bm_tab === 'tab-mqtt' ? ' sm-active' : '' ?>" id="tab-mqtt">
+
+<h2>MQTT</h2>
+<form action="index.php" method="post">
+<input data-role="none" type="hidden" name="save_mqtt" value="1">
+<input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;">
+    <input data-role="none" type="checkbox" name="mqtt_ein" value="1" <?= !empty($bm_cfg['mqtt_ein']) ? 'checked' : '' ?>>
+    <?= bm_e(bm_t('EINST.L_MQTT_EIN')) ?>
+  </label>
+</div>
+<div class="sm-feld">
+  <label for="mqtt_topic"><?= bm_e(bm_t('EINST.L_MQTT_TOPIC')) ?></label>
+  <input data-role="none" type="text" id="mqtt_topic" name="mqtt_topic" value="<?= bm_e($bm_cfg['mqtt_topic']) ?>" placeholder="batteriebms">
+</div>
+<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= bm_t('LEGENDE.AKTION') ?></span></div>
+<div class="sm-knopfreihe">
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= bm_e(bm_t('ALLG.SPEICHERN')) ?></button>
+</div>
+</form>
 <h2><?= bm_e(bm_t('MQTT.H_ZUSTAND')) ?></h2>
 <p class="sm-hilfe"><?= bm_t('MQTT.GATEWAY_ERKLAERUNG') ?></p>
 <?php if (!$bm_mqtt['gefunden']) { ?>
