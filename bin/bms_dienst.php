@@ -102,10 +102,25 @@ function bm_abruf_modbus(array $g, array $pr, $tmo)
         $regs = array();
         $fehler = '';
         foreach ((array) $pr['bloecke'] as $block) {
-            $teil = bm_register_lesen($s, $g, (int) $block['fc'], (int) $block['start'],
-                                      (int) $block['anzahl']);
+            $bfc = (int) $block['fc'];
+            // FC 1 und 2 liefern Bits, FC 3 und 4 Woerter. Beide landen in
+            // derselben Adresstabelle; das ist bequem, aber die Adressraeume
+            // sind verschieden. Eine Ueberschneidung wird deshalb GEMELDET
+            // statt stillschweigend verschluckt - sonst liest ein Feld den
+            // Wert eines ganz anderen Registers.
+            $teil = ($bfc === 1 || $bfc === 2)
+                ? bm_bits_lesen($s, $g, $bfc, (int) $block['start'], (int) $block['anzahl'])
+                : bm_register_lesen($s, $g, $bfc, (int) $block['start'], (int) $block['anzahl']);
             if (isset($teil['_fehler'])) {
                 $fehler = 'Block ab Register ' . (int) $block['start'] . ': ' . $teil['_fehler'];
+                break;
+            }
+            $doppelt = array_intersect_key($teil, $regs);
+            if ($doppelt) {
+                $fehler = 'Zwei Bloecke dieses Profils belegen dieselben Adressen ('
+                    . implode(', ', array_slice(array_keys($doppelt), 0, 5))
+                    . '). Bits (FC 1/2) und Register (FC 3/4) haben getrennte Adressraeume - '
+                    . 'im Profil einen der beiden Bloecke versetzen.';
                 break;
             }
             $regs += $teil;
@@ -597,12 +612,16 @@ function bm_soll_lesen($nr)
     return bm_json_lesen(bm_soll_datei($nr));
 }
 
-function bm_soll_schreiben($nr, $aktion, $watt)
+function bm_soll_schreiben($nr, $aktion, $watt, $quelle = '')
 {
     return bm_json_schreiben(bm_soll_datei($nr), array(
         'aktion' => $aktion,
         'watt'   => (int) $watt,
         'ts'     => time(),
+        // Woher kam der Befehl? Der Endpunkt traegt es ein, der Reiter Test
+        // ebenso. Ohne diese Angabe ist bei drei moeglichen Absendern nicht
+        // zu klaeren, warum der Speicher gerade laedt.
+        'quelle' => bm_text_sauber((string) $quelle, 40),
     ));
 }
 
@@ -812,12 +831,48 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
             }
         }
 
+        /* Die schwaechste Zelle benennen.
+         *
+         * Die Modulwerte enthalten laengst den niedrigsten Wert je Modul -
+         * nirgends stand aber, WELCHE Zelle es ist. Wer eine Zelle beobachten
+         * oder tauschen will, musste sie im Balkenbild suchen. */
+        if ($eintrag['module']) {
+            $minmv = null;
+            foreach ($eintrag['module'] as $m => $md) {
+                foreach ((array) (isset($md['zellen']) ? $md['zellen'] : array()) as $z => $mv) {
+                    if ($mv > 0 && ($minmv === null || $mv < $minmv)) {
+                        $minmv = $mv;
+                        $eintrag['UZMINMOD'] = (int) $m;
+                        $eintrag['UZMINZELLE'] = (int) $z;
+                    }
+                }
+            }
+        }
+
+        // Restenergie und Restzeit. Beides bleibt leer, wo es sich nicht
+        // belegen laesst - siehe bm_restwerte().
+        list($restkwh, $restzeit) = bm_restwerte($eintrag, $g);
+        $eintrag['RESTKWH'] = $restkwh;
+        $eintrag['RESTZEIT'] = $restzeit;
+
+        // Sammelmerker samt Klartext.
+        $gruende = bm_alarm($eintrag, $cfg);
+        $eintrag['ALARM'] = $gruende ? 1 : 0;
+        $eintrag['alarmtext'] = $gruende ? bm_text_sauber(implode(' | ', $gruende)) : '';
+        if ($gruende) {
+            bm_log_gebremst('alarm' . $nr, $g['name'] . ': ' . implode(' | ', $gruende), 1800);
+        }
+
         // Sollwert und Totmannschaltung
         $soll = bm_soll_lesen($nr);
         if ($soll && isset($soll['aktion'])) {
             $alterSoll = time() - (int) $soll['ts'];
             $eintrag['sollwert'] = $soll['aktion'] . ':' . (int) $soll['watt'];
             $eintrag['sollwert_alter'] = $alterSoll;
+            // Wer hat den Zwang gesetzt? Loxone, EVCC und der Reiter Test
+            // schreiben in dieselbe Datei; bis 0.9.7 gewann der letzte, und
+            // niemand sah, wer es war.
+            $eintrag['sollwert_quelle'] = isset($soll['quelle']) ? (string) $soll['quelle'] : '';
             $tot = max(0, (int) $cfg['totmann']);
             if ($tot > 0 && $alterSoll > $tot) {
                 list($ok, $meldung) = bm_steuern($g, $pr, 'automatik', 0);
@@ -826,18 +881,29 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
                     . 'Lebenszeichen - zurueck in die Automatik. ' . $meldung);
                 $eintrag['sollwert'] = '';
                 $eintrag['sollwert_alter'] = -1;
+                $eintrag['sollwert_quelle'] = '';
             }
         } else {
             $eintrag['sollwert'] = '';
             $eintrag['sollwert_alter'] = -1;
+            $eintrag['sollwert_quelle'] = '';
         }
 
+        /* Zeitstempel des letzten ERFOLGREICHEN Abrufs.
+         *
+         * Er wird ueber die Durchlaeufe hinweg mitgeschleppt, damit sich der
+         * MQTT-Zweig darauf beziehen kann. Ein Geraet in der Ausfallpause
+         * behaelt seinen alten Zeitstempel - dessen Alter waechst dann
+         * sichtbar, waehrend die Messwerte im Broker unveraendert stehen. */
+        $vorher = bm_werte();
         if ($eintrag['ok']) {
             $okZahl++;
             $eintrag['OK'] = 1;
+            $eintrag['ok_ts'] = time();
             bm_verlauf_schreiben($nr, $eintrag);
         } else {
             $eintrag['OK'] = 0;
+            $eintrag['ok_ts'] = isset($vorher[$nr]['ok_ts']) ? (int) $vorher[$nr]['ok_ts'] : 0;
         }
         $eintrag['ALTER'] = 0;
         $abbild['geraete'][$nr] = $eintrag;
@@ -892,8 +958,17 @@ function bm_verlauf_schreiben($nr, array $e)
     if ($e['SOC'] === null) {
         return;
     }
+    /* Sieben Spalten statt drei: Zeit, Ladezustand, Leistung, Zelldrift,
+     * hoechste Temperatur, Gesundheitszustand, Zyklen. Die ersten drei stehen
+     * unveraendert an ihrer Stelle, damit aeltere Dateien und das
+     * Tagesdiagramm weiterlaufen. Ein fehlender Wert bleibt LEER - eine 0
+     * waere hier eine stille Falschaussage ueber eine Messreihe. */
+    $sp = function ($w) {
+        return ($w === null || $w === '') ? '' : $w;
+    };
     @file_put_contents($datei, time() . ';' . $e['SOC'] . ';'
-        . ($e['PBAT'] === null ? '' : $e['PBAT']) . "\n", FILE_APPEND);
+        . $sp($e['PBAT']) . ';' . $sp($e['UZDIFF']) . ';' . $sp($e['TMAX']) . ';'
+        . $sp($e['SOH']) . ';' . $sp($e['ZYKLEN']) . "\n", FILE_APPEND);
 
     // Alte Tagesdateien wegraeumen
     $tage = max(1, min(365, (int) $cfg['verlauf_tage']));
@@ -904,64 +979,20 @@ function bm_verlauf_schreiben($nr, array $e)
     }
 }
 
-/** Das Abbild ueber das MQTT-Gateway veroeffentlichen. */
+/** Das Abbild ueber das MQTT-Gateway veroeffentlichen.
+ *
+ * Die Paare selbst bildet bm_mqtt_paare() in der Bibliothek. Getrennt, weil
+ * der Reiter Test dann nachrechnen kann, WAS veroeffentlicht wuerde, ohne ein
+ * Paket zu schicken - und weil zwei Kopien derselben Zuordnung zwangslaeufig
+ * auseinanderlaufen.
+ */
 function bm_veroeffentlichen(array $abbild, $topic)
 {
     $topic = trim($topic, '/');
     if ($topic === '') {
         $topic = 'batteriebms';
     }
-    $paare = array(
-        'ok'      => (int) $abbild['ok'],
-        'geraete' => count($abbild['geraete']),
-    );
-    foreach ($abbild['geraete'] as $nr => $e) {
-        $vor = 'geraet' . (int) $nr;
-        foreach (array('SOC' => 'soc', 'SOH' => 'soh', 'UBAT' => 'ubat', 'IBAT' => 'ibat',
-                       'PBAT' => 'pbat', 'TMAX' => 'tmax', 'TMIN' => 'tmin',
-                       'UZMAX' => 'uzmax', 'UZMIN' => 'uzmin', 'UZDIFF' => 'uzdiff',
-                       'ZYKLEN' => 'zyklen', 'KAPAZ' => 'kapaz', 'MODULE' => 'module',
-                       'ZELLEN' => 'zellen', 'FEHLER' => 'fehler', 'WARNUNG' => 'warnung',
-                       'MODUS' => 'modus') as $feld => $thema) {
-            $paare[$vor . '/' . $thema] = $e[$feld];
-        }
-        $paare[$vor . '/ok'] = (int) $e['ok'];
-        $paare[$vor . '/sollwert'] = $e['sollwert'] !== '' ? $e['sollwert'] : 'automatik';
-        $paare[$vor . '/sollwert_alter'] = (int) $e['sollwert_alter'];
-        foreach ((array) $e['module'] as $m => $md) {
-            $mv = $vor . '/modul/' . (int) $m;
-            $paare[$mv . '/uzmax'] = isset($md['uzmax']) ? $md['uzmax'] : null;
-            $paare[$mv . '/uzmin'] = isset($md['uzmin']) ? $md['uzmin'] : null;
-            $paare[$mv . '/uzdiff'] = isset($md['uzdiff']) ? $md['uzdiff'] : null;
-            $paare[$mv . '/tmax'] = isset($md['tmax']) ? $md['tmax'] : null;
-            foreach ((array) (isset($md['zellen']) ? $md['zellen'] : array()) as $z => $wert) {
-                $paare[$mv . '/zelle/' . (int) $z] = $wert;
-            }
-        }
-    }
-    /* Der EVCC-Zweig. Dieselben Werte, eine Anschrift ohne Geraetenummer und
-     * das Vorzeichen umgedreht - siehe bm_evcc_leistung(). Nur wenn
-     * eingeschaltet: wer EVCC nicht benutzt, soll die Themen nicht im Broker
-     * stehen haben. */
-    $cfg = bm_config();
-    if (!empty($cfg['evcc_ein'])) {
-        $nr = max(1, (int) $cfg['evcc_geraet']);
-        if (isset($abbild['geraete'][$nr])) {
-            $e = $abbild['geraete'][$nr];
-            $paare['evcc/soc']      = $e['SOC'];
-            $paare['evcc/capacity'] = $e['KAPAZ'];
-            $paare['evcc/power']    = bm_evcc_leistung($e['PBAT']);
-            $soll = isset($e['sollwert']) ? (string) $e['sollwert'] : '';
-            $paare['evcc/mode'] = (strpos($soll, 'sperren') === 0) ? 'hold'
-                : ((strpos($soll, 'laden') === 0) ? 'charge' : 'normal');
-        } else {
-            bm_log_gebremst('evcc_geraet_fehlt', 'EVCC: Speicher Nummer ' . $nr
-                . ' ist eingestellt, aber nicht eingerichtet - es wird nichts '
-                . 'unter evcc/ veroeffentlicht.');
-        }
-    }
-
-    bm_mqtt_senden($paare, $topic);
+    bm_mqtt_senden(bm_mqtt_paare($abbild), $topic);
 }
 
 /* ==================================================================
@@ -1007,6 +1038,7 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
 {
     $cfg = bm_config();
     $aktion = (string) $befehl['aktion'];
+    $bm_quelle = isset($befehl['quelle']) ? (string) $befehl['quelle'] : '';
 
     if ($aktion === 'abruf') {
         $sofortAbruf = true;
@@ -1064,7 +1096,8 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
         if (!$soll || !isset($soll['aktion'])) {
             return array(0, bm_t('DIENST.LEBENSZEICHEN_OHNE_SOLL'));
         }
-        bm_soll_schreiben($nr, $soll['aktion'], (int) $soll['watt']);
+        bm_soll_schreiben($nr, $soll['aktion'], (int) $soll['watt'],
+            isset($soll['quelle']) ? $soll['quelle'] : '');
         return array(1, sprintf(bm_t('DIENST.LEBENSZEICHEN_OK'), (int) $cfg['totmann']));
     }
 
@@ -1076,7 +1109,7 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
          * koennte, und das ist genau verkehrt herum. */
         list($ok, $meldung) = bm_steuern($g, $pr, 'sperren', 0);
         if ($ok) {
-            bm_soll_schreiben($nr, 'sperren', 0);
+            bm_soll_schreiben($nr, 'sperren', 0, $bm_quelle);
             $sofortAbruf = true;
         }
         return array($ok, $meldung);
@@ -1127,14 +1160,14 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
         $rest = $bremse - (time() - $zuletzt);
         // Der Sollwert wird trotzdem aufgefrischt - sonst laeuft die
         // Totmannschaltung ab, nur weil die Bremse gegriffen hat.
-        bm_soll_schreiben($nr, $aktion, $watt);
+        bm_soll_schreiben($nr, $aktion, $watt, $bm_quelle);
         return array(1, sprintf(bm_t('DIENST.BREMSE'), $rest));
     }
 
     list($ok, $meldung) = bm_steuern($g, $pr, $aktion, $watt);
     if ($ok) {
         $letzteSchreibzeit[$nr] = time();
-        bm_soll_schreiben($nr, $aktion, $watt);
+        bm_soll_schreiben($nr, $aktion, $watt, $bm_quelle);
         $sofortAbruf = true;
     }
     return array($ok, $meldung);
@@ -1413,7 +1446,18 @@ function bm_selbsttest()
     $pylMeldung = '';
     $g0 = array('geraetedatei' => '', 'baud' => 0, 'unit' => 0, 'nennkapaz' => 0.0);
     if (function_exists('bm_u8')) {
-        $pos = 5;
+        /* Stelle 7, nicht 5.
+         *
+         * Der nachgestellte Rahmen ist: Kennbyte(1) Modulzahl(1) Zellzahl(1)
+         * zwei Zellspannungen(4) Fuehlerzahl(1) - das Stoerbyte 0xFF steht
+         * also an Index 7. Bis 0.9.6 stand hier 5; dort liegt das hohe Byte
+         * der zweiten Zellspannung (0x0C = 12). Die Pruefung verlangt aber
+         * $zahl === 255 und stand deshalb auf JEDER Anlage auf FEHL - fuer
+         * eine Korrektur, die in Wahrheit greift.
+         *
+         * Ein rotes Kreuz, das nichts bedeutet, ist schlimmer als keine
+         * Pruefung: man sucht dann dort. */
+        $pos = 7;
         $zahl = bm_u8($stoer, $pos);
         $platzt = ($pos + $zahl * 2) > strlen($stoer);
         // Weiterlesen muss scheitern und sich merken, dass es gescheitert ist
@@ -1519,6 +1563,123 @@ function bm_selbsttest()
     $alter = bm_alter();
     $zeilen[] = $alter < 0 ? '[INFO] Es hat noch kein Abruf stattgefunden'
                            : '[INFO] Letztes Abbild vor ' . $alter . ' s geschrieben';
+
+    /* --- Neu in 0.9.7. Alle drei ohne Geraet pruefbar, und alle drei so
+     * beschaffen, dass ein Rueckfall im Betrieb NICHT auffiele: das Ergebnis
+     * waere keine Fehlermeldung, sondern eine Zahl - nur die falsche. */
+    $zeilen[] = '';
+    $zeilen[] = 'Neu in 0.9.7:';
+
+    // Registertyp f32. 0x42C8_0000 ist die 100.0 nach IEEE 754.
+    $pf = array(200 => 0x42C8, 201 => 0x0000,      // 100.0, hohes Wort zuerst
+                202 => 0x0000, 203 => 0x42C8,      // dasselbe, Worte vertauscht
+                204 => 0x7FC0, 205 => 0x0000);     // NaN
+    $f1 = bm_wert_aus($pf, array('reg' => 200, 'typ' => 'f32', 'faktor' => 1, 'nk' => 2));
+    $f2 = bm_wert_aus($pf, array('reg' => 202, 'typ' => 'f32', 'faktor' => 1, 'nk' => 2,
+                                 'wort' => 'nieder'));
+    $f3 = bm_wert_aus($pf, array('reg' => 204, 'typ' => 'f32', 'faktor' => 1, 'nk' => 2));
+    $fOk = ($f1 !== null && abs($f1 - 100.0) < 0.001)
+        && ($f2 !== null && abs($f2 - 100.0) < 0.001)
+        && ($f3 === null);
+    $zeilen[] = ($fOk ? '[OK]   ' : '[FEHL] ') . 'Registertyp f32: 0x42C8_0000 = '
+              . var_export($f1, true) . ' (erwartet 100), Worte vertauscht = '
+              . var_export($f2, true) . ', NaN = ' . var_export($f3, true)
+              . ' (erwartet NULL - NaN ist kein Messwert)';
+    if (!$fOk) {
+        $fehler++;
+    }
+
+    // Die Spiegelung der Schreibantwort. Modbus wiederholt bei FC 6 Register
+    // und Wert; bis 0.9.6 wurde diese Antwort weggeworfen.
+    $echoGut    = bm_echo_pruefen(pack('nn', 47075, 500), 47075, 500, 'den Wert');
+    $echoAnders = bm_echo_pruefen(pack('nn', 47075, 300), 47075, 500, 'den Wert');
+    $echoFalsch = bm_echo_pruefen(pack('nn', 47076, 500), 47075, 500, 'den Wert');
+    $echoKurz   = bm_echo_pruefen('abc', 47075, 500, 'den Wert');
+    $eOk = ($echoGut === true) && is_array($echoAnders) && is_array($echoFalsch)
+        && is_array($echoKurz);
+    $zeilen[] = ($eOk ? '[OK]   ' : '[FEHL] ') . 'Schreibbestaetigung: gleiche Antwort '
+              . 'angenommen, gekappter Wert abgewiesen, falsches Register abgewiesen, '
+              . 'zu kurze Antwort abgewiesen';
+    if (!$eOk) {
+        $fehler++;
+    }
+
+    // Der Zwangszustand als Zahl - der Text 'laden:500' taugt nicht als
+    // Analogwert fuer einen virtuellen Eingang.
+    $sOk = (bm_sollart('laden:500') === 1) && (bm_sollart('entladen:800') === 2)
+        && (bm_sollart('sperren:0') === 3) && (bm_sollart('') === 0)
+        && (bm_sollart('automatik') === 0);
+    $zeilen[] = ($sOk ? '[OK]   ' : '[FEHL] ') . 'Zwangszustand als Zahl: laden 1, '
+              . 'entladen 2, sperren 3, kein Zwang 0';
+    if (!$sOk) {
+        $fehler++;
+    }
+
+    /* --- Neu in 0.9.8. Auch diese drei lassen sich ohne Geraet pruefen. */
+    $zeilen[] = '';
+    $zeilen[] = 'Neu in 0.9.8:';
+
+    /* Bits aus einer FC-1-Antwort. Der Prueffall stammt aus der
+     * Modbus-Spezifikation: die Antwort CD 6B 05 auf 19 Spulen ab Adresse 20.
+     * Niedrigstes Bit zuerst, also ergibt 0xCD die Folge 1 0 1 1 0 0 1 1. */
+    $bits = bm_bits_auspacken("\xCD\x6B\x05", 20, 19);
+    $erw = array(1,0,1,1,0,0,1,1, 1,1,0,1,0,1,1,0, 1,0,1);
+    $bitOk = !isset($bits['_fehler']) && (array_values($bits) === $erw);
+    $zeilen[] = ($bitOk ? '[OK]   ' : '[FEHL] ') . 'Modbus FC 1: CD 6B 05 ergibt 19 Bits ab '
+              . 'Adresse 20 -> ' . implode('', array_values(is_array($bits)
+                 && !isset($bits['_fehler']) ? $bits : array()))
+              . ' (erwartet ' . implode('', $erw) . ')';
+    if (!$bitOk) {
+        $fehler++;
+    }
+    // Und die Gegenprobe: eine zu kurze Antwort muss abgewiesen werden, nicht
+    // mit Nullen aufgefuellt.
+    $kurzBits = bm_bits_auspacken("\xCD", 0, 19);
+    $kurzOk = is_array($kurzBits) && isset($kurzBits['_fehler']);
+    $zeilen[] = ($kurzOk ? '[OK]   ' : '[FEHL] ') . 'Modbus FC 1: eine zu kurze Bitantwort '
+              . 'wird abgewiesen statt mit Nullen aufgefuellt';
+    if (!$kurzOk) {
+        $fehler++;
+    }
+
+    /* Restenergie und Restzeit. 10 kWh, 50 Prozent, 1000 W Entladung: 5 kWh
+     * drin, das reicht 300 Minuten. Ohne Kapazitaet gibt es KEINE Zahl. */
+    list($rk1, $rz1) = bm_restwerte(array('KAPAZ' => 10.0, 'SOC' => 50.0, 'PBAT' => -1000),
+                                    array('nennkapaz' => 0.0));
+    list($rk2, $rz2) = bm_restwerte(array('KAPAZ' => 10.0, 'SOC' => 50.0, 'PBAT' => 1000),
+                                    array('nennkapaz' => 0.0));
+    list($rk3, $rz3) = bm_restwerte(array('SOC' => 50.0, 'PBAT' => -1000),
+                                    array('nennkapaz' => 0.0));
+    list($rk4, $rz4) = bm_restwerte(array('KAPAZ' => 10.0, 'SOC' => 50.0, 'PBAT' => 3),
+                                    array('nennkapaz' => 0.0));
+    $restOk = ($rk1 === 5.0 && $rz1 === 300) && ($rk2 === 5.0 && $rz2 === 300)
+           && ($rk3 === null && $rz3 === null) && ($rk4 === 5.0 && $rz4 === null);
+    $zeilen[] = ($restOk ? '[OK]   ' : '[FEHL] ') . 'Restenergie und Restzeit: 10 kWh bei 50 % '
+              . 'und 1000 W -> ' . var_export($rk1, true) . ' kWh, ' . var_export($rz1, true)
+              . ' min; ohne Kapazitaet -> ' . var_export($rk3, true) . '; bei 3 W Ruhe -> '
+              . var_export($rz4, true) . ' (jeweils NULL erwartet, keine erfundene Zahl)';
+    if (!$restOk) {
+        $fehler++;
+    }
+
+    /* Der Sammelmerker. Er darf NUR anschlagen, was gemessen vorliegt -
+     * ein fehlender Wert erzeugt weder Alarm noch Entwarnung. */
+    $acfg = array_merge(bm_vorgaben(), array('drift_warnung' => 50, 'temp_max' => 45,
+                                             'temp_min' => 0));
+    $a1 = bm_alarm(array('ok' => 1, 'UZDIFF' => 20, 'TMAX' => 30, 'TMIN' => 10), $acfg);
+    $a2 = bm_alarm(array('ok' => 1, 'UZDIFF' => 120, 'TMAX' => 30, 'TMIN' => 10), $acfg);
+    $a3 = bm_alarm(array('ok' => 1, 'TMAX' => 60, 'TMIN' => 10), $acfg);
+    $a4 = bm_alarm(array('ok' => 1), $acfg);
+    $a5 = bm_alarm(array('ok' => 0, 'fehlertext' => 'Zeitueberschreitung'), $acfg);
+    $alOk = (count($a1) === 0) && (count($a2) === 1) && (count($a3) === 1)
+         && (count($a4) === 0) && (count($a5) === 1);
+    $zeilen[] = ($alOk ? '[OK]   ' : '[FEHL] ') . 'Sammelmerker: heil 0, Drift 1, zu warm 1, '
+              . 'ohne Messwerte 0 (kein Alarm aus fehlenden Werten), stummes Geraet 1 - '
+              . 'gemessen ' . count($a1) . '/' . count($a2) . '/' . count($a3) . '/'
+              . count($a4) . '/' . count($a5);
+    if (!$alOk) {
+        $fehler++;
+    }
 
     $zeilen[] = '';
     $zeilen[] = 'Nicht geprueft, weil dafuer ein Speicher noetig ist:';

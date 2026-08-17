@@ -15,10 +15,12 @@ muss das BMS selbst fragen.
 | | |
 |---|---|
 | **Messwerte** | Ladezustand, Gesundheitszustand, Batteriespannung und -strom, Leistung, höchste und niedrigste Zelltemperatur, höchste und niedrigste Zellspannung, **Zelldrift**, Zyklen, Kapazität, Fehler- und Warnbits |
-| **Je Modul** | Spannung jeder einzelnen Zelle, Spannungsspanne, Temperaturen |
-| **Steuerung** | Laden und Entladen erzwingen, mit Leistungsgrenze, Ladefenster, Schreibbremse und **Totmannschaltung** |
-| **Ausgabe** | MQTT über das LoxBerry-Gateway und ein tokengeschützter HTTP-Endpunkt für den Miniserver |
-| **Loxone** | Fertige Importdateien für virtuelle Eingänge und Ausgänge, dazu eine vollständige Baustein-Liste zum 1:1-Nachbauen |
+| **Je Modul** | Spannung jeder einzelnen Zelle, Spannungsspanne, Temperaturen — dazu **welche** Zelle die schwächste ist |
+| **Abgeleitet** | Restenergie in kWh und geschätzte Restzeit bis voll oder leer; ein **Sammelmerker** mit Klartext, wenn Drift, Temperatur oder Fehlerbits auffällig sind |
+| **Steuerung** | Laden und Entladen erzwingen, mit Leistungsgrenze, Ladefenster, Schreibbremse und **Totmannschaltung**. Jeder Schreibbefehl wird gegen die Antwort des Geräts gehalten; ein **Trockenlauf** zeigt vorher, welche Register beschrieben würden |
+| **Ausgabe** | MQTT über das LoxBerry-Gateway und ein tokengeschützter HTTP-Endpunkt für den Miniserver, beide mit Zeitstempel |
+| **Loxone** | Fertige Importdateien für virtuelle Eingänge und Ausgänge — nur mit den Größen, die der jeweilige Speicher wirklich liefert —, dazu eine vollständige Baustein-Liste zum 1:1-Nachbauen |
+| **Fehlersuche** | Rohregister lesen, Mitschnitt des Datenverkehrs, Selbstprüfung, die den eigenen Endpunkt wirklich aufruft |
 
 ## Unterstützte Speicher
 
@@ -32,7 +34,9 @@ muss das BMS selbst fragen.
 
 Weitere Speicher kommen als **JSON-Profildatei** dazu, ohne Änderung am
 Quelltext. Der Reiter Einstellungen lädt jedes vorhandene Profil als Vorlage
-herunter.
+herunter und nimmt eine geänderte Datei dort auch wieder entgegen — geprüft
+wird sie beim Annehmen, und was nicht vollständig ist, wird abgewiesen und
+begründet.
 
 Jedes Profil trägt zwei Angaben, die die Oberfläche ungeschönt anzeigt:
 
@@ -107,6 +111,7 @@ gelten:
 | `status` | lesend | alle Messgrößen eines Speichers, eine Zeile |
 | `zellen` | lesend | Spannungsspanne und Temperaturen je Modul |
 | `liste` | lesend | alle eingerichteten Speicher |
+| `summe` | lesend | alle Speicher zusammengefasst, Ladezustand nach Kapazität gewichtet |
 | `roh` | lesend | vollständiges Abbild als JSON |
 | `laden` `&watt=` | schaltend | Laden erzwingen; 0 gibt die Regie zurück |
 | `entladen` `&watt=` | schaltend | Entladen erzwingen |
@@ -157,7 +162,17 @@ als Knopf erreichbar.
 Vor dem ersten Zwangsbefehl: Rohregister lesen, Werte gegen die
 Herstelleranzeige halten, mit kleiner Leistung anfangen und am Gerät nachsehen.
 
-## Neu in 0.9.1
+## Änderungen
+
+Die Freigabenotiz zu jeder Fassung steht bei den Releases:
+<https://github.com/timanders22/LoxBerry-Plugin-BatterieBMS/releases>
+
+Dieser Abschnitt stand bis 0.9.7 als „Neu in 0.9.1" hier und war damit zwei
+Fassungen alt — eine Fassungsnummer in einer Überschrift wird mit jedem Release
+falscher. Der Inhalt bleibt, weil er beschreibt, *warum* die Prüfungen im Reiter
+Test so aussehen, wie sie aussehen.
+
+### Behoben in 0.9.1
 
 Eine Durchsicht der Fassung 0.9.0 hat sechs Stellen zutage gefördert, an denen
 das Plugin im Störungsfall stillschweigend das Falsche tat. Alle sechs sind

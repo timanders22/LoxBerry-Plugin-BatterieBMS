@@ -127,6 +127,121 @@ function bm_pruefungen()
         $xml !== false ? sprintf(bm_t('TEST.A_XML_OK'), bm_e($vname), count($xml->children()))
                        : bm_t('TEST.A_XML_KAPUTT'));
 
+    /* ---------------------------------------------------------------
+     * Vier Pruefungen zu den Korrekturen der Fassung 0.9.7.
+     *
+     * Alle vier sind in beide Richtungen geeicht: mit der Korrektur gruen,
+     * mit zurueckgebauter Korrektur rot. Eine Pruefung, die auch ohne die
+     * Korrektur bestanden haette, prueft nichts.
+     * --------------------------------------------------------------- */
+
+    /* Arbeitet der Dienst noch, oder lebt nur sein Prozess?
+     *
+     * Dieselbe Frage stellt der Waechter in bin/dienst.sh, und er benutzt
+     * dieselbe Grenze: das Fuenffache des Takts, mindestens 180 s. Wer eine
+     * der beiden Stellen aendert, aendert die andere mit. */
+    $abbildalter = bm_alter();
+    $grenze = max(180, 5 * max(5, (int) $cfg['intervall']));
+    if ($abbildalter < 0) {
+        $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_ABBILD'), bm_t('TEST.A_ABBILD_NIE'));
+    } else {
+        $zeilen[] = bm_pruefzeile($abbildalter <= $grenze ? 1 : 0, bm_t('TEST.F_ABBILD'),
+            sprintf(bm_t('TEST.A_ABBILD'), (int) $abbildalter, (int) $grenze));
+    }
+
+    /* Traegt die MQTT-Veroeffentlichung einen Zeitstempel?
+     *
+     * Ohne ihn ist ein toter Dienst von einem gesunden nicht zu unterscheiden:
+     * es wird nichts mehr gesendet, die letzten Werte stehen weiter im Broker.
+     * Gerechnet wird ohne zu senden - eine Pruefung darf nichts ausloesen. */
+    $paare = bm_mqtt_paare(bm_loxone(), false);
+    $ts = isset($paare['ts']) ? (int) $paare['ts'] : 0;
+    if ($abbildalter < 0) {
+        $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_MQTT_TS'), bm_t('TEST.A_MQTT_TS_NIE'));
+    } else {
+        $zeilen[] = bm_pruefzeile($ts > 0 ? 1 : 0, bm_t('TEST.F_MQTT_TS'),
+            $ts > 0 ? sprintf(bm_t('TEST.A_MQTT_TS_OK'), date('d.m.Y H:i:s', $ts))
+                    : bm_t('TEST.A_MQTT_TS_FEHLT'));
+    }
+
+    /* Bekommt jeder virtuelle Eingang der Importdatei auch einen Wert?
+     *
+     * Gelesen wird aus der ERZEUGTEN Datei, nicht aus der Feldliste - sonst
+     * prueft sich die Auswahl selbst. ALTER, OK, SOLLART und SOLLALTER bildet
+     * der Endpunkt, die stehen nie im Abbild. */
+    $leer = array();
+    $gemessene = 0;
+    foreach ($geraete as $nr => $g) {
+        if (!bm_felder_gemessen($nr)) {
+            continue;   // ohne eine einzige Messung laesst sich das nicht sagen
+        }
+        $gemessene++;
+        list($vn, $vi) = bm_vorlage_eingaenge($nr);
+        $tr = array();
+        preg_match_all('/Title="BMS_[0-9]+_([A-Z]+)"/', $vi, $tr);
+        foreach ((array) (isset($tr[1]) ? $tr[1] : array()) as $feld) {
+            if (in_array($feld, array('ALTER', 'OK', 'SOLLART', 'SOLLALTER'), true)) {
+                continue;
+            }
+            if (!isset($werte[$nr][$feld]) || $werte[$nr][$feld] === null) {
+                $leer[] = bm_e($g['name']) . ': ' . bm_e($feld);
+            }
+        }
+    }
+    if ($gemessene === 0) {
+        $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_VORLAGE_LEER'),
+            bm_t('TEST.A_VORLAGE_LEER_NIE'));
+    } else {
+        $zeilen[] = bm_pruefzeile($leer ? 0 : 1, bm_t('TEST.F_VORLAGE_LEER'),
+            $leer ? sprintf(bm_t('TEST.A_VORLAGE_LEER'), implode(', ', $leer))
+                  : sprintf(bm_t('TEST.A_VORLAGE_LEER_OK'), $gemessene));
+    }
+
+    /* Antwortet der eigene Endpunkt wirklich? (B8)
+     *
+     * Alle uebrigen Zeilen sehen sich Dateien an. Diese eine spricht die
+     * Stelle an, die spaeter der Miniserver anspricht - und nur sie findet
+     * die Klasse, bei der html/ und htmlauth/ installiert in getrennten
+     * Baeumen liegen. Drei Ausgaenge: geantwortet und plausibel, geantwortet
+     * und falsch, NICHT FESTSTELLBAR. Der dritte ist Pflicht - 'ich kann es
+     * nicht messen' darf nicht wie 'in Ordnung' aussehen. */
+    list($ep_stand, $ep_code, $ep_text, $ep_url) = bm_selbsttest_endpunkt('status');
+    $zeilen[] = bm_pruefzeile($ep_stand, bm_t('TEST.F_ENDPUNKT'),
+        $ep_stand === 1 ? sprintf(bm_t('TEST.A_EP_OK'), (int) $ep_code, bm_e($ep_text))
+        : ($ep_stand === 0 ? sprintf(bm_t('TEST.A_EP_FALSCH'), (int) $ep_code, bm_e($ep_text))
+                           : bm_e($ep_text)));
+
+    /* Liegt an einem Speicher etwas an? (B20) */
+    $alarme = array();
+    foreach ($werte as $nr => $w) {
+        $gr = bm_alarm($w, $cfg);
+        if ($gr) {
+            $alarme[] = bm_e($w['name']) . ': ' . bm_e(implode(', ', $gr));
+        }
+    }
+    if (!$werte) {
+        $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_ALARM'), bm_t('TEST.A_ALARM_NIE'));
+    } else {
+        $zeilen[] = bm_pruefzeile($alarme ? 0 : 1, bm_t('TEST.F_ALARM'),
+            $alarme ? implode(' &middot; ', $alarme)
+                    : sprintf(bm_t('TEST.A_ALARM_KEINER'), count($werte)));
+    }
+
+    /* Laeuft gerade ein Mitschnitt? Er soll nicht aus Versehen stehenbleiben. */
+    $mrest = bm_mitschnitt_laeuft($cfg);
+    $zeilen[] = bm_pruefzeile($mrest > 0 ? 0 : -1, bm_t('TEST.F_MITSCHNITT'),
+        $mrest > 0 ? sprintf(bm_t('TEST.A_MITSCHNITT_AN'), (int) $mrest)
+                   : bm_t('TEST.A_MITSCHNITT_AUS'));
+
+    /* Steht der Zwangszustand in der Importdatei?
+     *
+     * Der Endpunkt sendet ihn seit jeher; in die Vorlage kam er bis 0.9.6
+     * nicht. Wer die Vorlage benutzte, hatte ihn also gerade nicht. */
+    list($vn2, $vi2) = bm_vorlage_eingaenge(1);
+    $hatSoll = (strpos($vi2, 'SOLLART=') !== false) && (strpos($vi2, 'SOLLALTER=') !== false);
+    $zeilen[] = bm_pruefzeile($hatSoll ? 1 : 0, bm_t('TEST.F_VORLAGE_SOLL'),
+        $hatSoll ? bm_t('TEST.A_VORLAGE_SOLL_OK') : bm_t('TEST.A_VORLAGE_SOLL_FEHLT'));
+
     return $zeilen;
 }
 
@@ -196,10 +311,14 @@ function bm_test_aktion($aktion)
 }
 
 /** Mini-SVG: Ladezustand ueber den heutigen Tag (0 bis 24 h, 0 bis 100 %). */
-function bm_soc_svg($punkte)
+function bm_soc_svg($punkte, $tag = '')
 {
     $w = 720; $h = 120; $x0 = 34; $y0 = 8; $pw = $w - $x0 - 8; $ph = $h - $y0 - 20;
-    $tag0 = strtotime('today 00:00');
+    // Der Tagesanfang richtet sich nach dem GEZEIGTEN Tag, nicht nach heute -
+    // sonst faellt bei der Tagesauswahl jeder Punkt aus dem Bild.
+    $tag0 = (preg_match('/^[0-9]{8}$/', (string) $tag))
+        ? (int) strtotime(substr($tag, 0, 4) . '-' . substr($tag, 4, 2) . '-' . substr($tag, 6, 2))
+        : strtotime('today 00:00');
     $svg = '<svg viewBox="0 0 ' . $w . ' ' . $h . '" style="width:100%;max-width:' . $w
          . 'px;height:auto;background:#fafafa;border:1px solid #e0e0e0;border-radius:8px;"'
          . ' xmlns="http://www.w3.org/2000/svg">';

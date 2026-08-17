@@ -61,7 +61,7 @@ if (!hash_equals($bm_soll, $bm_ist)) {
 }
 
 /* ---------------- Aktion (Weissliste) ---------------- */
-$bm_lesend = array('status', 'zellen', 'liste', 'roh', 'evcc');
+$bm_lesend = array('status', 'zellen', 'liste', 'roh', 'evcc', 'summe');
 $bm_schaltend = array('laden', 'entladen', 'automatik', 'lebenszeichen', 'abruf',
                       'sperren', 'batteriemodus');
 $bm_aktion = isset($_GET['aktion']) ? (string) $_GET['aktion'] : 'status';
@@ -148,6 +148,57 @@ if ($bm_aktion === 'evcc') {
     exit;
 }
 
+/* Summe ueber alle Speicher.
+ *
+ * Bei mehreren Speichern brauchte Loxone bisher je einen virtuellen Eingang
+ * und musste selbst rechnen. Der Ladezustand wird nach Kapazitaet gewichtet -
+ * das ist die einzige richtige Art, zwei verschieden grosse Speicher
+ * zusammenzufassen.
+ *
+ * FAIL CLOSED: fehlt bei EINEM Speicher die Kapazitaet, gibt es keinen
+ * gewichteten Ladezustand, sondern einen Strich. Ein ungewichteter
+ * Mittelwert waere eine Zahl, die richtig aussieht und es nicht ist.
+ */
+if ($bm_aktion === 'summe') {
+    $bm_kap = 0.0;
+    $bm_kwh = 0.0;
+    $bm_p = 0.0;
+    $bm_n = 0;
+    $bm_okn = 0;
+    $bm_voll = true;
+    $bm_alarm = 0;
+    foreach ($bm_alle as $bm_nr2 => $bm_e) {
+        $bm_n++;
+        if (!empty($bm_e['ok'])) {
+            $bm_okn++;
+        }
+        if (!empty($bm_e['ALARM'])) {
+            $bm_alarm = 1;
+        }
+        if (isset($bm_e['PBAT']) && is_numeric($bm_e['PBAT'])) {
+            $bm_p += (float) $bm_e['PBAT'];
+        }
+        $bm_k = (isset($bm_e['KAPAZ']) && is_numeric($bm_e['KAPAZ']) && $bm_e['KAPAZ'] > 0)
+            ? (float) $bm_e['KAPAZ'] : 0.0;
+        $bm_r = (isset($bm_e['RESTKWH']) && is_numeric($bm_e['RESTKWH']))
+            ? (float) $bm_e['RESTKWH'] : null;
+        if ($bm_k <= 0 || $bm_r === null) {
+            $bm_voll = false;
+            continue;
+        }
+        $bm_kap += $bm_k;
+        $bm_kwh += $bm_r;
+    }
+    printf("SUMME;OK=%d;N=%d;NOK=%d;SOC=%s;KAPAZ=%s;RESTKWH=%s;PBAT=%s;ALARM=%d;ALTER=%d\n",
+        (int) ($bm_n > 0 && $bm_okn === $bm_n), $bm_n, $bm_okn,
+        ($bm_voll && $bm_kap > 0) ? (string) round($bm_kwh / $bm_kap * 100, 1) : '-',
+        ($bm_voll && $bm_kap > 0) ? (string) round($bm_kap, 2) : '-',
+        ($bm_voll && $bm_kap > 0) ? (string) round($bm_kwh, 2) : '-',
+        $bm_n > 0 ? (string) round($bm_p, 0) : '-',
+        $bm_alarm, $bm_alter);
+    exit;
+}
+
 if ($bm_aktion === 'liste') {
     echo 'LISTE;OK=' . (int) (!empty($bm_lox['ok'])) . ';N=' . count($bm_alle)
        . ';ALTER=' . $bm_alter . "\n";
@@ -210,8 +261,14 @@ if ($bm_aktion === 'status') {
         $teile[] = $feld . '=' . bm_w($bm_g[$feld]);
     }
     // Der Sollwert gehoert dazu: sonst weiss Loxone nicht, ob ein Zwang laeuft.
+    //
+    // SOLL ist Text und taugt nicht als Analogwert; SOLLART sagt dasselbe als
+    // Zahl (0 kein Zwang, 1 laden, 2 entladen, 3 gesperrt) und laesst sich
+    // deshalb an einen virtuellen Eingang haengen. SOLLART steht ganz hinten,
+    // weil neue Felder nach der Regel oben immer hinten angehaengt werden.
     $teile[] = 'SOLL=' . ($bm_g['sollwert'] !== '' ? str_replace(';', '_', $bm_g['sollwert']) : 'automatik');
     $teile[] = 'SOLLALTER=' . (int) $bm_g['sollwert_alter'];
+    $teile[] = 'SOLLART=' . bm_sollart($bm_g['sollwert']);
     echo implode(';', $teile) . "\n";
     exit;
 }
@@ -240,6 +297,7 @@ if (bm_dienst_pid() === 0) {
  * zurechtgebogen. Ein missverstandener Betriebsartwechsel ist schlimmer als
  * ein abgelehnter: EVCC haelt den Speicher dann fuer angehalten, waehrend er
  * weiter entlaedt. */
+$bm_war_modus = ($bm_aktion === 'batteriemodus');
 if ($bm_aktion === 'batteriemodus') {
     $bm_modus = isset($_GET['modus']) ? (string) $_GET['modus'] : '';
     $bm_ziel = bm_evcc_modus($bm_modus);
@@ -264,7 +322,11 @@ if ($bm_aktion === 'batteriemodus') {
     $bm_aktion = $bm_ziel;
 }
 
-$bm_befehl = array('aktion' => $bm_aktion, 'geraet' => (int) $bm_nr);
+/* Woher kam der Befehl? 'batteriemodus' ist der Weg, den EVCC benutzt, alles
+ * uebrige kommt vom Miniserver. Steht die Herkunft im Sollwert, laesst sich
+ * spaeter beantworten, warum der Speicher gerade laedt. */
+$bm_befehl = array('aktion' => $bm_aktion, 'geraet' => (int) $bm_nr,
+                   'quelle' => $bm_war_modus ? 'EVCC' : 'Loxone');
 if ($bm_aktion === 'laden' || $bm_aktion === 'entladen') {
     if ($bm_watt === '') {
         http_response_code(400);

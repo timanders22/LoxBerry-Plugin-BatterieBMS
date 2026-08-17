@@ -175,6 +175,15 @@ function bm_status_felder()
         'MODUS'    => array('',    'BM_FELD.MODUS',    0,    10),
         'ALTER'    => array('s',   'BM_FELD.ALTER',    0,    86400),
         'OK'       => array('',    'BM_FELD.OK',       0,    1),
+        /* Ab hier neu in 0.9.8. Neue Groessen werden IMMER hinten
+         * angehaengt - siehe den Hinweis zur Suchreihenfolge in
+         * webfrontend/html/index.php. Keiner der neuen Namen enthaelt einen
+         * bestehenden als Anfangsstueck mit Gleichheitszeichen. */
+        'UZMINMOD'   => array('',    'BM_FELD.UZMINMOD',   0, 64),
+        'UZMINZELLE' => array('',    'BM_FELD.UZMINZELLE', 0, 64),
+        'RESTKWH'    => array('kWh', 'BM_FELD.RESTKWH',    0, 500),
+        'RESTZEIT'   => array('min', 'BM_FELD.RESTZEIT',   0, 6000),
+        'ALARM'      => array('',    'BM_FELD.ALARM',      0, 1),
     );
 }
 
@@ -195,10 +204,22 @@ function bm_status_felder()
  *
  * Registerbeschreibung:
  *   reg     Registeradresse
- *   typ     u16 | s16 | u32 | s32 | u16hi | u16lo | ascii
+ *   typ     u16 | s16 | u32 | s32 | f32 | u16hi | u16lo
  *   faktor  Multiplikator auf den Rohwert
  *   nk      Nachkommastellen der Ausgabe
- *   wort    bei 32 Bit: 'hoch' (High Word zuerst, Vorgabe) oder 'nieder'
+ *   wort    bei u32, s32 und f32: 'hoch' (High Word zuerst, Vorgabe)
+ *           oder 'nieder'
+ *
+ * Bis 0.9.6 stand hier zusaetzlich 'ascii'. Diesen Typ hat bm_wert_aus() nie
+ * gekannt: ein Profil mit typ=ascii fiel durch alle Zweige und bekam den
+ * rohen Registerwert mal Faktor - also eine Zahl, die aussieht wie ein
+ * Messwert. Ein Zeichenkettentyp passt auch nicht in dieses Geruest, denn
+ * jede Messgroesse traegt Einheit und Grenzen. Der Eintrag ist deshalb
+ * entfernt und nicht nachgebaut worden.
+ *
+ * Neu ist 'f32': IEEE 754 mit einfacher Genauigkeit ueber zwei Register. Das
+ * sprechen viele Wechselrichter und BMS-Gateways; ohne diesen Typ liess sich
+ * ein solches Geraet mit einem eigenen Profil nicht auslesen.
  * ================================================================== */
 function bm_profile_eingebaut()
 {
@@ -525,6 +546,15 @@ function bm_vorgaben()
         'wartezeit'      => 8,
         'zeitueberschreitung' => 4, // Sekunden je Modbus-Anforderung
         'drift_warnung'  => 50,     // mV Zellspannungsdrift, ab der gewarnt wird
+        // Grenzen fuer den Sammelmerker. Das sind EINSTELLUNGEN, keine
+        // Messwerte: 45 Grad entspricht der Schwelle, die auch die
+        // Baustein-Liste im Reiter Loxone vorschlaegt, 0 Grad der Grenze,
+        // unterhalb derer ein Lithiumspeicher nicht geladen werden soll.
+        'temp_max'       => 45,
+        'temp_min'       => 0,
+        // Mitschnitt des Datenverkehrs: Unixzeit, BIS zu der er laeuft.
+        // 0 heisst aus - und ab Werk ist er aus.
+        'mitschnitt_bis' => 0,
         // EVCC. Aus, bis es jemand einschaltet - es sind zusaetzliche Themen,
         // und wer EVCC nicht benutzt, soll sie nicht im Broker stehen haben.
         'evcc_ein'       => 0,
@@ -778,6 +808,36 @@ function bm_token()
     return (string) $cfg['aktionstoken'];
 }
 
+/**
+ * Die Art eines laufenden Zwangs als Zahl.
+ *
+ *   0  kein Zwang, der Speicher regelt selbst
+ *   1  Laden erzwungen
+ *   2  Entladen erzwungen
+ *   3  gesperrt (nicht entladen)
+ *
+ * Der Sollwert ist eine Zeichenkette wie 'laden:500'. Als Text taugt er weder
+ * fuer einen analogen virtuellen Eingang noch fuer einen Vergleicher in
+ * Loxone. Der Endpunkt liefert ihn deshalb ZUSAETZLICH als Zahl; die
+ * Zeichenkette bleibt unveraendert stehen, damit bestehende Projekte weiter
+ * finden, was sie suchen.
+ */
+function bm_sollart($sollwert)
+{
+    $s = (string) $sollwert;
+    // 'entladen' zuerst: 'laden' steckt darin, wenn auch nicht an Stelle 0.
+    if (strpos($s, 'entladen') === 0) {
+        return 2;
+    }
+    if (strpos($s, 'laden') === 0) {
+        return 1;
+    }
+    if (strpos($s, 'sperren') === 0) {
+        return 3;
+    }
+    return 0;
+}
+
 /* ---------------- Zwischenspeicher ---------------- */
 
 function bm_loxone()
@@ -1009,22 +1069,60 @@ function bm_befehl_absetzen($befehl, $wartezeit = null)
 
 /* ---------------- Verlauf ---------------- */
 
+/**
+ * Einen Tagesverlauf lesen.
+ *
+ * Bis 0.9.7 standen je Zeile nur Zeit, Ladezustand und Leistung. Ab 0.9.8
+ * kommen Zelldrift, hoechste Temperatur, Gesundheitszustand und Zyklenzahl
+ * dazu - also gerade die vier Groessen, wegen deren langsamer Veraenderung
+ * man ein BMS ueberhaupt ausliest.
+ *
+ * Aeltere Dateien haben drei Spalten und bleiben lesbar; die fehlenden
+ * Spalten sind dann null und werden NICHT durch eine 0 ersetzt.
+ *
+ * Rueckgabe je Punkt: array(ts, soc, pbat, uzdiff, tmax, soh, zyklen). Die
+ * ersten drei Stellen sind absichtlich unveraendert, damit bm_soc_svg()
+ * weiterlaeuft.
+ */
 function bm_verlauf_lesen($nummer, $tag = '')
 {
     if ($tag === '') {
         $tag = date('Ymd');
+    }
+    if (!preg_match('/^[0-9]{8}$/', (string) $tag)) {
+        return array();
     }
     $f = bm_paths()['datadir'] . '/verlauf/geraet' . (int) $nummer . '_' . $tag . '.csv';
     $out = array();
     if (is_file($f)) {
         foreach (file($f, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: array() as $zeile) {
             $c = explode(';', $zeile);
-            if (count($c) >= 2) {
-                $out[] = array((int) $c[0], (float) $c[1], isset($c[2]) && $c[2] !== '' ? (float) $c[2] : 0);
+            if (count($c) < 2) {
+                continue;
             }
+            $z = function ($i) use ($c) {
+                return (isset($c[$i]) && $c[$i] !== '') ? (float) $c[$i] : null;
+            };
+            $out[] = array((int) $c[0], (float) $c[1],
+                           $z(2) === null ? 0 : $z(2),
+                           $z(3), $z(4), $z(5), $z(6));
         }
     }
     return $out;
+}
+
+/** Welche Tage liegen fuer diesen Speicher vor? Neueste zuerst. */
+function bm_verlauf_tage($nummer)
+{
+    $muster = bm_paths()['datadir'] . '/verlauf/geraet' . (int) $nummer . '_*.csv';
+    $tage = array();
+    foreach ((array) glob($muster) as $d) {
+        if (preg_match('/_([0-9]{8})\.csv$/', $d, $m)) {
+            $tage[] = $m[1];
+        }
+    }
+    rsort($tage);
+    return $tage;
 }
 
 /* ==================================================================
@@ -1296,6 +1394,7 @@ function bm_modbus_anfrage($s, array $g, $pdu)
         $transaktion = ($transaktion + 1) & 0xFFFF;
         $rahmen = pack('nnnC', $transaktion, 0, strlen($pdu) + 1, $unit) . $pdu;
     }
+    bm_mitschnitt('>', $rahmen, $g);
     if (@fwrite($s, $rahmen) === false) {
         return array('_fehler' => 'Die Anforderung liess sich nicht senden.');
     }
@@ -1317,7 +1416,10 @@ function bm_modbus_anfrage($s, array $g, $pdu)
             return array('_fehler' => 'Das Geraet hat die Anforderung abgelehnt: '
                 . bm_modbus_ausnahme(ord($kopf[2])));
         }
-        if ($fc === 3 || $fc === 4) {
+        if ($fc === 1 || $fc === 2 || $fc === 3 || $fc === 4) {
+            // FC 1 und 2 antworten wie 3 und 4 mit einem Laengenbyte. Bis
+            // 0.9.7 fielen sie in den Zweig fuer FC 6/16 mit fester Laenge
+            // und wurden dadurch falsch gelesen.
             $rest = bm_lesen_genau($s, ord($kopf[2]) + 2);   // Daten + CRC
             if (is_array($rest)) {
                 return $rest;
@@ -1331,6 +1433,7 @@ function bm_modbus_anfrage($s, array $g, $pdu)
             }
             $ganz = $kopf . $rest;
         }
+        bm_mitschnitt('<', $ganz, $g);
         $nutz = substr($ganz, 0, strlen($ganz) - 2);
         $crc = substr($ganz, -2);
         if (bm_crc16($nutz) !== $crc) {
@@ -1363,6 +1466,7 @@ function bm_modbus_anfrage($s, array $g, $pdu)
     if (is_array($rest)) {
         return $rest;
     }
+    bm_mitschnitt('<', $kopf . $rest, $g);
     if ($teile['fc'] & 0x80) {
         return array('_fehler' => 'Das Geraet hat die Anforderung abgelehnt: '
             . bm_modbus_ausnahme(strlen($rest) > 0 ? ord($rest[0]) : 0));
@@ -1407,10 +1511,55 @@ function bm_register_lesen($s, array $g, $fc, $start, $anzahl)
 /** Ein Register schreiben (FC 6). Rueckgabe: true oder array('_fehler' => …) */
 function bm_register_schreiben($s, array $g, $reg, $wert)
 {
-    $pdu = pack('Cnn', 6, (int) $reg, ((int) $wert) & 0xFFFF);
+    $reg  = ((int) $reg) & 0xFFFF;
+    $wert = ((int) $wert) & 0xFFFF;
+    $pdu = pack('Cnn', 6, $reg, $wert);
     $antwort = bm_modbus_anfrage($s, $g, $pdu);
     if (is_array($antwort)) {
         return $antwort;
+    }
+    // Bis 0.9.6 stand hier 'return true' - geprueft war damit der
+    // Rueckgabewert, nicht die Wirkung.
+    return bm_echo_pruefen($antwort, $reg, $wert, 'den Wert');
+}
+
+/**
+ * Die Spiegelung einer Schreibantwort gegen das Gesendete halten.
+ *
+ * Modbus beantwortet FC 6 mit Registeradresse und Wert, FC 16 mit
+ * Registeradresse und Anzahl - in beiden Faellen genau zwei 16-Bit-Zahlen,
+ * die das Gesendete wiederholen.
+ *
+ * Bis 0.9.6 wurde diese Antwort weggeworfen. Gemeldet wurde Erfolg, sobald
+ * ueberhaupt ein wohlgeformter Rahmen ankam. Ein Geraet, das den Wert kappt,
+ * auf ein anderes Register schreibt oder den Befehl nur teilweise annimmt,
+ * galt damit als erledigt: in Loxone stand ein Ladezwang, den niemand
+ * ausfuehrte, und im Protokoll stand 'erledigt'.
+ *
+ * Abweichungen werden GEMELDET, nicht hingenommen. Ein Geraet, das statt der
+ * bestellten 5000 W nur 3000 uebernimmt, hat nicht diesen Befehl ausgefuehrt,
+ * sondern einen anderen - und der Anwender soll das erfahren, solange er noch
+ * davorsteht.
+ */
+function bm_echo_pruefen($antwort, $reg, $zweite, $was)
+{
+    if (strlen($antwort) < 4) {
+        return array('_fehler' => 'Die Bestaetigung des Schreibbefehls ist mit '
+            . strlen($antwort) . ' statt 4 Datenbytes zu kurz. Der Befehl gilt als NICHT '
+            . 'ausgefuehrt.');
+    }
+    $e = unpack('nreg/nwert', substr($antwort, 0, 4));
+    if ((int) $e['reg'] !== (int) $reg) {
+        return array('_fehler' => 'Das Geraet bestaetigt Register ' . (int) $e['reg']
+            . ', geschrieben wurde aber Register ' . (int) $reg . '. Der Befehl gilt als '
+            . 'NICHT ausgefuehrt.');
+    }
+    if ((int) $e['wert'] !== (int) $zweite) {
+        return array('_fehler' => 'Das Geraet bestaetigt fuer Register ' . (int) $reg . ' '
+            . $was . ' ' . (int) $e['wert'] . ', gesendet wurden ' . (int) $zweite . '. Der '
+            . 'Wert wurde also veraendert oder abgewiesen; der Befehl gilt als NICHT '
+            . 'ausgefuehrt. Bei einer Leistungsangabe heisst das meist, dass das Geraet '
+            . 'eine eigene Obergrenze hat.');
     }
     return true;
 }
@@ -1431,7 +1580,7 @@ function bm_register_schreiben_mehrere($s, array $g, $reg, array $werte)
     if (is_array($antwort)) {
         return $antwort;
     }
-    return true;
+    return bm_echo_pruefen($antwort, ((int) $reg) & 0xFFFF, $anz, 'die Registerzahl');
 }
 
 /** Rohwerte in eine Zahl umrechnen. Fehlt ein Register, kommt null zurueck. */
@@ -1465,6 +1614,25 @@ function bm_wert_aus(array $regs, array $feld)
             if ($typ === 's32' && $roh >= 0x80000000) {
                 $roh -= 0x100000000;
             }
+            break;
+        case 'f32':
+            /* IEEE 754, einfache Genauigkeit, ueber zwei Register.
+             *
+             * NaN und Unendlich sind keine Messwerte. Sie kommen vor, wenn ein
+             * Geraet ein Register noch nicht belegt hat - und sie wuerden hier
+             * ungebremst nach Loxone durchschlagen. Deshalb null: lieber kein
+             * Wert als eine Zahl, die niemand gemessen hat. */
+            if (!isset($regs[$reg + 1])) {
+                return null;
+            }
+            $wort = isset($feld['wort']) ? $feld['wort'] : 'hoch';
+            $hoch   = ($wort === 'nieder') ? $regs[$reg + 1] : $regs[$reg];
+            $nieder = ($wort === 'nieder') ? $regs[$reg] : $regs[$reg + 1];
+            $auf = @unpack('Gwert', pack('n2', $hoch & 0xFFFF, $nieder & 0xFFFF));
+            if (!is_array($auf) || !isset($auf['wert']) || !is_finite($auf['wert'])) {
+                return null;
+            }
+            $roh = $auf['wert'];
             break;
         case 'u16hi':
             $roh = ($roh >> 8) & 0xFF;
@@ -1735,12 +1903,114 @@ function bm_mqtt_wert_saeubern($v)
     return trim(preg_replace('/ {2,}/', ' ', $wert));
 }
 
+/**
+ * Alle Themen-Wert-Paare eines Abbilds bilden - ohne zu senden.
+ *
+ * Bis 0.9.6 entstanden diese Paare mitten im Dienst, in bm_veroeffentlichen().
+ * Von aussen war damit nicht pruefbar, WAS tatsaechlich veroeffentlicht wird -
+ * der Reiter Test konnte nur auflisten, welche Themen es geben koennte. Als
+ * eigene Funktion lassen sie sich rechnen und ansehen, ohne ein einziges Paket
+ * zu schicken.
+ *
+ * $melden = false unterdrueckt die Protokollzeile ueber ein fehlendes
+ * EVCC-Geraet. Der Reiter Test rechnet die Paare nur zum Ansehen nach, und
+ * eine Pruefung darf nichts schreiben.
+ */
+function bm_mqtt_paare(array $abbild, $melden = true)
+{
+    $cfg = bm_config();
+    $geraete = (isset($abbild['geraete']) && is_array($abbild['geraete']))
+        ? $abbild['geraete'] : array();
+    $paare = array(
+        'ok'      => (int) (isset($abbild['ok']) ? $abbild['ok'] : 0),
+        'geraete' => count($geraete),
+        /* Der Zeitstempel des Abbilds - neu in 0.9.7.
+         *
+         * Der Endpunkt fuer den Miniserver liefert seit jeher ALTER; der
+         * MQTT-Zweig lieferte nichts dergleichen. Bei einem Push-Weg ist das
+         * Alter zum Sendezeitpunkt auch immer 0 - was fehlte, ist der
+         * Zeitstempel, aus dem sich das Alter auf der Gegenseite bilden laesst.
+         *
+         * Ohne ihn ist ein toter Dienst von einem gesunden nicht zu
+         * unterscheiden: es wird schlicht nichts mehr gesendet, die zuletzt
+         * gesendeten Werte stehen weiter im Broker, und geraetN/ok behaelt die
+         * 1, die es zuletzt hatte. Das ist die stille Falschaussage, und die
+         * ist schlimmer als eine Fehlermeldung.
+         *
+         * Loxone rechnet in Sekunden seit dem 01.01.2009. Das Alter ergibt
+         * sich dort als (Loxone-Zeit + 1230768000) - ts. Der Satz steht auch
+         * im Reiter Einbindung in Loxone. */
+        'ts'      => (int) (isset($abbild['ts']) ? $abbild['ts'] : 0),
+    );
+    foreach ($geraete as $nr => $e) {
+        $vor = 'geraet' . (int) $nr;
+        foreach (array('SOC' => 'soc', 'SOH' => 'soh', 'UBAT' => 'ubat', 'IBAT' => 'ibat',
+                       'PBAT' => 'pbat', 'TMAX' => 'tmax', 'TMIN' => 'tmin',
+                       'UZMAX' => 'uzmax', 'UZMIN' => 'uzmin', 'UZDIFF' => 'uzdiff',
+                       'ZYKLEN' => 'zyklen', 'KAPAZ' => 'kapaz', 'MODULE' => 'module',
+                       'ZELLEN' => 'zellen', 'FEHLER' => 'fehler', 'WARNUNG' => 'warnung',
+                       'MODUS' => 'modus', 'UZMINMOD' => 'uzminmod',
+                       'UZMINZELLE' => 'uzminzelle', 'RESTKWH' => 'restkwh',
+                       'RESTZEIT' => 'restzeit', 'ALARM' => 'alarm') as $feld => $thema) {
+            $paare[$vor . '/' . $thema] = isset($e[$feld]) ? $e[$feld] : null;
+        }
+        $paare[$vor . '/alarmtext'] = isset($e['alarmtext']) ? $e['alarmtext'] : null;
+        $paare[$vor . '/sollquelle'] = isset($e['sollwert_quelle']) ? $e['sollwert_quelle'] : null;
+        $paare[$vor . '/ok'] = (int) (isset($e['ok']) ? $e['ok'] : 0);
+        /* Zeitstempel des letzten ERFOLGREICHEN Abrufs dieses Speichers.
+         * Steht ein Geraet in der Ausfallpause, altert dieser Wert, waehrend
+         * seine Messwerte im Broker unveraendert stehen bleiben. */
+        $paare[$vor . '/ts'] = (int) (isset($e['ok_ts']) ? $e['ok_ts'] : 0);
+        /* Der Fehlertext im Klartext. Die Zahlen FEHLER und WARNUNG sind
+         * Geraetebits; was der Abruf selbst gemeldet hat, stand bisher nur in
+         * der Logdatei. bm_mqtt_senden() bereinigt Zeilenumbrueche. */
+        $paare[$vor . '/fehlertext'] = isset($e['fehlertext']) ? $e['fehlertext'] : null;
+        $soll = isset($e['sollwert']) ? (string) $e['sollwert'] : '';
+        $paare[$vor . '/sollwert'] = $soll !== '' ? $soll : 'automatik';
+        $paare[$vor . '/sollwert_alter'] = (int) (isset($e['sollwert_alter'])
+            ? $e['sollwert_alter'] : -1);
+        $paare[$vor . '/sollart'] = bm_sollart($soll);
+        foreach ((array) (isset($e['module']) ? $e['module'] : array()) as $m => $md) {
+            $mv = $vor . '/modul/' . (int) $m;
+            $paare[$mv . '/uzmax'] = isset($md['uzmax']) ? $md['uzmax'] : null;
+            $paare[$mv . '/uzmin'] = isset($md['uzmin']) ? $md['uzmin'] : null;
+            $paare[$mv . '/uzdiff'] = isset($md['uzdiff']) ? $md['uzdiff'] : null;
+            $paare[$mv . '/tmax'] = isset($md['tmax']) ? $md['tmax'] : null;
+            foreach ((array) (isset($md['zellen']) ? $md['zellen'] : array()) as $z => $wert) {
+                $paare[$mv . '/zelle/' . (int) $z] = $wert;
+            }
+        }
+    }
+    /* Der EVCC-Zweig. Dieselben Werte, eine Anschrift ohne Geraetenummer und
+     * das Vorzeichen umgedreht - siehe bm_evcc_leistung(). Nur wenn
+     * eingeschaltet: wer EVCC nicht benutzt, soll die Themen nicht im Broker
+     * stehen haben. */
+    if (!empty($cfg['evcc_ein'])) {
+        $nr = max(1, (int) $cfg['evcc_geraet']);
+        if (isset($geraete[$nr])) {
+            $e = $geraete[$nr];
+            $paare['evcc/soc']      = isset($e['SOC']) ? $e['SOC'] : null;
+            $paare['evcc/capacity'] = isset($e['KAPAZ']) ? $e['KAPAZ'] : null;
+            $paare['evcc/power']    = bm_evcc_leistung(isset($e['PBAT']) ? $e['PBAT'] : null);
+            $soll = isset($e['sollwert']) ? (string) $e['sollwert'] : '';
+            $paare['evcc/mode'] = (strpos($soll, 'sperren') === 0) ? 'hold'
+                : ((strpos($soll, 'laden') === 0) ? 'charge' : 'normal');
+        } elseif ($melden) {
+            bm_log_gebremst('evcc_geraet_fehlt', 'EVCC: Speicher Nummer ' . $nr
+                . ' ist eingestellt, aber nicht eingerichtet - es wird nichts '
+                . 'unter evcc/ veroeffentlicht.');
+        }
+    }
+    return $paare;
+}
+
 /** Alle Themen, die der Dienst veroeffentlicht, mit ihrer Bedeutung. */
 function bm_mqtt_themen()
 {
     return array(
         'ok'                       => 'BM_MQTT.OK',
         'geraete'                  => 'BM_MQTT.GERAETE',
+        'ts'                       => 'BM_MQTT.TS',
         'geraetN/soc'              => 'BM_MQTT.SOC',
         'geraetN/soh'              => 'BM_MQTT.SOH',
         'geraetN/ubat'             => 'BM_MQTT.UBAT',
@@ -1759,8 +2029,18 @@ function bm_mqtt_themen()
         'geraetN/warnung'          => 'BM_MQTT.WARNUNG',
         'geraetN/modus'            => 'BM_MQTT.MODUS',
         'geraetN/ok'               => 'BM_MQTT.GOK',
+        'geraetN/ts'               => 'BM_MQTT.GTS',
+        'geraetN/fehlertext'       => 'BM_MQTT.FEHLERTEXT',
         'geraetN/sollwert'         => 'BM_MQTT.SOLLWERT',
         'geraetN/sollwert_alter'   => 'BM_MQTT.SOLLALTER',
+        'geraetN/sollart'          => 'BM_MQTT.SOLLART',
+        'geraetN/sollquelle'       => 'BM_MQTT.SOLLQUELLE',
+        'geraetN/uzminmod'         => 'BM_MQTT.UZMINMOD',
+        'geraetN/uzminzelle'       => 'BM_MQTT.UZMINZELLE',
+        'geraetN/restkwh'          => 'BM_MQTT.RESTKWH',
+        'geraetN/restzeit'         => 'BM_MQTT.RESTZEIT',
+        'geraetN/alarm'            => 'BM_MQTT.ALARM',
+        'geraetN/alarmtext'        => 'BM_MQTT.ALARMTEXT',
         'geraetN/modul/M/uzmax'    => 'BM_MQTT.M_UZMAX',
         'geraetN/modul/M/uzmin'    => 'BM_MQTT.M_UZMIN',
         'geraetN/modul/M/uzdiff'   => 'BM_MQTT.M_UZDIFF',
@@ -1898,6 +2178,352 @@ function bm_evcc_modus($eingabe)
 }
 
 /* ==================================================================
+ * Neu in 0.9.8
+ * ================================================================== */
+
+/**
+ * Ab welchem Alter des Abbilds gilt der Dienst als stehengeblieben?
+ *
+ * EINE Quelle fuer zwei Verbraucher: der Waechter in bin/dienst.sh holt den
+ * Wert ueber 'php -r' hier ab, der Reiter Test zeigt ihn an. Bis 0.9.7 stand
+ * die Formel an beiden Stellen ausgeschrieben, jeweils mit einem Kommentar,
+ * der auf die andere verwies - genau die Bauart, aus der Widersprueche
+ * entstehen (Hausregel: Widersprueche in der eigenen Dokumentation sind
+ * Fehlerquellen).
+ *
+ * Fuenffacher Takt, mindestens 180 s. Die Grenze muss deutlich ueber dem Takt
+ * liegen, damit ein einzelner langsamer Durchlauf nichts ausloest.
+ */
+function bm_waechter_grenze($cfg = null)
+{
+    if (!is_array($cfg)) {
+        $cfg = bm_config();
+    }
+    $takt = max(5, min(3600, (int) $cfg['intervall']));
+    return max(180, $takt * 5);
+}
+
+/**
+ * Restenergie und Restzeit.
+ *
+ * Rueckgabe: array(kWh, Minuten). Beides null, wo es sich nicht belegen
+ * laesst - eine Reichweite, die niemand rechnen kann, wird nicht geraten.
+ *
+ * Die Kapazitaet kommt vom Geraet (KAPAZ), sonst aus der vom Anwender
+ * eingetragenen Nennkapazitaet. Fehlt beides, gibt es keine Zahl. Unter 25 W
+ * Leistung wird keine Restzeit gebildet: bei einem fast ruhenden Speicher
+ * ergaeben sich Tausende von Stunden, und das sieht in Loxone aus wie ein
+ * Messwert.
+ */
+function bm_restwerte(array $e, array $g)
+{
+    $kapaz = (isset($e['KAPAZ']) && is_numeric($e['KAPAZ']) && $e['KAPAZ'] > 0)
+        ? (float) $e['KAPAZ']
+        : ((isset($g['nennkapaz']) && $g['nennkapaz'] > 0) ? (float) $g['nennkapaz'] : 0.0);
+    $soc = (isset($e['SOC']) && is_numeric($e['SOC'])) ? (float) $e['SOC'] : null;
+    $p   = (isset($e['PBAT']) && is_numeric($e['PBAT'])) ? (float) $e['PBAT'] : null;
+    if ($kapaz <= 0 || $soc === null) {
+        return array(null, null);
+    }
+    $restkwh = round($kapaz * $soc / 100.0, 2);
+    if ($p === null || abs($p) < 25) {
+        return array($restkwh, null);
+    }
+    $offen = ($p > 0) ? ($kapaz * (100.0 - $soc) / 100.0) : $restkwh;
+    $min = (int) round($offen * 1000.0 / abs($p) * 60.0);
+    return array($restkwh, max(0, min(6000, $min)));
+}
+
+/**
+ * Sammelmerker: liegt an diesem Speicher etwas an?
+ *
+ * Rueckgabe: Liste von Klartextgruenden, leer wenn nichts anliegt. Es wird
+ * NUR gemeldet, was gemessen vorliegt - ein fehlender Wert erzeugt keinen
+ * Alarm und auch keine Entwarnung.
+ *
+ * Die Schwellen fuer Drift und Temperatur stehen im Reiter Einstellungen.
+ * Der Merker ersetzt die Bausteine #14 bis #19 in Loxone nicht, er ergaenzt
+ * sie fuer alles, was ohne Loxone auskommen muss.
+ */
+function bm_alarm(array $e, ?array $cfg = null)
+{
+    if (!is_array($cfg)) {
+        $cfg = bm_config();
+    }
+    $g = array();
+    if (empty($e['ok'])) {
+        $t = isset($e['fehlertext']) ? trim((string) $e['fehlertext']) : '';
+        $g[] = $t !== '' ? $t : bm_t('ALARM.STUMM');
+    }
+    if (isset($e['UZDIFF']) && is_numeric($e['UZDIFF'])
+        && $e['UZDIFF'] > max(1, (int) $cfg['drift_warnung'])) {
+        $g[] = sprintf(bm_t('ALARM.DRIFT'), (int) $e['UZDIFF'], (int) $cfg['drift_warnung']);
+    }
+    if (isset($e['FEHLER']) && is_numeric($e['FEHLER']) && (int) $e['FEHLER'] > 0) {
+        $g[] = sprintf(bm_t('ALARM.FEHLERBITS'), (int) $e['FEHLER']);
+    }
+    if (isset($e['WARNUNG']) && is_numeric($e['WARNUNG']) && (int) $e['WARNUNG'] > 0) {
+        $g[] = sprintf(bm_t('ALARM.WARNBITS'), (int) $e['WARNUNG']);
+    }
+    if (isset($e['TMAX']) && is_numeric($e['TMAX']) && $e['TMAX'] > (int) $cfg['temp_max']) {
+        $g[] = sprintf(bm_t('ALARM.WARM'), $e['TMAX'], (int) $cfg['temp_max']);
+    }
+    if (isset($e['TMIN']) && is_numeric($e['TMIN']) && $e['TMIN'] < (int) $cfg['temp_min']) {
+        $g[] = sprintf(bm_t('ALARM.KALT'), $e['TMIN'], (int) $cfg['temp_min']);
+    }
+    return $g;
+}
+
+/* ---------------- Mitschnitt des Datenverkehrs ----------------
+ *
+ * Traegt ein Profil nicht, gab es bis 0.9.7 keinen Weg, die gesendeten und
+ * empfangenen Bytes zu sehen - der Rohregister-Leser zeigt nur ausgewertete
+ * Werte. Der Mitschnitt ist AB WERK AUS und laeuft immer nur eine begrenzte
+ * Zeit; er endet von selbst, damit ihn niemand versehentlich stehen laesst.
+ */
+function bm_mitschnitt_datei()
+{
+    return bm_paths()['datadir'] . '/mitschnitt.log';
+}
+
+function bm_mitschnitt_laeuft($cfg = null)
+{
+    if (!is_array($cfg)) {
+        $cfg = bm_config();
+    }
+    return ((int) $cfg['mitschnitt_bis'] > time()) ? ((int) $cfg['mitschnitt_bis'] - time()) : 0;
+}
+
+/** Mitschnitt fuer $sekunden einschalten. 0 schaltet ihn sofort ab. */
+function bm_mitschnitt_schalten($sekunden)
+{
+    $cfg = bm_config();
+    $sekunden = max(0, min(600, (int) $sekunden));
+    $cfg['mitschnitt_bis'] = $sekunden > 0 ? (time() + $sekunden) : 0;
+    if ($sekunden > 0) {
+        @file_put_contents(bm_mitschnitt_datei(),
+            '[' . date('Y-m-d H:i:s') . '] ' . sprintf(bm_t('MITSCHNITT.START'), $sekunden) . "
+");
+    }
+    return bm_config_speichern($cfg);
+}
+
+/** Eine Zeile in den Mitschnitt. Tut nichts, solange er nicht laeuft. */
+function bm_mitschnitt($richtung, $roh, array $g = array())
+{
+    static $an = null, $bis = 0;
+    if ($an === null || time() > $bis) {
+        $cfg = bm_config();
+        $bis = (int) $cfg['mitschnitt_bis'];
+        $an = ($bis > time());
+    }
+    if (!$an) {
+        return;
+    }
+    $d = bm_mitschnitt_datei();
+    // Harte Obergrenze: ein Mitschnitt darf die Ramdisk nicht vollschreiben.
+    if (is_file($d) && filesize($d) > 262144) {
+        return;
+    }
+    $ziel = isset($g['name']) ? $g['name'] : '';
+    @file_put_contents($d, '[' . date('H:i:s') . '] ' . $richtung . ' ' . $ziel . ' '
+        . strlen((string) $roh) . ' B  ' . strtoupper(bin2hex(substr((string) $roh, 0, 128)))
+        . "
+", FILE_APPEND | LOCK_EX);
+}
+
+/* ---------------- Modbus: Bits lesen (FC 1 und FC 2) ----------------
+ *
+ * Spulen und Eingaenge kommen bitweise statt wortweise: ein Byte je acht
+ * Adressen, niedrigstes Bit zuerst. Bis 0.9.7 kannte das Plugin nur FC 3
+ * und FC 4; ein Profil mit Statusbits war damit nicht abbildbar.
+ */
+function bm_bits_auspacken($daten, $start, $anzahl)
+{
+    $out = array();
+    for ($i = 0; $i < $anzahl; $i++) {
+        $byte = $i >> 3;
+        if (!isset($daten[$byte])) {
+            return array('_fehler' => 'Die Bitantwort ist zu kurz: Bit ' . $i . ' von '
+                . $anzahl . ' liegt hinter dem Ende.');
+        }
+        $out[$start + $i] = (ord($daten[$byte]) >> ($i & 7)) & 1;
+    }
+    return $out;
+}
+
+function bm_bits_lesen($s, array $g, $fc, $start, $anzahl)
+{
+    $out = array();
+    $offen = (int) $anzahl;
+    $adr = (int) $start;
+    while ($offen > 0) {
+        $jetzt = min(2000, $offen);
+        $antwort = bm_modbus_anfrage($s, $g, pack('Cnn', (int) $fc, $adr, $jetzt));
+        if (is_array($antwort)) {
+            return $antwort;
+        }
+        $bytes = strlen($antwort) > 0 ? ord($antwort[0]) : 0;
+        $daten = substr($antwort, 1);
+        $soll = intdiv($jetzt + 7, 8);
+        if ($bytes !== $soll || strlen($daten) < $bytes) {
+            return array('_fehler' => 'Die Bitantwort enthaelt ' . strlen($daten)
+                . ' Datenbytes, erwartet waren ' . $soll . ' fuer ' . $jetzt . ' Bits ab '
+                . 'Adresse ' . $adr . '.');
+        }
+        $teil = bm_bits_auspacken($daten, $adr, $jetzt);
+        if (isset($teil['_fehler'])) {
+            return $teil;
+        }
+        $out += $teil;
+        $adr += $jetzt;
+        $offen -= $jetzt;
+    }
+    return $out;
+}
+
+/**
+ * Trockenlauf: was WUERDE ein Schaltbefehl tun?
+ *
+ * Es wird nichts gesendet und keine Verbindung geoeffnet. Ausgegeben werden
+ * erst die Sperren, die greifen wuerden, dann die Schrittfolge des Profils
+ * mit eingesetztem Wattwert.
+ *
+ * Vor dem ersten Zwangsbefehl an eine fremde Anlage ist das die Stufe VOR
+ * 'mit kleiner Leistung anfangen und am Geraet nachsehen'.
+ */
+function bm_trockenlauf($nr, $aktion, $watt)
+{
+    $cfg = bm_config();
+    $g = bm_geraet($nr);
+    if ($g === null) {
+        return array(0, sprintf(bm_t('DIENST.GERAET_UNBEKANNT'), (int) $nr));
+    }
+    $pr = bm_profil($g['profil']);
+    if ($pr === null) {
+        return array(0, sprintf(bm_t('DIENST.PROFIL_FEHLT'), $g['profil']));
+    }
+    $z = array();
+    $z[] = sprintf(bm_t('TROCKEN.KOPF'), $g['name'], $g['profil'], $aktion, (int) $watt);
+    $z[] = '';
+    $z[] = bm_t('TROCKEN.SPERREN');
+    $z[] = '  ' . (!empty($cfg['steuerung_ein']) ? '[OK]  ' : '[HALT]') . ' '
+         . bm_t('TROCKEN.S_GLOBAL');
+    $z[] = '  ' . (!empty($g['schreiben']) ? '[OK]  ' : '[HALT]') . ' '
+         . bm_t('TROCKEN.S_GERAET');
+    $grenze = ($aktion === 'laden') ? (int) $g['max_laden'] : (int) $g['max_entladen'];
+    $z[] = '  ' . (($grenze > 0 && $watt > $grenze) ? '[HALT]' : '[OK]  ') . ' '
+         . sprintf(bm_t('TROCKEN.S_GRENZE'), $grenze > 0 ? $grenze : 0);
+    $werte = bm_werte();
+    $soc = isset($werte[(int) $nr]['SOC']) ? $werte[(int) $nr]['SOC'] : null;
+    if ($soc !== null) {
+        $sperrt = ($aktion === 'laden' && $soc >= (int) $cfg['soc_max'])
+               || ($aktion === 'entladen' && $soc <= (int) $cfg['soc_min']);
+        $z[] = '  ' . ($sperrt ? '[HALT]' : '[OK]  ') . ' '
+             . sprintf(bm_t('TROCKEN.S_FENSTER'), $soc, (int) $cfg['soc_min'], (int) $cfg['soc_max']);
+    } else {
+        $z[] = '  [?]   ' . bm_t('TROCKEN.S_FENSTER_UNBEKANNT');
+    }
+    if ($g['transport'] === 'pylontech_rs485') {
+        $z[] = '  [HALT] ' . bm_t('DIENST.STEUERUNG_SERIELL');
+    }
+    $z[] = '';
+    $st = isset($pr['steuerung']) && is_array($pr['steuerung']) ? $pr['steuerung'] : array();
+    $wirk = $aktion;
+    $wwatt = (int) $watt;
+    if ($aktion === 'sperren' && !isset($st['sperren']['schritte'])) {
+        $wirk = 'entladen';
+        $wwatt = 0;
+        $z[] = bm_t('TROCKEN.SPERREN_ERSATZ');
+    }
+    if (!isset($st[$wirk]['schritte']) || !is_array($st[$wirk]['schritte'])) {
+        $z[] = sprintf(bm_t('DIENST.STEUERUNG_UNBEKANNT'), $aktion, $pr['name']);
+        return array(0, implode("
+", $z));
+    }
+    $z[] = sprintf(bm_t('TROCKEN.SCHRITTE'), count($st[$wirk]['schritte']));
+    $n = 0;
+    foreach ($st[$wirk]['schritte'] as $schritt) {
+        $n++;
+        $w = ($schritt['wert'] === '@watt') ? $wwatt : (int) $schritt['wert'];
+        $typ = isset($schritt['typ']) ? $schritt['typ'] : 'u16';
+        if ($typ === 'u32' || $typ === 's32') {
+            $z[] = sprintf('  %d. FC 16  Register %5d (0x%04X)  %s = %d  ->  0x%04X 0x%04X',
+                $n, (int) $schritt['reg'], (int) $schritt['reg'], $typ, $w,
+                ($w >> 16) & 0xFFFF, $w & 0xFFFF);
+        } else {
+            $z[] = sprintf('  %d. FC 6   Register %5d (0x%04X)  %s = %d  ->  0x%04X',
+                $n, (int) $schritt['reg'], (int) $schritt['reg'], $typ, $w, $w & 0xFFFF);
+        }
+    }
+    $z[] = '';
+    $z[] = bm_t('TROCKEN.FUSS');
+    if (isset($pr['steuerung_stand']) && $pr['steuerung_stand'] !== 'dokumentiert') {
+        $z[] = bm_t('TROCKEN.UNGEPRUEFT');
+    }
+    return array(1, implode("
+", $z));
+}
+
+/**
+ * Den eigenen Endpunkt WIRKLICH aufrufen.
+ *
+ * Alle uebrigen Pruefungen sehen sich Dateien an. Diese eine spricht die
+ * Stelle an, die spaeter der Miniserver anspricht - und nur sie findet die
+ * Fehlerklasse, bei der html/ und htmlauth/ installiert in getrennten
+ * Baeumen liegen. Der Endpunkt gibt dann HTTP 500 aus, und niemand merkt es,
+ * weil ihn sonst nur der Miniserver aufruft und der kein Protokoll liest.
+ *
+ * Rueckgabe: array(stand, code, text, url).
+ *   stand  1 = geantwortet und plausibel
+ *          0 = geantwortet, aber falsch
+ *         -1 = NICHT FESTSTELLBAR (weder curl noch allow_url_fopen)
+ *
+ * Der dritte Ausgang ist Pflicht: 'ich kann es nicht messen' darf nicht wie
+ * 'es ist in Ordnung' aussehen.
+ */
+function bm_selbsttest_endpunkt($aktion = 'status')
+{
+    $p = bm_paths();
+    $url = 'http://127.0.0.1/plugins/' . $p['plugin'] . '/index.php?token='
+         . rawurlencode(bm_token()) . '&aktion=' . rawurlencode($aktion);
+    $text = '';
+    $code = 0;
+    if (function_exists('curl_init')) {
+        $ch = curl_init($url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 8);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 4);
+        $text = (string) curl_exec($ch);
+        $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $fehler = curl_error($ch);
+        curl_close($ch);
+        if ($code === 0) {
+            return array(-1, 0, $fehler !== '' ? $fehler : bm_t('TEST.A_EP_KEINE_ANTWORT'), $url);
+        }
+    } elseif (ini_get('allow_url_fopen')) {
+        $ctx = stream_context_create(array('http' => array('timeout' => 8,
+            'ignore_errors' => true)));
+        $text = (string) @file_get_contents($url, false, $ctx);
+        $code = 0;
+        if (isset($http_response_header[0])
+            && preg_match('#HTTP/\S+\s+(\d{3})#', $http_response_header[0], $m)) {
+            $code = (int) $m[1];
+        }
+        if ($code === 0) {
+            return array(-1, 0, bm_t('TEST.A_EP_KEINE_ANTWORT'), $url);
+        }
+    } else {
+        return array(-1, 0, bm_t('TEST.A_EP_NICHT_MESSBAR'), $url);
+    }
+    $erste = trim(strtok($text, "
+"));
+    $gut = ($code === 200) && (strpos($erste, 'BMS;') === 0 || strpos($erste, 'LISTE;') === 0
+                               || strpos($erste, 'SUMME;') === 0);
+    return array($gut ? 1 : 0, $code, $erste !== '' ? $erste : bm_t('TEST.A_EP_LEER'), $url);
+}
+
+/* ==================================================================
  * Loxone-Vorlagen
  *
  * Nachbau der Bausteine aus LoxBerry::LoxoneTemplateBuilder; das Modul gibt es
@@ -1994,6 +2620,87 @@ function bm_xml_virtual_out($kopf, $cmds)
     return $o;
 }
 
+/**
+ * Beruht die Feldauswahl fuer diesen Speicher auf einer MESSUNG?
+ *
+ * false heisst: das Geraet hat noch nie erfolgreich geantwortet. Dann laesst
+ * sich nur aufzaehlen, was das Profil erklaert - und das ist bei den Profilen,
+ * deren Werte der Code bildet (Pylontech), gar nichts. In diesem Fall wird
+ * bewusst ALLES ausgeliefert und der Anwender darauf hingewiesen, die Vorlage
+ * nach dem ersten erfolgreichen Abruf erneut zu holen.
+ */
+function bm_felder_gemessen($nummer)
+{
+    $werte = bm_werte();
+    $nummer = (int) $nummer;
+    return (isset($werte[$nummer]) && !empty($werte[$nummer]['ok'])) ? true : false;
+}
+
+/**
+ * Welche Messgroessen dieser Speicher tatsaechlich liefert.
+ *
+ * Bis 0.9.6 legte die Importdatei fuer Loxone ALLE 21 Messgroessen als
+ * virtuelle Eingaenge an - auch die, die kein Profil und kein Codepfad je
+ * fuellt. Ausgezaehlt ueber alle eingebauten Profile waren das WARNUNG,
+ * LADENMAX und ENTLMAX; bei einem Huawei-Speicher standen sogar 15 von 19
+ * Eingaengen dauerhaft leer. Loxone traegt fuer einen virtuellen Eingang ohne
+ * Wert die DefVal 0 ein - und eine 0 sieht aus wie ein Messwert. Genau die
+ * stille Falschaussage, die dieses Plugin sonst ueberall vermeidet, indem es
+ * einen Strich statt einer 0 sendet.
+ *
+ * Gebildet wird die Menge aus ZWEI Quellen, und das mit Absicht:
+ *
+ *   - was das Profil an Registern erklaert (felder, rechnung),
+ *   - was in der letzten erfolgreichen Messung wirklich einen Wert trug.
+ *
+ * Die zweite Quelle ist noetig, weil etliche Groessen kein Profil erklaert,
+ * sondern der Code bildet: saemtliche Pylontech-Werte, die aus den Moduldaten
+ * abgeleitete Zelldrift, Zell- und Modulzahl, der aus der Nennkapazitaet
+ * gerechnete Gesundheitszustand.
+ *
+ * Eine von Hand gepflegte Liste waere eine dritte Stelle, die mit dem Code
+ * auseinanderlaeuft. Deshalb wird gemessen statt erklaert.
+ *
+ * ALTER und OK sind immer dabei - die bildet der Endpunkt selbst.
+ */
+function bm_felder_geliefert($nummer)
+{
+    $felder = bm_status_felder();
+    $nummer = (int) $nummer;
+    if (!bm_felder_gemessen($nummer)) {
+        return $felder;
+    }
+    $hat = array('ALTER' => 1, 'OK' => 1);
+    $g = bm_geraet($nummer);
+    $pr = ($g !== null) ? bm_profil($g['profil']) : null;
+    if ($pr !== null) {
+        foreach (array('felder', 'rechnung') as $abschnitt) {
+            $teil = isset($pr[$abschnitt]) && is_array($pr[$abschnitt])
+                ? $pr[$abschnitt] : array();
+            foreach ($teil as $feld => $unbenutzt) {
+                if (isset($felder[$feld])) {
+                    $hat[$feld] = 1;
+                }
+            }
+        }
+    }
+    $werte = bm_werte();
+    foreach ($felder as $feld => $unbenutzt) {
+        if (isset($werte[$nummer][$feld]) && $werte[$nummer][$feld] !== null) {
+            $hat[$feld] = 1;
+        }
+    }
+    // Die Reihenfolge aus bm_status_felder() bleibt massgeblich - siehe den
+    // Hinweis zur Suchreihenfolge in webfrontend/html/index.php.
+    $aus = array();
+    foreach ($felder as $feld => $info) {
+        if (isset($hat[$feld])) {
+            $aus[$feld] = $info;
+        }
+    }
+    return $aus;
+}
+
 /** Vorlage der virtuellen Eingaenge. Rueckgabe: array(name, inhalt) */
 function bm_vorlage_eingaenge($nummer = 1)
 {
@@ -2003,7 +2710,7 @@ function bm_vorlage_eingaenge($nummer = 1)
     $g = bm_geraet($nummer);
     $bez = $g !== null ? $g['name'] : ('Speicher ' . (int) $nummer);
     $cmds = array();
-    foreach (bm_status_felder() as $feld => $info) {
+    foreach (bm_felder_geliefert($nummer) as $feld => $info) {
         // Der Text laeuft gleich durch bm_x() und wuerde dort ein zweites Mal
         // maskiert. Deshalb erst Auszeichnung entfernen und Entitaeten
         // aufloesen - sonst stuende in Loxone Config wortwoertlich 'l&auml;dt'.
@@ -2016,6 +2723,37 @@ function bm_vorlage_eingaenge($nummer = 1)
             'max'     => (string) $info[3],
         );
     }
+    /* Der Zwangszustand gehoert in die Importdatei.
+     *
+     * Der Endpunkt sendet SOLL, SOLLALTER und SOLLART seit jeher mit der
+     * Begruendung, Loxone muesse wissen, ob ein Zwang laeuft - in die Vorlage
+     * kamen sie bis 0.9.6 nicht, weil die Schleife nur ueber
+     * bm_status_felder() lief. Wer die Vorlage benutzte, hatte den
+     * Zwangszustand also gerade nicht.
+     *
+     * SOLL selbst bleibt draussen: das ist ein Text ('laden:500') und taugt
+     * nicht als Analogwert. Dafuer gibt es SOLLART als Zahl.
+     *
+     * Beide stehen am ENDE der Statuszeile. Das ist Pflicht und kein Zufall:
+     * Loxone nimmt den ERSTEN Treffer des Suchtextes in der Zeile, und
+     * \iALTER=\i\v steckt auch in SOLLALTER=. Weil ALTER vorher steht,
+     * findet der Baustein den richtigen Wert. */
+    $cmds[] = array(
+        'title'   => 'BMS_' . (int) $nummer . '_SOLLART',
+        'comment' => trim(strip_tags(html_entity_decode(bm_t('BM_FELD.SOLLART'),
+                          ENT_QUOTES, 'UTF-8'))),
+        'check'   => '\iSOLLART=\i\v',
+        'min'     => '0',
+        'max'     => '3',
+    );
+    $cmds[] = array(
+        'title'   => 'BMS_' . (int) $nummer . '_SOLLALTER',
+        'comment' => trim(strip_tags(html_entity_decode(bm_t('BM_FELD.SOLLALTER'),
+                          ENT_QUOTES, 'UTF-8'))) . ' [s]',
+        'check'   => '\iSOLLALTER=\i\v',
+        'min'     => '-1',
+        'max'     => '86400',
+    );
     $adresse = 'http://' . $host . '/plugins/' . $p['plugin']
              . '/index.php?token=' . $token . '&aktion=status&geraet=' . (int) $nummer;
     return array(

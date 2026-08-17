@@ -30,6 +30,69 @@ SKRIPT="$SELF/bms_dienst.php"
 
 mkdir -p "$PDATA" "$PLOG" 2>/dev/null
 
+# ==================================================================
+# Arbeitet der Dienst noch, oder lebt nur sein Prozess?
+#
+# 'systemctl is-active' beantwortet nicht, ob ein Dienst seine Arbeit tut -
+# und eine PID-Datei erst recht nicht. Massgeblich ist das, was der Dienst
+# hinterlaesst: loxone.json wird in JEDEM Durchlauf geschrieben, auch wenn
+# kein einziger Speicher eingerichtet ist.
+#
+# Die Grenze ist das Fuenffache des eingestellten Takts, mindestens aber
+# 180 s. Sie muss deutlich ueber dem Takt liegen, damit ein einzelner
+# langsamer Durchlauf - die BYD-BCU laesst bis zu vier Sekunden auf sich
+# warten, mal der Zahl der Speicher - keinen Neustart ausloest.
+#
+# Fail safe: laesst sich das Alter nicht bestimmen (kein stat, kein Abbild,
+# kein PHP), wird NICHT neu gestartet. Ein Waechter, der im Zweifel
+# zuschlaegt, ist schlimmer als keiner.
+# ==================================================================
+NEUSTARTMERKER="$PDATA/waechter_neustart"
+
+abbild_alter() {
+    ABBILD="$PDATA/loxone.json"
+    [ -f "$ABBILD" ] || { echo -1; return; }
+    MT=$(stat -c %Y "$ABBILD" 2>/dev/null)
+    [ -n "$MT" ] || { echo -1; return; }
+    echo $(( $(date +%s) - MT ))
+}
+
+# Die Grenze kommt aus bm_waechter_grenze() in der Bibliothek - EINE Quelle
+# fuer den Waechter und fuer die Prueffrage im Reiter Test. Bis 0.9.7 stand
+# die Formel hier UND dort ausgeschrieben, jeweils mit einem Kommentar, der
+# auf die andere Stelle verwies.
+#
+# Fail safe: laesst sich die Bibliothek nicht befragen - kein PHP, Datei nicht
+# da, Fehler beim Einlesen -, gilt die Untergrenze von 180 s. Der Waechter
+# greift dann spaeter, aber nie frueher als vorgesehen.
+abbild_grenze() {
+    LIB="$LBHOMEDIR/webfrontend/html/plugins/$PNAME/bm_lib.php"
+    G=""
+    if command -v php >/dev/null 2>&1 && [ -f "$LIB" ]; then
+        G=$(LBHOMEDIR="$LBHOMEDIR" php -r 'require $argv[1]; echo bm_waechter_grenze();' "$LIB" 2>/dev/null)
+    fi
+    case "$G" in
+        ''|*[!0-9]*) G=180 ;;
+    esac
+    if [ "$G" -lt 180 ]; then G=180; fi
+    echo "$G"
+}
+
+abbild_steht() {
+    A=$(abbild_alter)
+    [ "$A" -ge 0 ] || return 1
+    [ "$A" -gt "$(abbild_grenze)" ] || return 1
+    # Nicht im Minutentakt nachsetzen: hilft der Neustart nicht, wuerde der
+    # Waechter sonst jede Minute erneut zuschlagen und das Protokoll fluten.
+    if [ -f "$NEUSTARTMERKER" ]; then
+        M=$(stat -c %Y "$NEUSTARTMERKER" 2>/dev/null)
+        if [ -n "$M" ] && [ $(( $(date +%s) - M )) -lt 600 ]; then
+            return 1
+        fi
+    fi
+    return 0
+}
+
 laeuft() {
     [ -f "$PID" ] || return 1
     P=$(cat "$PID" 2>/dev/null)
@@ -112,6 +175,17 @@ case "$1" in
         # angehaltener Dienst bleibt angehalten.
         if [ -f "$SOLL" ] && ! laeuft; then
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Waechter: Dienst lief nicht, wird neu gestartet." >> "$LOGDATEI"
+            starten >> "$LOGDATEI" 2>&1
+        elif [ -f "$SOLL" ] && laeuft && abbild_steht; then
+            # Der Prozess lebt, arbeitet aber nicht mehr. Bis 0.9.6 hat der
+            # Waechter genau das nicht gesehen: er fragte nur, ob eine PID da
+            # ist. Ein Dienst, der seit einer Stunde kein Abbild mehr
+            # geschrieben hat, galt damit als gesund - und in Loxone standen
+            # die alten Werte weiter, ohne dass irgendwo etwas davon zu lesen
+            # gewesen waere.
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Waechter: Der Dienst laeuft (PID $(cat "$PID" 2>/dev/null)), hat aber seit $(abbild_alter) s kein Abbild mehr geschrieben (Grenze $(abbild_grenze) s). Er wird neu gestartet." >> "$LOGDATEI"
+            touch "$NEUSTARTMERKER"
+            anhalten >> "$LOGDATEI" 2>&1
             starten >> "$LOGDATEI" 2>&1
         fi
         ;;

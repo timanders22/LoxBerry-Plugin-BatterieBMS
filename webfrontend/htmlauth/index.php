@@ -58,6 +58,47 @@ $bm_fehler = array();      // gesammelt, nicht ueberschrieben
 $bm_testausgabe = '';
 $bm_post = (isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') === 'POST';
 
+/**
+ * Eine hochgeladene Datei annehmen.
+ *
+ * Rueckgabe: array('name'=>…, 'inhalt'=>…) oder array('fehler'=>Text).
+ * Jeder Fehlerfall bekommt einen eigenen Satz - 'Upload fehlgeschlagen' sagt
+ * dem Anwender nichts.
+ */
+function bm_datei_annehmen($feld, $hoechstens)
+{
+    if (!isset($_FILES[$feld]) || !is_array($_FILES[$feld])) {
+        return array('fehler' => bm_t('EINST.FEHLER_DATEI_KEINE'));
+    }
+    $f = $_FILES[$feld];
+    $code = isset($f['error']) ? (int) $f['error'] : UPLOAD_ERR_NO_FILE;
+    if ($code === UPLOAD_ERR_NO_FILE) {
+        return array('fehler' => bm_t('EINST.FEHLER_DATEI_KEINE'));
+    }
+    if ($code === UPLOAD_ERR_INI_SIZE || $code === UPLOAD_ERR_FORM_SIZE) {
+        return array('fehler' => sprintf(bm_t('EINST.FEHLER_DATEI_GROSS'), $hoechstens));
+    }
+    if ($code !== UPLOAD_ERR_OK) {
+        return array('fehler' => sprintf(bm_t('EINST.FEHLER_DATEI_CODE'), $code));
+    }
+    if ((int) $f['size'] > $hoechstens) {
+        return array('fehler' => sprintf(bm_t('EINST.FEHLER_DATEI_GROSS'), $hoechstens));
+    }
+    // Nur eine wirklich hochgeladene Datei lesen. Ohne diese Wache liesse
+    // sich ueber einen praeparierten Aufruf ein beliebiger Pfad angeben. Die
+    // Pruefung der Inhalte oben ist VORHER in beide Richtungen gemessen
+    // worden; danach ist dieser Weg aus der Kommandozeile nicht mehr
+    // nachstellbar, weil is_uploaded_file() dort immer falsch meldet.
+    if (!is_uploaded_file((string) $f['tmp_name'])) {
+        return array('fehler' => bm_t('EINST.FEHLER_DATEI_KEINE'));
+    }
+    $inhalt = @file_get_contents($f['tmp_name']);
+    if ($inhalt === false || trim((string) $inhalt) === '') {
+        return array('fehler' => bm_t('EINST.FEHLER_DATEI_LEER'));
+    }
+    return array('name' => (string) $f['name'], 'inhalt' => (string) $inhalt);
+}
+
 /** Nur Steuerzeichen, Anfuehrungszeichen und Leerraum entfernen.
  *  Ein hartes preg_replace auf eine Positivliste zerstoert eingefuegte Werte -
  *  belegt am ACTi-Plugin am 26.07.2026, wo aus einer Adresse Zeichensalat wurde. */
@@ -97,6 +138,147 @@ if ($bm_post && isset($_POST['profil_export'])) {
         echo json_encode($bm_pr, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         exit;
     }
+}
+
+/* ---------------- Konfiguration als Sicherung herunterladen (B19) ----------------
+ *
+ * Die Datei traegt das Aktionstoken. Das ist Absicht: eine Sicherung ohne
+ * Token waere nach dem Zurueckspielen wertlos, weil alle Adressen im
+ * Miniserver ungueltig wuerden. Der Hinweis steht am Knopf. */
+if ($bm_post && isset($_POST['konfig_export'])) {
+    $bm_roh = @file_get_contents($bm_p['config']);
+    if ($bm_roh === false) {
+        $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_SICHERUNG_LESEN'), bm_e($bm_p['config']));
+        $bm_tab = 'tab-settings';
+    } else {
+        header('Content-Type: application/json; charset=utf-8');
+        header('Content-Disposition: attachment; filename="batteriebms_'
+             . date('Ymd_His') . '.json"');
+        echo $bm_roh;
+        exit;
+    }
+}
+
+/* ---------------- Konfiguration zurueckspielen (B19) ----------------
+ *
+ * Abgewiesen wird, was nicht passt - nie zurechtgebogen. Uebernommen wird die
+ * Datei VOLLSTAENDIG, samt Token: nur dann stimmen die Adressen im Miniserver
+ * hinterher wieder. */
+if ($bm_post && isset($_POST['konfig_import'])) {
+    $bm_tab = 'tab-settings';
+    $bm_d = bm_datei_annehmen('konfig_datei', 262144);
+    if (isset($bm_d['fehler'])) {
+        $bm_fehler[] = $bm_d['fehler'];
+    } else {
+        $bm_neu = json_decode($bm_d['inhalt'], true);
+        if (!is_array($bm_neu) || !isset($bm_neu['geraete'])) {
+            $bm_fehler[] = bm_t('EINST.FEHLER_KONFIG_FORM');
+        } else {
+            $bm_zusammen = array_merge(bm_vorgaben(), $bm_neu);
+            if (bm_config_speichern($bm_zusammen)) {
+                $bm_meldungen[] = sprintf(bm_t('EINST.KONFIG_ZURUECK'),
+                    count((array) $bm_zusammen['geraete']));
+            } else {
+                $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_SPEICHERN'), $bm_p['config']);
+            }
+        }
+    }
+}
+
+/* ---------------- Profil hochladen (B9) ----------------
+ *
+ * Die README verspricht seit jeher, weitere Speicher kaemen als JSON-Profil
+ * dazu, ohne Aenderung am Quelltext - einen Weg auf das Geraet gab es bis
+ * 0.9.7 aber nur ueber SSH. Angenommen wird nur, was vollstaendig ist:
+ * gueltiges JSON, bekannter Uebertragungsweg, Herkunft und Stand benannt,
+ * und ausschliesslich Messgroessen, die es gibt. */
+if ($bm_post && isset($_POST['profil_import'])) {
+    $bm_tab = 'tab-settings';
+    $bm_d = bm_datei_annehmen('profil_datei', 262144);
+    if (isset($bm_d['fehler'])) {
+        $bm_fehler[] = $bm_d['fehler'];
+    } else {
+        $bm_schl = preg_replace('/[^a-z0-9_]/', '',
+            strtolower(pathinfo($bm_d['name'], PATHINFO_FILENAME)));
+        $bm_pr = json_decode($bm_d['inhalt'], true);
+        $bm_bean = array();
+        if ($bm_schl === '') {
+            $bm_bean[] = bm_t('EINST.FEHLER_PROFIL_NAME');
+        }
+        if (!is_array($bm_pr)) {
+            $bm_bean[] = bm_t('EINST.FEHLER_PROFIL_JSON');
+        } else {
+            if (!isset($bm_pr['transport'])
+                || !in_array((string) $bm_pr['transport'], bm_transporte(), true)) {
+                $bm_bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL_TRANSPORT'),
+                    implode(', ', bm_transporte()));
+            }
+            foreach (array('name', 'quelle', 'stand') as $bm_pflicht) {
+                if (!isset($bm_pr[$bm_pflicht]) || trim((string) $bm_pr[$bm_pflicht]) === '') {
+                    $bm_bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL_PFLICHT'), $bm_pflicht);
+                }
+            }
+            if (isset($bm_pr['stand'])
+                && !in_array((string) $bm_pr['stand'], array('dokumentiert', 'unbestaetigt'), true)) {
+                $bm_bean[] = bm_t('EINST.FEHLER_PROFIL_STAND');
+            }
+            $bm_erlaubt = bm_status_felder();
+            foreach (array('felder', 'rechnung') as $bm_ab) {
+                foreach ((array) (isset($bm_pr[$bm_ab]) ? $bm_pr[$bm_ab] : array()) as $bm_f => $bm_u) {
+                    if (!isset($bm_erlaubt[$bm_f])) {
+                        $bm_bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL_FELD'), bm_e($bm_f), $bm_ab);
+                    }
+                }
+            }
+        }
+        if ($bm_bean) {
+            foreach ($bm_bean as $bm_b) {
+                $bm_fehler[] = $bm_b;
+            }
+        } else {
+            $bm_ordner = $bm_p['datadir'] . '/profile';
+            if (!is_dir($bm_ordner)) {
+                @mkdir($bm_ordner, 0775, true);
+            }
+            $bm_ziel = $bm_ordner . '/' . $bm_schl . '.json';
+            $bm_ersetzt = isset(bm_profile_eingebaut()[$bm_schl]);
+            if (@file_put_contents($bm_ziel, $bm_d['inhalt']) === false) {
+                $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_PROFIL_SCHREIBEN'), bm_e($bm_ziel));
+            } else {
+                $bm_meldungen[] = sprintf(bm_t('EINST.PROFIL_ANGENOMMEN'), bm_e($bm_schl))
+                    . ($bm_ersetzt ? ' ' . bm_t('EINST.PROFIL_ERSETZT') : '');
+            }
+        }
+    }
+}
+
+/* ---------------- Mitschnitt des Datenverkehrs (B15) ---------------- */
+if ($bm_post && isset($_POST['mitschnitt'])) {
+    $bm_sek = ((string) $_POST['mitschnitt'] === 'aus') ? 0 : 120;
+    if (bm_mitschnitt_schalten($bm_sek)) {
+        $bm_meldungen[] = $bm_sek > 0
+            ? sprintf(bm_t('MITSCHNITT.EIN'), $bm_sek) : bm_t('MITSCHNITT.AUS');
+    } else {
+        $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_SPEICHERN'), $bm_p['config']);
+    }
+    $bm_tab = 'tab-test';
+}
+
+/* ---------------- Trockenlauf (B7) ----------------
+ *
+ * Spricht mit keinem Geraet und braucht keinen laufenden Dienst - gerade dann
+ * will man ja wissen, was ein Befehl taete. */
+if ($bm_post && isset($_POST['trockenlauf'])) {
+    $bm_tnr = preg_match('/^[0-9]{1,2}$/', (string) ($_POST['test_geraet'] ?? '1'))
+        ? (int) $_POST['test_geraet'] : 1;
+    $bm_twatt = preg_match('/^[0-9]{1,5}$/', (string) ($_POST['test_watt'] ?? '0'))
+        ? (int) $_POST['test_watt'] : 0;
+    list($bm_tok, $bm_ttext) = bm_trockenlauf($bm_tnr, (string) $_POST['trockenlauf'], $bm_twatt);
+    $bm_testausgabe = $bm_ttext;
+    if (!$bm_tok) {
+        $bm_fehler[] = bm_t('TROCKEN.NICHT_MOEGLICH');
+    }
+    $bm_tab = 'tab-test';
 }
 
 /* ---------------- Einstellungen speichern ---------------- */
@@ -202,6 +384,8 @@ if ($bm_post && isset($_POST['speichern'])) {
         'wartezeit'           => array(0, 30),
         'zeitueberschreitung' => array(1, 30),
         'drift_warnung'       => array(1, 2000),
+        'temp_max'            => array(0, 100),
+        'temp_min'            => array(0, 100),
     ) as $bm_feld => $bm_grenzen) {
         $bm_wert = isset($_POST[$bm_feld]) ? trim((string) $_POST[$bm_feld]) : '';
         if (!preg_match('/^[0-9]+$/', $bm_wert)) {
@@ -481,8 +665,25 @@ if ($bm_rahmen) {
 &middot; <span class="sm-an"><?= bm_e(bm_t('ALLG.ZWANG')) ?> <?= bm_e($bm_w['sollwert']) ?>
 (<?= (int) $bm_w['sollwert_alter'] ?> s)</span>
 <?php } ?>
-<div style="margin-top:8px;"><?= bm_soc_svg(bm_verlauf_lesen((int) $bm_nr)) ?></div>
-<div class="sm-hilfe"><?= bm_e(bm_t('ALLG.VERLAUF_HINWEIS')) ?></div>
+<?php
+/* Tagesauswahl (B12). Bis 0.9.7 zeigte das Bild ausschliesslich den heutigen
+ * Tag, obwohl die Dateien fuer bis zu 365 Tage vorgehalten werden. */
+$bm_tage = bm_verlauf_tage((int) $bm_nr);
+$bm_vtag = (isset($_GET['vtag']) && preg_match('/^[0-9]{8}$/', (string) $_GET['vtag']))
+    ? (string) $_GET['vtag'] : date('Ymd');
+?>
+<div style="margin-top:8px;"><?= bm_soc_svg(bm_verlauf_lesen((int) $bm_nr, $bm_vtag), $bm_vtag) ?></div>
+<div class="sm-hilfe"><?= bm_e(bm_t('ALLG.VERLAUF_HINWEIS')) ?>
+<?php if (count($bm_tage) > 1) { ?>
+<br><?= bm_e(bm_t('ALLG.VERLAUF_TAG')) ?>
+<?php foreach (array_slice($bm_tage, 0, 14) as $bm_t1) { ?>
+<a href="index.php?form=settings&amp;vtag=<?= bm_e($bm_t1) ?>"<?= $bm_t1 === $bm_vtag ? ' style="font-weight:700;"' : '' ?>><?= bm_e(substr($bm_t1, 6, 2) . '.' . substr($bm_t1, 4, 2) . '.') ?></a>
+<?php } ?>
+<?php } ?>
+</div>
+<?php if ($bm_w['sollwert'] !== '' && !empty($bm_w['sollwert_quelle'])) { ?>
+<div class="sm-hilfe"><?= sprintf(bm_e(bm_t('ALLG.SOLLQUELLE')), bm_e($bm_w['sollwert_quelle'])) ?></div>
+<?php } ?>
 </div>
 <?php } ?>
 
@@ -641,6 +842,17 @@ foreach ($bm_hinweise as $bm_h) {
   <input data-role="none" type="number" id="verlauf_tage" name="verlauf_tage" value="<?= (int) $bm_cfg['verlauf_tage'] ?>" min="1" max="365">
 </div>
 
+<div class="sm-feld">
+  <label for="temp_max"><?= bm_e(bm_t('EINST.L_TEMP_MAX')) ?></label>
+  <input data-role="none" type="number" id="temp_max" name="temp_max" value="<?= (int) $bm_cfg['temp_max'] ?>" min="0" max="100">
+  <div class="sm-hilfe"><?= bm_t('EINST.H_TEMP_MAX') ?></div>
+</div>
+<div class="sm-feld">
+  <label for="temp_min"><?= bm_e(bm_t('EINST.L_TEMP_MIN')) ?></label>
+  <input data-role="none" type="number" id="temp_min" name="temp_min" value="<?= (int) $bm_cfg['temp_min'] ?>" min="0" max="100">
+  <div class="sm-hilfe"><?= bm_t('EINST.H_TEMP_MIN') ?></div>
+</div>
+
 <h2><?= bm_e(bm_t('EINST.H_STEUERUNG')) ?></h2>
 <div class="sm-warnung"><?= bm_t('EINST.STEUERUNG_ERKLAERUNG') ?></div>
 <div class="sm-feld">
@@ -704,6 +916,29 @@ foreach ($bm_hinweise as $bm_h) {
 </div>
 </form>
 
+<h2><?= bm_e(bm_t('EINST.H_SICHERUNG')) ?></h2>
+<p class="sm-hilfe"><?= bm_t('EINST.SICHERUNG_ERKLAERUNG') ?></p>
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-technik"></i> <?= bm_t('LEGENDE.TECHNIK') ?></span>
+<span><i class="sm-punkt sm-b-aktion"></i> <?= bm_t('LEGENDE.AKTION') ?></span>
+</div>
+<div class="sm-knopfreihe">
+  <form action="index.php" method="post">
+    <input data-role="none" type="hidden" name="activetab" value="tab-settings">
+    <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="konfig_export" value="1"><?= bm_e(bm_t('EINST.K_KONFIG_EXPORT')) ?></button>
+  </form>
+</div>
+<form action="index.php" method="post" enctype="multipart/form-data">
+<input data-role="none" type="hidden" name="activetab" value="tab-settings">
+<div class="sm-feld">
+  <label for="konfig_datei"><?= bm_e(bm_t('EINST.L_KONFIG_DATEI')) ?></label>
+  <input data-role="none" type="file" id="konfig_datei" name="konfig_datei" accept=".json,application/json">
+</div>
+<div class="sm-knopfreihe">
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="konfig_import" value="1"><?= bm_e(bm_t('EINST.K_KONFIG_IMPORT')) ?></button>
+</div>
+</form>
+
 <h2><?= bm_e(bm_t('EINST.H_PROFILE')) ?></h2>
 <p class="sm-hilfe"><?= bm_t('EINST.PROFILE_ERKLAERUNG') ?>
 <br><span class="sm-mono"><?= bm_e($bm_p['datadir']) ?>/profile/</span></p>
@@ -729,7 +964,22 @@ foreach ($bm_hinweise as $bm_h) {
 </table>
 <div class="sm-legende">
 <span><i class="sm-punkt sm-b-technik"></i> <?= bm_t('LEGENDE.TECHNIK') ?></span>
+<span><i class="sm-punkt sm-b-aktion"></i> <?= bm_t('LEGENDE.AKTION') ?></span>
 </div>
+
+<h3><?= bm_e(bm_t('EINST.H_PROFIL_IMPORT')) ?></h3>
+<div class="sm-hinweis"><?= bm_t('EINST.PROFIL_IMPORT_ERKLAERUNG') ?></div>
+<form action="index.php" method="post" enctype="multipart/form-data">
+<input data-role="none" type="hidden" name="activetab" value="tab-settings">
+<div class="sm-feld">
+  <label for="profil_datei"><?= bm_e(bm_t('EINST.L_PROFIL_DATEI')) ?></label>
+  <input data-role="none" type="file" id="profil_datei" name="profil_datei" accept=".json,application/json">
+  <div class="sm-hilfe"><?= bm_t('EINST.H_PROFIL_DATEI') ?></div>
+</div>
+<div class="sm-knopfreihe">
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="profil_import" value="1"><?= bm_e(bm_t('EINST.K_PROFIL_IMPORT')) ?></button>
+</div>
+</form>
 </div>
 
 <!-- ================= Reiter: MQTT ================= -->
@@ -781,6 +1031,7 @@ foreach ($bm_hinweise as $bm_h) {
 
 <h2><?= bm_e(bm_t('MQTT.H_THEMEN')) ?></h2>
 <p class="sm-hilfe"><?= bm_t('MQTT.THEMEN_ERKLAERUNG') ?></p>
+<div class="sm-hinweis"><?= bm_t('MQTT.TS_HINWEIS') ?></div>
 <table class="sm-tbl">
 <tr><th><?= bm_e(bm_t('MQTT.T_THEMA')) ?></th><th><?= bm_e(bm_t('MQTT.T_BEDEUTUNG')) ?></th></tr>
 <?php foreach (bm_mqtt_themen() as $bm_thema => $bm_schluessel) { ?>
@@ -814,17 +1065,38 @@ foreach ($bm_hinweise as $bm_h) {
 </table>
 <div class="sm-warnung"><?= bm_t('LOX.ADRESSE_VORSCHLAG') ?></div>
 <?= bm_t('LOX.S3_BEFEHLE') ?>
+<?php
+/* Nur die Messgroessen zeigen, die DIESER Speicher wirklich liefert.
+ *
+ * Bis 0.9.6 lief die Schleife ueber bm_status_felder() und zeigte damit alle
+ * 21 - auch WARNUNG, LADENMAX und ENTLMAX, die kein eingebautes Profil und
+ * kein Codepfad je fuellt. Die Importdatei legte sie als virtuelle Eingaenge
+ * an, Loxone traegt dort DefVal 0 ein, und eine 0 sieht aus wie ein Messwert.
+ *
+ * Tabelle und Importdatei holen die Auswahl jetzt aus derselben Funktion -
+ * sonst laufen sie auseinander. */
+if (!bm_felder_gemessen(1)) { ?>
+<div class="sm-warnung"><?= bm_t('LOX.VORLAGE_UNGEMESSEN') ?></div>
+<?php } ?>
 <table class="sm-tbl">
 <tr><th><?= bm_e(bm_t('LOX.T_TITEL')) ?></th><th><?= bm_e(bm_t('LOX.T_BEFEHL')) ?></th>
     <th><?= bm_e(bm_t('LOX.T_EINHEIT')) ?></th><th><?= bm_e(bm_t('LOX.T_GRENZEN')) ?></th>
     <th><?= bm_e(bm_t('LOX.T_BEDEUTUNG')) ?></th></tr>
-<?php foreach (bm_status_felder() as $bm_feld => $bm_info) { ?>
+<?php foreach (bm_felder_geliefert(1) as $bm_feld => $bm_info) { ?>
 <tr><td><span class="sm-mono">BMS_1_<?= bm_e($bm_feld) ?></span></td>
     <td><span class="sm-mono">\i<?= bm_e($bm_feld) ?>=\i\v</span></td>
     <td><?= bm_e($bm_info[0]) ?></td>
     <td><span class="sm-mono"><?= (int) $bm_info[2] ?> &hellip; <?= (int) $bm_info[3] ?></span></td>
     <td><?= bm_t($bm_info[1]) ?></td></tr>
 <?php } ?>
+<tr><td><span class="sm-mono">BMS_1_SOLLART</span></td>
+    <td><span class="sm-mono">\iSOLLART=\i\v</span></td>
+    <td>&mdash;</td><td><span class="sm-mono">0 &hellip; 3</span></td>
+    <td><?= bm_t('BM_FELD.SOLLART') ?></td></tr>
+<tr><td><span class="sm-mono">BMS_1_SOLLALTER</span></td>
+    <td><span class="sm-mono">\iSOLLALTER=\i\v</span></td>
+    <td>s</td><td><span class="sm-mono">-1 &hellip; 86400</span></td>
+    <td><?= bm_t('BM_FELD.SOLLALTER') ?></td></tr>
 </table>
 <div class="sm-warnung"><?= bm_t('LOX.S3_STRICH') ?></div>
 <?php if (count($bm_werte) > 1) { ?>
@@ -1069,6 +1341,51 @@ function bm_bausteine()
 <?php if ($bm_testausgabe !== '') { ?>
 <div class="sm-pre"><?= bm_e($bm_testausgabe) ?></div>
 <?php } ?>
+
+<h3><?= bm_e(bm_t('TEST.H_TROCKEN')) ?></h3>
+<div class="sm-hinweis"><?= bm_t('TEST.TROCKEN_ERKLAERUNG') ?></div>
+<form action="index.php" method="post">
+<input data-role="none" type="hidden" name="activetab" value="tab-test">
+<div class="sm-feld">
+  <label for="tl_geraet"><?= bm_e(bm_t('TEST.L_GERAET')) ?></label>
+  <input data-role="none" type="number" id="tl_geraet" name="test_geraet" value="1" min="1" max="6">
+</div>
+<div class="sm-feld">
+  <label for="tl_watt"><?= bm_e(bm_t('TEST.L_WATT')) ?></label>
+  <input data-role="none" type="number" id="tl_watt" name="test_watt" value="500" min="0" max="30000">
+</div>
+<div class="sm-knopfreihe">
+  <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="trockenlauf" value="laden"><?= bm_e(bm_t('TEST.K_TROCKEN_LADEN')) ?></button>
+  <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="trockenlauf" value="entladen"><?= bm_e(bm_t('TEST.K_TROCKEN_ENTLADEN')) ?></button>
+  <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="trockenlauf" value="sperren"><?= bm_e(bm_t('TEST.K_TROCKEN_SPERREN')) ?></button>
+</div>
+</form>
+
+<h3><?= bm_e(bm_t('TEST.H_MITSCHNITT')) ?></h3>
+<div class="sm-hinweis"><?= bm_t('TEST.MITSCHNITT_ERKLAERUNG') ?></div>
+<?php $bm_mrest = bm_mitschnitt_laeuft($bm_cfg); ?>
+<?php if ($bm_mrest > 0) { ?>
+<div class="sm-warnung"><?= sprintf(bm_e(bm_t('TEST.MITSCHNITT_LAEUFT')), (int) $bm_mrest) ?></div>
+<?php } ?>
+<div class="sm-knopfreihe">
+  <form action="index.php" method="post">
+    <input data-role="none" type="hidden" name="activetab" value="tab-test">
+    <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="mitschnitt" value="ein"><?= bm_e(bm_t('TEST.K_MITSCHNITT_EIN')) ?></button>
+  </form>
+  <form action="index.php" method="post">
+    <input data-role="none" type="hidden" name="activetab" value="tab-test">
+    <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="mitschnitt" value="aus"><?= bm_e(bm_t('TEST.K_MITSCHNITT_AUS')) ?></button>
+  </form>
+</div>
+<?php
+$bm_mdatei = bm_mitschnitt_datei();
+if (is_file($bm_mdatei)) {
+    $bm_mz = array_slice(array_reverse(file($bm_mdatei,
+        FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: array()), 0, 60);
+    if ($bm_mz) { ?>
+<div class="sm-log"><?= bm_e(implode("\n", $bm_mz)) ?></div>
+<?php }
+} ?>
 
 <h3><?= bm_e(bm_t('TEST.H_SCHALTEN')) ?></h3>
 <div class="sm-warnung"><?= bm_t('TEST.SCHALTEN_WARNUNG') ?></div>
