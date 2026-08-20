@@ -141,7 +141,11 @@ function bm_pruefungen()
      * dieselbe Grenze: das Fuenffache des Takts, mindestens 180 s. Wer eine
      * der beiden Stellen aendert, aendert die andere mit. */
     $abbildalter = bm_alter();
-    $grenze = max(180, 5 * max(5, (int) $cfg['intervall']));
+    // Die Schwelle steht in bm_waechter_grenze() - hier stand sie ein
+    // zweites Mal ausgeschrieben. Zwei Kopien derselben Formel laufen
+    // auseinander, sobald jemand eine davon anpasst, und die Pruefzeile
+    // misst danach gegen etwas anderes als der Waechter.
+    $grenze = bm_waechter_grenze($cfg);
     if ($abbildalter < 0) {
         $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_ABBILD'), bm_t('TEST.A_ABBILD_NIE'));
     } else {
