@@ -62,9 +62,26 @@ abbild_alter() {
 # die Formel hier UND dort ausgeschrieben, jeweils mit einem Kommentar, der
 # auf die andere Stelle verwies.
 #
-# Fail safe: laesst sich die Bibliothek nicht befragen - kein PHP, Datei nicht
-# da, Fehler beim Einlesen -, gilt die Untergrenze von 180 s. Der Waechter
-# greift dann spaeter, aber nie frueher als vorgesehen.
+# KEIN ERSATZWERT, wenn die Abfrage misslingt. Bis 0.9.9 stand hier ein
+# Rueckfall auf 180 s mit dem Kommentar, der Waechter greife dann "spaeter,
+# aber nie frueher als vorgesehen". Der Satz war falsch, und zwar ab einem
+# Takt von 37 s: die echte Grenze ist max(180, 5*Takt), also groesser als
+# 180. Der Rueckfall ist dann KLEINER als die echte Grenze - der Waechter
+# greift frueher, nicht spaeter.
+#
+# Wirksam wird das, sobald das Abbild im gesunden Betrieb aelter als 180 s
+# ist, also etwa ab einem Takt von drei Minuten. Dann gilt jeder normale
+# Durchlauf als Stillstand, und der Waechter startet den Dienst dauerhaft
+# im Kreis - ohne dass irgendetwas abstuerzt oder sich meldet. Genau so
+# geschehen an Weissware 0.9.11 (dort alle drei Minuten, belegt am
+# 22.08.2026).
+#
+# Eine Untergrenze ist eben kein Fail safe, sondern ein Zuschlagen. Ein
+# Rueckfallwert ist nur dann harmlos, wenn er sicher GROESSER ODER GLEICH
+# der echten Grenze ist - und das weiss niemand, wenn sich die Grenze nicht
+# lesen laesst.
+#
+# Rueckgabe: die Grenze in Sekunden, oder LEER mit Rueckgabewert 1.
 abbild_grenze() {
     LIB="$LBHOMEDIR/webfrontend/html/plugins/$PNAME/bm_lib.php"
     G=""
@@ -72,16 +89,41 @@ abbild_grenze() {
         G=$(LBHOMEDIR="$LBHOMEDIR" php -r 'require $argv[1]; echo bm_waechter_grenze();' "$LIB" 2>/dev/null)
     fi
     case "$G" in
-        ''|*[!0-9]*) G=180 ;;
+        ''|*[!0-9]*) echo ""; return 1 ;;
     esac
-    if [ "$G" -lt 180 ]; then G=180; fi
+    if [ "$G" -lt 1 ]; then echo ""; return 1; fi
     echo "$G"
+    return 0
+}
+
+# Wer die Grenze nicht kennt, laesst den Dienst in Ruhe - und SAGT ES.
+#
+# Ein Waechter, der stillsteht, ohne es zu sagen, ist die naechste stille
+# Falschaussage. Die Meldung ist gebremst, hoechstens stuendlich: sonst
+# ersetzt man den Neustart-Kreisel durch einen Protokoll-Kreisel, und die
+# Logdatei liegt auf einer Ramdisk.
+STUMMMERKER="$PDATA/waechter_stumm"
+
+waechter_stumm_melden() {
+    JETZT=$(date +%s)
+    if [ -f "$STUMMMERKER" ]; then
+        SM=$(stat -c %Y "$STUMMMERKER" 2>/dev/null)
+        if [ -n "$SM" ] && [ $(( JETZT - SM )) -lt 3600 ]; then
+            return 0
+        fi
+    fi
+    touch "$STUMMMERKER"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Waechter: Die Schwelle liess sich nicht aus bm_lib.php lesen (kein PHP, Datei fehlt, oder ein Fehler darin). Das Alter des Abbilds wird deshalb NICHT bewertet und der Dienst aus diesem Grund NICHT neu gestartet. Ein Ersatzwert waere hier gefaehrlich: er koennte kleiner sein als die echte Grenze und den Dienst im Kreis neu starten. Erwartet wurde: $LIB" >> "$LOGDATEI"
 }
 
 abbild_steht() {
     A=$(abbild_alter)
     [ "$A" -ge 0 ] || return 1
-    [ "$A" -gt "$(abbild_grenze)" ] || return 1
+    # Erst die Grenze holen, dann vergleichen. Laesst sie sich nicht lesen,
+    # wird NICHT bewertet - und die Stille wird gemeldet.
+    GRENZE=$(abbild_grenze) || { waechter_stumm_melden; return 1; }
+    [ -n "$GRENZE" ] || { waechter_stumm_melden; return 1; }
+    [ "$A" -gt "$GRENZE" ] || return 1
     # Nicht im Minutentakt nachsetzen: hilft der Neustart nicht, wuerde der
     # Waechter sonst jede Minute erneut zuschlagen und das Protokoll fluten.
     if [ -f "$NEUSTARTMERKER" ]; then

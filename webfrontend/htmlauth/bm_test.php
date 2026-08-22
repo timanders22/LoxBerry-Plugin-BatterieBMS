@@ -137,20 +137,52 @@ function bm_pruefungen()
 
     /* Arbeitet der Dienst noch, oder lebt nur sein Prozess?
      *
-     * Dieselbe Frage stellt der Waechter in bin/dienst.sh, und er benutzt
-     * dieselbe Grenze: das Fuenffache des Takts, mindestens 180 s. Wer eine
-     * der beiden Stellen aendert, aendert die andere mit. */
+     * Dieselbe Frage stellt der Waechter in bin/dienst.sh, und beide holen
+     * die Schwelle aus DERSELBEN Funktion - der Waechter ueber 'php -r'.
+     * Hier stand sie bis 0.9.8 ein zweites Mal ausgeschrieben; zwei Kopien
+     * derselben Formel laufen auseinander, sobald jemand eine davon
+     * anpasst, und die Pruefzeile misst danach gegen etwas anderes als der
+     * Waechter.
+     *
+     * Was diese Zeile NICHT beantwortet: ob der Waechter die Funktion von
+     * der Shell aus auch erreicht. Dafuer gibt es die Zeile darunter. */
     $abbildalter = bm_alter();
-    // Die Schwelle steht in bm_waechter_grenze() - hier stand sie ein
-    // zweites Mal ausgeschrieben. Zwei Kopien derselben Formel laufen
-    // auseinander, sobald jemand eine davon anpasst, und die Pruefzeile
-    // misst danach gegen etwas anderes als der Waechter.
     $grenze = bm_waechter_grenze($cfg);
     if ($abbildalter < 0) {
         $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_ABBILD'), bm_t('TEST.A_ABBILD_NIE'));
     } else {
         $zeilen[] = bm_pruefzeile($abbildalter <= $grenze ? 1 : 0, bm_t('TEST.F_ABBILD'),
             sprintf(bm_t('TEST.A_ABBILD'), (int) $abbildalter, (int) $grenze));
+    }
+
+    /* Findet der Waechter die Bibliothek, aus der er seine Schwelle liest?
+     *
+     * bin/dienst.sh baut den Pfad aus dem eigenen Ablageort zusammen:
+     * <home>/webfrontend/html/plugins/<ordner>/bm_lib.php. Stimmt er nicht,
+     * bekommt der Waechter keine Zahl - und seit 0.9.10 bewertet er das
+     * Alter dann gar nicht mehr. Er steht also still, und ein Dienst, der
+     * sich aufhaengt, bliebe unbemerkt.
+     *
+     * Bis 0.9.9 war es schlimmer: der Waechter nahm dann 180 s an. Bei
+     * einem Takt ueber drei Minuten galt damit jeder gesunde Durchlauf als
+     * Stillstand, und der Dienst wurde dauerhaft im Kreis neu gestartet.
+     *
+     * Geprueft wird derselbe Pfad, den die Shell baut - nicht der, aus dem
+     * diese Datei gerade gelesen wird. */
+    $waechterlib = ($p['home'] !== '')
+        ? $p['home'] . '/webfrontend/html/plugins/' . $p['plugin'] . '/bm_lib.php' : '';
+    $wlok = ($waechterlib !== '') && is_file($waechterlib) && is_readable($waechterlib);
+    $zeilen[] = bm_pruefzeile($wlok ? 1 : 0, bm_t('TEST.F_WAECHTERLIB'),
+        $wlok ? sprintf(bm_t('TEST.A_WAECHTERLIB_OK'), bm_e($waechterlib), (int) $grenze)
+              : sprintf(bm_t('TEST.A_WAECHTERLIB_FEHLT'),
+                        bm_e($waechterlib !== '' ? $waechterlib : '(kein LBHOMEDIR)')));
+
+    /* Meldet der Waechter, dass er stillsteht? */
+    $stummdatei = $p['datadir'] . '/waechter_stumm';
+    if (is_file($stummdatei) && (time() - filemtime($stummdatei)) < 7200) {
+        $zeilen[] = bm_pruefzeile(0, bm_t('TEST.F_WAECHTER_STUMM'),
+            sprintf(bm_t('TEST.A_WAECHTER_STUMM'),
+                    (int) ((time() - filemtime($stummdatei)) / 60)));
     }
 
     /* Traegt die MQTT-Veroeffentlichung einen Zeitstempel?

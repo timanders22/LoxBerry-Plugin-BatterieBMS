@@ -1372,6 +1372,10 @@ function bm_selbsttest()
      * Zierde: die Pruefsummen der beiden Protokolle sind die Stelle, an der
      * ein Nachbau typischerweise falsch ist, und ein Fehler dort sieht von
      * aussen aus wie ein Verkabelungsproblem. */
+    /* Ab hier beginnt der RECHENKERN: Pruefwerte, die auf jeder Maschine
+     * gleich ausgehen muessen, weil sie von keiner Anlage abhaengen. Nur
+     * diese Zeilen gehen in die Schlusszeile ein - siehe dort. */
+    $kernAb = count($zeilen);
     $zeilen[] = '';
     $zeilen[] = 'Nachgebaute Protokolle gegen Pruefwerte:';
 
@@ -1691,6 +1695,64 @@ function bm_selbsttest()
     $zeilen[] = '  - ob die Pylontech-Rahmen von einem echten Modul angenommen werden';
     $zeilen[] = '    (der Rahmenbau ist hier nur gegen sich selbst geprueft, nicht gegen';
     $zeilen[] = '     die Originalbibliothek und nicht gegen ein Modul)';
+    /* Die Schlusszeile - das erste, was ein Mensch liest, und das einzige,
+     * was Werkzeuge/freigabe_pruefen.py auswerten kann. Ohne sie meldet die
+     * Freigabepruefung 'keine auswertbare Ausgabe'.
+     *
+     * Gezaehlt wird AUS DEN AUSGEGEBENEN ZEILEN, nicht aus einem mitlaufenden
+     * Zaehler. Sonst koennen Zahl und Ausgabe auseinanderlaufen - und eine
+     * Zusammenfassung, die besser aussieht als ihre schlechteste Zeile, ist
+     * die teuerste Fehlerart dieser Sammlung.
+     *
+     * Faelle sind die ENTSCHIEDENEN Zeilen, also [OK] und [FEHL]. Hinweise
+     * ([INFO]) sind keine Faelle und werden nicht mitgezaehlt. Vorbehalte
+     * ([WARN]) werden getrennt GENANNT statt verschwiegen: ein Hinweis ist
+     * fuer 'geht mich nichts an' da, nicht fuer 'ich weiss es nicht'. */
+    $anzahl = 0;
+    $fehl = 0;
+    $lage = 0;
+    $warn = 0;
+    foreach ($zeilen as $i => $z) {
+        if (!preg_match('/^\[(OK|FEHL|WARN)\s*\]/', $z, $mm)) {
+            continue;
+        }
+        if ($mm[1] === 'WARN') {
+            $warn++;
+            continue;
+        }
+        if ($i < $kernAb) {
+            // Zeilen ueber die ANLAGE. Sie gehoeren in die Ausgabe, aber
+            // nicht in die Schlusszeile: 'kein Speicher eingerichtet' kann
+            // auf einer Baumaschine gar nicht anders lauten, und ein
+            // Freigabetor, das deshalb immer rot ist, sagt nichts mehr.
+            if ($mm[1] === 'FEHL') {
+                $lage++;
+            }
+            continue;
+        }
+        $anzahl++;
+        if ($mm[1] === 'FEHL') {
+            $fehl++;
+        }
+    }
+    $kopf = sprintf('Rechenkern: %d Faelle geprueft, %d Fehlschlaege.', $anzahl, $fehl);
+    if ($lage > 0) {
+        $kopf .= sprintf(' Dazu %d Beanstandung(en) zu DIESER Anlage - die stehen unten'
+                       . ' und sind kein Urteil ueber das Plugin.', $lage);
+    }
+    if ($warn > 0) {
+        $kopf .= sprintf(' Und %d Vorbehalt(e), gezeichnet mit [WARN].', $warn);
+    }
+    /* Zwei Zahlen, die nicht zusammenpassen, sind ein Befund - auch die
+     * eigenen. Der Zaehler $fehler steuert den Rueckgabewert, die Zaehlung
+     * oben steuert die Schlusszeile; laufen sie auseinander, stimmt eine der
+     * beiden nicht, und das gehoert in die Ausgabe statt in niemandes Kopf. */
+    if (($fehl + $lage) !== $fehler) {
+        $kopf .= sprintf(' ACHTUNG: der Rueckgabewert-Zaehler meldet %d Fehlschlaege,'
+                       . ' gezaehlt wurden %d - eine der beiden Zahlen stimmt nicht.',
+                         $fehler, $fehl + $lage);
+    }
+    array_unshift($zeilen, $kopf, '');
     echo implode("\n", $zeilen) . "\n";
     return $fehler ? 1 : 0;
 }
