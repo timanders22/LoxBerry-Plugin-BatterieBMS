@@ -159,8 +159,8 @@ function bm_status_felder()
         'UBAT'     => array('V',   'BM_FELD.UBAT',     0,    1000),
         'IBAT'     => array('A',   'BM_FELD.IBAT',     -600, 600),
         'PBAT'     => array('W',   'BM_FELD.PBAT',     -30000, 30000),
-        'TMAX'     => array('C',   'BM_FELD.TMAX',     -40,  100),
-        'TMIN'     => array('C',   'BM_FELD.TMIN',     -40,  100),
+        'TMAX'     => array('°C', 'BM_FELD.TMAX',     -40,  100),
+        'TMIN'     => array('°C', 'BM_FELD.TMIN',     -40,  100),
         'UZMAX'    => array('V',   'BM_FELD.UZMAX',    0,    5),
         'UZMIN'    => array('V',   'BM_FELD.UZMIN',    0,    5),
         'UZDIFF'   => array('mV',  'BM_FELD.UZDIFF',   0,    2000),
@@ -2701,6 +2701,31 @@ function bm_felder_geliefert($nummer)
     return $aus;
 }
 
+/**
+ * Der Suchtext einer Befehlserkennung - die EINE Quelle.
+ *
+ * Loxone nimmt bei einem virtuellen HTTP-Eingang die ERSTE Fundstelle des
+ * Suchtextes in der Zeile. Ohne fuehrendes Trennzeichen trifft \iKM=\i\v
+ * deshalb auch INSPKM= - genau das ist am 20.08.2026 an Volkswagen ID und
+ * Skoda Connect aufgetreten: der Kilometerstand las die Inspektionsvorgabe,
+ * 15000 statt 48210. Beide Zahlen sehen aus wie ein Kilometerstand, und der
+ * Fehler meldet sich nie.
+ *
+ * In diesem Plugin gibt es dasselbe Paar: ALTER ist Endstueck von SOLLALTER.
+ * Bisher hat allein die REIHENFOLGE in der Statuszeile gerettet, dass der
+ * Baustein den richtigen Wert bekam - ALTER steht vor SOLLALTER. Das ist eine
+ * Zusicherung, die beim naechsten neuen Feld unbemerkt faellt.
+ *
+ * Mit dem Semikolon davor ist die Frage strukturell erledigt: jedes Feld der
+ * Statuszeile steht hinter einem ';', denn die Zeile beginnt mit 'BMS;' und
+ * trennt mit ';'. Bestehende Loxone-Projekte laufen unveraendert weiter - die
+ * ausgegebene Zeile aendert sich nicht, nur der empfohlene Suchtext.
+ */
+function bm_check($feld)
+{
+    return '\i;' . $feld . '=\i\v';
+}
+
 /** Vorlage der virtuellen Eingaenge. Rueckgabe: array(name, inhalt) */
 function bm_vorlage_eingaenge($nummer = 1)
 {
@@ -2718,7 +2743,7 @@ function bm_vorlage_eingaenge($nummer = 1)
         $cmds[] = array(
             'title'   => 'BMS_' . (int) $nummer . '_' . $feld,
             'comment' => $bedeutung . ($info[0] !== '' ? ' [' . $info[0] . ']' : ''),
-            'check'   => '\i' . $feld . '=\i\v',
+            'check'   => bm_check($feld),
             'min'     => (string) $info[2],
             'max'     => (string) $info[3],
         );
@@ -2734,15 +2759,19 @@ function bm_vorlage_eingaenge($nummer = 1)
      * SOLL selbst bleibt draussen: das ist ein Text ('laden:500') und taugt
      * nicht als Analogwert. Dafuer gibt es SOLLART als Zahl.
      *
-     * Beide stehen am ENDE der Statuszeile. Das ist Pflicht und kein Zufall:
-     * Loxone nimmt den ERSTEN Treffer des Suchtextes in der Zeile, und
-     * \iALTER=\i\v steckt auch in SOLLALTER=. Weil ALTER vorher steht,
-     * findet der Baustein den richtigen Wert. */
+     * Beide stehen am ENDE der Statuszeile. Neue Felder werden immer hinten
+     * angehaengt - das bleibt so, weil bestehende Projekte sonst an anderer
+     * Stelle suchen muessten.
+     *
+     * Bis 0.9.10 war die Reihenfolge darueber hinaus die einzige Rettung:
+     * \iALTER=\i\v steckt auch in SOLLALTER=, und nur weil ALTER vorher
+     * steht, fand der Baustein den richtigen Wert. Seit bm_check() das
+     * Trennzeichen setzt, traegt die Reihenfolge diese Last nicht mehr. */
     $cmds[] = array(
         'title'   => 'BMS_' . (int) $nummer . '_SOLLART',
         'comment' => trim(strip_tags(html_entity_decode(bm_t('BM_FELD.SOLLART'),
                           ENT_QUOTES, 'UTF-8'))),
-        'check'   => '\iSOLLART=\i\v',
+        'check'   => bm_check('SOLLART'),
         'min'     => '0',
         'max'     => '3',
     );
@@ -2750,7 +2779,7 @@ function bm_vorlage_eingaenge($nummer = 1)
         'title'   => 'BMS_' . (int) $nummer . '_SOLLALTER',
         'comment' => trim(strip_tags(html_entity_decode(bm_t('BM_FELD.SOLLALTER'),
                           ENT_QUOTES, 'UTF-8'))) . ' [s]',
-        'check'   => '\iSOLLALTER=\i\v',
+        'check'   => bm_check('SOLLALTER'),
         'min'     => '-1',
         'max'     => '86400',
     );

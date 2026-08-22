@@ -155,6 +155,52 @@ function bm_pruefungen()
             sprintf(bm_t('TEST.A_ABBILD'), (int) $abbildalter, (int) $grenze));
     }
 
+    /* Tragen alle Suchmuster das Trennzeichen?
+     *
+     * Gemessen wird an dem, was der Anwender vor sich hat: an der ERZEUGTEN
+     * Importdatei und an den FERTIGEN Texten der Baustein-Liste - nicht am
+     * Quelltext. Genau dort lag die Luecke, die ein Bestandslauf am
+     * 22.08.2026 gefunden hat und kein Werkzeug dieses Plugins: die
+     * Importdatei kam aus einer Funktion, die Baustein-Liste aus sechzehn
+     * Abschriften in den Sprachdateien.
+     *
+     * Ohne Trennzeichen trifft ein Suchtext das erste Feld, auf dessen Namen
+     * er endet - \iALTER=\i\v faende in dieser Zeile auch SOLLALTER=. */
+    $ohneTrenn = array();
+    $mitTrenn = 0;
+    if (function_exists('bm_bausteine')) {
+        foreach (bm_bausteine() as $b) {
+            $txt = is_array($b[3]) ? $b[3]['text'] : ($b[3] !== '' ? bm_t($b[3]) : '');
+            if (preg_match_all('/\\\\i(;?)([A-Z_]{2,})=/', $txt, $tr, PREG_SET_ORDER)) {
+                foreach ($tr as $x) {
+                    if ($x[1] === ';') {
+                        $mitTrenn++;
+                    } else {
+                        $ohneTrenn[] = bm_t('TEST.A_TRENN_LISTE') . ' ' . bm_e($x[2]);
+                    }
+                }
+            }
+        }
+    }
+    list($vn3, $vi3) = bm_vorlage_eingaenge(1);
+    if (preg_match_all('/Check="([^"]*)"/', $vi3, $tr2)) {
+        foreach ($tr2[1] as $chk) {
+            $klar = html_entity_decode($chk, ENT_QUOTES, 'UTF-8');
+            if (preg_match('/\\\\i(;?)([A-Z_]{2,})=/', $klar, $x)) {
+                if ($x[1] === ';') {
+                    $mitTrenn++;
+                } else {
+                    $ohneTrenn[] = bm_t('TEST.A_TRENN_VORLAGE') . ' ' . bm_e($x[2]);
+                }
+            }
+        }
+    }
+    $zeilen[] = bm_pruefzeile($ohneTrenn ? 0 : ($mitTrenn > 0 ? 1 : -1),
+        bm_t('TEST.F_TRENN'),
+        $ohneTrenn ? sprintf(bm_t('TEST.A_TRENN_FEHLT'), implode(', ', $ohneTrenn))
+                   : ($mitTrenn > 0 ? sprintf(bm_t('TEST.A_TRENN_OK'), $mitTrenn)
+                                    : bm_t('TEST.A_TRENN_NICHTS')));
+
     /* Findet der Waechter die Bibliothek, aus der er seine Schwelle liest?
      *
      * bin/dienst.sh baut den Pfad aus dem eigenen Ablageort zusammen:

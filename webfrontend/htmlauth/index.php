@@ -1084,17 +1084,17 @@ if (!bm_felder_gemessen(1)) { ?>
     <th><?= bm_e(bm_t('LOX.T_BEDEUTUNG')) ?></th></tr>
 <?php foreach (bm_felder_geliefert(1) as $bm_feld => $bm_info) { ?>
 <tr><td><span class="sm-mono">BMS_1_<?= bm_e($bm_feld) ?></span></td>
-    <td><span class="sm-mono">\i<?= bm_e($bm_feld) ?>=\i\v</span></td>
+    <td><span class="sm-mono"><?= bm_e(bm_check($bm_feld)) ?></span></td>
     <td><?= bm_e($bm_info[0]) ?></td>
     <td><span class="sm-mono"><?= (int) $bm_info[2] ?> &hellip; <?= (int) $bm_info[3] ?></span></td>
     <td><?= bm_t($bm_info[1]) ?></td></tr>
 <?php } ?>
 <tr><td><span class="sm-mono">BMS_1_SOLLART</span></td>
-    <td><span class="sm-mono">\iSOLLART=\i\v</span></td>
+    <td><span class="sm-mono"><?= bm_e(bm_check('SOLLART')) ?></span></td>
     <td>&mdash;</td><td><span class="sm-mono">0 &hellip; 3</span></td>
     <td><?= bm_t('BM_FELD.SOLLART') ?></td></tr>
 <tr><td><span class="sm-mono">BMS_1_SOLLALTER</span></td>
-    <td><span class="sm-mono">\iSOLLALTER=\i\v</span></td>
+    <td><span class="sm-mono"><?= bm_e(bm_check('SOLLALTER')) ?></span></td>
     <td>s</td><td><span class="sm-mono">-1 &hellip; 86400</span></td>
     <td><?= bm_t('BM_FELD.SOLLALTER') ?></td></tr>
 </table>
@@ -1175,17 +1175,49 @@ if (!bm_felder_gemessen(1)) { ?>
  * Typ, Name und Parameter stehen als Sprachschluessel drin, die Eingangsspalte
  * ist symbolisch und damit sprachfrei.
  */
+/**
+ * Der Parametertext einer Befehlserkennung - aus DERSELBEN Quelle wie die
+ * Importdatei.
+ *
+ * Bis 0.9.10 stand er acht Mal ausgeschrieben in der Sprachdatei
+ * (BAUSTEIN.P01 bis P08), je Sprache - also sechzehn Abschriften eines
+ * Musters, das der Quelltext nebenan selbst baut. Der Bestandslauf von
+ * Werkzeuge/suchmuster_pruefen.py hat sie als RISIKO gemeldet: sie zeigten
+ * den Suchtext ohne Trennzeichen. Der Anwender schreibt aber die Oberflaeche
+ * ab, nicht den Quelltext.
+ *
+ * Die naheliegende Antwort waere gewesen, sechzehn Zeilen zu berichtigen.
+ * Diese hier ist besser: eine Abschrift kann nicht auseinanderlaufen, weil es
+ * keine mehr gibt. Muster, Einheit und Grenzen kommen aus bm_check() und
+ * bm_status_felder() - denselben Stellen, aus denen die Importdatei entsteht.
+ */
+function bm_baustein_befehl($feld, $zusatz = '')
+{
+    $felder = bm_status_felder();
+    $info = isset($felder[$feld]) ? $felder[$feld] : array('', '', 0, 0);
+    $einheit = ($info[0] !== '')
+        ? sprintf(bm_t('BAUSTEIN.P_EINHEIT'), bm_e($info[0]))
+        : bm_t('BAUSTEIN.P_OHNE_EINHEIT');
+    $text = sprintf(bm_t('BAUSTEIN.P_BEFEHL'),
+        '<span class="sm-mono">' . bm_e(bm_check($feld)) . '</span>',
+        $einheit, (int) $info[2], (int) $info[3]);
+    if ($zusatz !== '') {
+        $text .= ' ' . bm_t($zusatz);
+    }
+    return array('text' => $text);
+}
+
 function bm_bausteine()
 {
     return array(
-        array(1,  'BAUSTEIN.T_VE',       'BAUSTEIN.N01', 'BAUSTEIN.P01', '&mdash;'),
-        array(2,  'BAUSTEIN.T_VE',       'BAUSTEIN.N02', 'BAUSTEIN.P02', '&mdash;'),
-        array(3,  'BAUSTEIN.T_VE',       'BAUSTEIN.N03', 'BAUSTEIN.P03', '&mdash;'),
-        array(4,  'BAUSTEIN.T_VE',       'BAUSTEIN.N04', 'BAUSTEIN.P04', '&mdash;'),
-        array(5,  'BAUSTEIN.T_VE',       'BAUSTEIN.N05', 'BAUSTEIN.P05', '&mdash;'),
-        array(6,  'BAUSTEIN.T_VE',       'BAUSTEIN.N06', 'BAUSTEIN.P06', '&mdash;'),
-        array(7,  'BAUSTEIN.T_VE',       'BAUSTEIN.N07', 'BAUSTEIN.P07', '&mdash;'),
-        array(8,  'BAUSTEIN.T_VE',       'BAUSTEIN.N08', 'BAUSTEIN.P08', '&mdash;'),
+        array(1,  'BAUSTEIN.T_VE',       'BAUSTEIN.N01', bm_baustein_befehl('SOC'),    '&mdash;'),
+        array(2,  'BAUSTEIN.T_VE',       'BAUSTEIN.N02', bm_baustein_befehl('SOH'),    '&mdash;'),
+        array(3,  'BAUSTEIN.T_VE',       'BAUSTEIN.N03', bm_baustein_befehl('UZDIFF'), '&mdash;'),
+        array(4,  'BAUSTEIN.T_VE',       'BAUSTEIN.N04', bm_baustein_befehl('TMAX'),   '&mdash;'),
+        array(5,  'BAUSTEIN.T_VE',       'BAUSTEIN.N05', bm_baustein_befehl('PBAT', 'BAUSTEIN.Z_PBAT'), '&mdash;'),
+        array(6,  'BAUSTEIN.T_VE',       'BAUSTEIN.N06', bm_baustein_befehl('ZYKLEN'), '&mdash;'),
+        array(7,  'BAUSTEIN.T_VE',       'BAUSTEIN.N07', bm_baustein_befehl('ALTER'),  '&mdash;'),
+        array(8,  'BAUSTEIN.T_VE',       'BAUSTEIN.N08', bm_baustein_befehl('OK', 'BAUSTEIN.Z_OK'), '&mdash;'),
         array(9,  'BAUSTEIN.T_SWS',      'BAUSTEIN.N09', 'BAUSTEIN.P09', 'I &larr; #7'),
         array(10, 'BAUSTEIN.T_NICHT',    'BAUSTEIN.N10', '',             'I &larr; #8'),
         array(11, 'BAUSTEIN.T_ODER',     'BAUSTEIN.N11', '',             'I1 &larr; #9, I2 &larr; #10'),
@@ -1225,7 +1257,7 @@ function bm_bausteine()
     <th><?= bm_e(bm_t('LOX.T_PARAMETER')) ?></th><th><?= bm_e(bm_t('LOX.T_EINGAENGE')) ?></th></tr>
 <?php foreach (bm_bausteine() as $bm_b) { ?>
 <tr><td><?= (int) $bm_b[0] ?></td><td><?= bm_t($bm_b[1]) ?></td><td><?= bm_t($bm_b[2]) ?></td>
-    <td><?= $bm_b[3] !== '' ? bm_t($bm_b[3]) : '&mdash;' ?></td><td><?= $bm_b[4] ?></td></tr>
+    <td><?= is_array($bm_b[3]) ? $bm_b[3]['text'] : ($bm_b[3] !== '' ? bm_t($bm_b[3]) : '&mdash;') ?></td><td><?= $bm_b[4] ?></td></tr>
 <?php } ?>
 </table>
 <?= bm_t('LOX.S7_ERLAEUTERUNG') ?>
