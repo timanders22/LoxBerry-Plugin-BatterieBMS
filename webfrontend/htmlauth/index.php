@@ -174,7 +174,22 @@ if ($bm_post && isset($_POST['konfig_import'])) {
         if (!is_array($bm_neu) || !isset($bm_neu['geraete'])) {
             $bm_fehler[] = bm_t('EINST.FEHLER_KONFIG_FORM');
         } else {
-            $bm_zusammen = array_merge(bm_vorgaben(), $bm_neu);
+            /* Fremde Schluessel sind eine BEANSTANDUNG, kein stiller Zusatz.
+             * array_merge nahm bisher alles auf, was in der Datei stand -
+             * auch Schluessel aus einem anderen Plugin oder einer anderen
+             * Fassung. Sie landeten in der Konfiguration, taten dort nichts
+             * und waren an nichts zu erkennen. */
+            $bm_fremd = array_diff(array_keys($bm_neu), array_keys(bm_vorgaben()));
+            if ($bm_fremd) {
+                $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_KONFIG_FREMD'),
+                    bm_e(implode(', ', array_slice($bm_fremd, 0, 8))));
+                $bm_zusammen = null;
+            } else {
+                $bm_zusammen = array_merge(bm_vorgaben(), $bm_neu);
+            }
+            if ($bm_zusammen === null) {
+                /* nichts tun - geaendert wird GAR NICHTS */
+            } else
             if (bm_config_speichern($bm_zusammen)) {
                 $bm_meldungen[] = sprintf(bm_t('EINST.KONFIG_ZURUECK'),
                     count((array) $bm_zusammen['geraete']));
@@ -542,6 +557,7 @@ $bm_rahmen = class_exists('LBWeb', false);
 if ($bm_rahmen) {
     LBWeb::lbheader('Batterie-Heimspeicher (BMS)', 'https://wiki.loxberry.de/', 'help.html');
 }
+
 ?>
 <style>
 /* Hausstandard, wortgetreu aus VORLAGE_hausstandard.css.html uebernommen.
@@ -980,6 +996,7 @@ foreach ($bm_hinweise as $bm_h) {
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="profil_import" value="1"><?= bm_e(bm_t('EINST.K_PROFIL_IMPORT')) ?></button>
 </div>
 </form>
+
 </div>
 
 <!-- ================= Reiter: MQTT ================= -->
@@ -1024,7 +1041,7 @@ foreach ($bm_hinweise as $bm_h) {
 </table>
 
 <h2><?= bm_e(bm_t('MQTT.H_ABO')) ?></h2>
-<div class="sm-warnung"><?= bm_t('MQTT.ABO_WARNUNG') ?></div>
+<div class="sm-warnung"><?= bm_abo_text() ?></div>
 <div class="sm-step"><?= bm_t('MQTT.ABO_SCHRITTE') ?>
 <p><span class="sm-mono"><?= bm_e($bm_cfg['mqtt_topic']) ?>/#</span></p>
 </div>
@@ -1052,7 +1069,7 @@ foreach ($bm_hinweise as $bm_h) {
 <div class="sm-step"><b><?= bm_e(bm_t('LOX.S2_TITEL')) ?></b><br>
 <?= bm_t('LOX.S2_TEXT') ?>
 <p><span class="sm-mono"><?= bm_e($bm_cfg['mqtt_topic']) ?>/#</span></p>
-<div class="sm-warnung"><?= bm_t('LOX.S2_WARNUNG') ?></div>
+<div class="sm-warnung"><?= bm_abo_text() ?></div>
 </div>
 
 <div class="sm-step"><b><?= bm_e(bm_t('LOX.S3_TITEL')) ?></b><br>
