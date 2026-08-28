@@ -55,6 +55,24 @@ if (isset($_POST['activetab']) && preg_match($bm_muster, (string) $_POST['active
 
 $bm_meldungen = array();
 $bm_fehler = array();      // gesammelt, nicht ueberschrieben
+
+/* ---------------------------------------------------------------- *
+ * Der Wachposten - EIN Posten, vor allen Handlern.
+ * Abgewiesen heisst gemeldet, und es wird NICHTS ausgefuehrt: $_POST
+ * wird geleert, nur der aktive Reiter bleibt stehen, damit der Bediener
+ * nach der Abweisung dort steht, wo er war.
+ * ---------------------------------------------------------------- */
+$bm_wache = bm_wachposten();
+if ($bm_wache !== '') {
+    $bm_reiter_merk = isset($_POST['activetab']) && is_string($_POST['activetab'])
+        ? (string) $_POST['activetab'] : null;
+    $_POST = array();
+    if ($bm_reiter_merk !== null) {
+        $_POST['activetab'] = $bm_reiter_merk;
+    }
+    $bm_fehler[] = $bm_wache;
+}
+
 $bm_testausgabe = '';
 $bm_post = (isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') === 'POST';
 
@@ -725,20 +743,24 @@ $bm_vtag = (isset($_GET['vtag']) && preg_match('/^[0-9]{8}$/', (string) $_GET['v
 </div>
 <div class="sm-knopfreihe">
   <form action="index.php" method="post">
+    <?php echo bm_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-settings">
     <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="dienst" value="start"><?= bm_e(bm_t('EINST.K_START')) ?></button>
   </form>
   <form action="index.php" method="post">
+    <?php echo bm_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-settings">
     <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="dienst" value="restart"><?= bm_e(bm_t('EINST.K_NEUSTART')) ?></button>
   </form>
   <form action="index.php" method="post">
+    <?php echo bm_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-settings">
     <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="dienst" value="stop"><?= bm_e(bm_t('EINST.K_STOPP')) ?></button>
   </form>
 </div>
 
 <form action="index.php" method="post" autocomplete="off">
+  <?php echo bm_fmt(); ?>
 <input data-role="none" type="hidden" name="speichern" value="1">
 <input data-role="none" type="hidden" name="activetab" value="tab-settings">
 
@@ -940,11 +962,13 @@ foreach ($bm_hinweise as $bm_h) {
 </div>
 <div class="sm-knopfreihe">
   <form action="index.php" method="post">
+    <?php echo bm_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-settings">
     <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="konfig_export" value="1"><?= bm_e(bm_t('EINST.K_KONFIG_EXPORT')) ?></button>
   </form>
 </div>
 <form action="index.php" method="post" enctype="multipart/form-data">
+  <?php echo bm_fmt(); ?>
 <input data-role="none" type="hidden" name="activetab" value="tab-settings">
 <div class="sm-feld">
   <label for="konfig_datei"><?= bm_e(bm_t('EINST.L_KONFIG_DATEI')) ?></label>
@@ -972,6 +996,7 @@ foreach ($bm_hinweise as $bm_h) {
     <span class="sm-hilfe"><?= bm_e($bm_pr['herkunft']) ?></span></td>
 <td class="sm-hilfe"><?= bm_e($bm_pr['quelle']) ?></td>
 <td><form action="index.php" method="post">
+  <?php echo bm_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-settings">
     <button data-role="none" class="sm-btn sm-b-technik" style="min-width:140px;" type="submit" name="profil_export" value="<?= bm_e($bm_pk) ?>"><?= bm_e(bm_t('EINST.K_PROFIL_EXPORT')) ?></button>
 </form></td>
@@ -986,6 +1011,7 @@ foreach ($bm_hinweise as $bm_h) {
 <h3><?= bm_e(bm_t('EINST.H_PROFIL_IMPORT')) ?></h3>
 <div class="sm-hinweis"><?= bm_t('EINST.PROFIL_IMPORT_ERKLAERUNG') ?></div>
 <form action="index.php" method="post" enctype="multipart/form-data">
+  <?php echo bm_fmt(); ?>
 <input data-role="none" type="hidden" name="activetab" value="tab-settings">
 <div class="sm-feld">
   <label for="profil_datei"><?= bm_e(bm_t('EINST.L_PROFIL_DATEI')) ?></label>
@@ -1004,6 +1030,7 @@ foreach ($bm_hinweise as $bm_h) {
 
 <h2>MQTT</h2>
 <form action="index.php" method="post">
+  <?php echo bm_fmt(); ?>
 <input data-role="none" type="hidden" name="save_mqtt" value="1">
 <input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
 <div class="sm-feld">
@@ -1128,6 +1155,7 @@ if (!bm_felder_gemessen(1)) { ?>
 <?php } ?>
 <div class="sm-warnung"><?= bm_t('LOX.IMPORT_WARNUNG') ?></div>
 <form action="index.php" method="post">
+  <?php echo bm_fmt(); ?>
 <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
 <div class="sm-feld">
   <label for="vorlage_geraet"><?= bm_e(bm_t('LOX.L_VORLAGE_GERAET')) ?></label>
@@ -1170,6 +1198,7 @@ if (!bm_felder_gemessen(1)) { ?>
 <?= bm_t('LOX.S5_TEXT2') ?>
 <div class="sm-knopfreihe">
   <form action="index.php" method="post">
+    <?php echo bm_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
     <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="token_neu" value="1"><?= bm_e(bm_t('LOX.K_TOKEN_NEU')) ?></button>
   </form>
@@ -1352,6 +1381,7 @@ function bm_bausteine()
 <p class="sm-hilfe"><?= bm_t('TEST.TECHNIK_ERKLAERUNG') ?></p>
 <div class="sm-knopfreihe">
   <form action="index.php" method="post">
+    <?php echo bm_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-test">
     <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="selbsttest" value="1"><?= bm_e(bm_t('TEST.K_SELBSTTEST')) ?></button>
   </form>
@@ -1361,6 +1391,7 @@ function bm_bausteine()
 <h3><?= bm_e(bm_t('TEST.H_REGISTER')) ?></h3>
 <div class="sm-hinweis"><?= bm_t('TEST.REGISTER_ERKLAERUNG') ?></div>
 <form action="index.php" method="post">
+  <?php echo bm_fmt(); ?>
 <input data-role="none" type="hidden" name="activetab" value="tab-test">
 <div class="sm-feld">
   <label for="roh_geraet"><?= bm_e(bm_t('TEST.L_GERAET')) ?></label>
@@ -1394,6 +1425,7 @@ function bm_bausteine()
 <h3><?= bm_e(bm_t('TEST.H_TROCKEN')) ?></h3>
 <div class="sm-hinweis"><?= bm_t('TEST.TROCKEN_ERKLAERUNG') ?></div>
 <form action="index.php" method="post">
+  <?php echo bm_fmt(); ?>
 <input data-role="none" type="hidden" name="activetab" value="tab-test">
 <div class="sm-feld">
   <label for="tl_geraet"><?= bm_e(bm_t('TEST.L_GERAET')) ?></label>
@@ -1418,10 +1450,12 @@ function bm_bausteine()
 <?php } ?>
 <div class="sm-knopfreihe">
   <form action="index.php" method="post">
+    <?php echo bm_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-test">
     <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="mitschnitt" value="ein"><?= bm_e(bm_t('TEST.K_MITSCHNITT_EIN')) ?></button>
   </form>
   <form action="index.php" method="post">
+    <?php echo bm_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-test">
     <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="mitschnitt" value="aus"><?= bm_e(bm_t('TEST.K_MITSCHNITT_AUS')) ?></button>
   </form>
@@ -1442,6 +1476,7 @@ if (is_file($bm_mdatei)) {
 <div class="sm-hinweis"><?= bm_t('TEST.SCHALTEN_GESPERRT') ?></div>
 <?php } ?>
 <form action="index.php" method="post">
+  <?php echo bm_fmt(); ?>
 <input data-role="none" type="hidden" name="activetab" value="tab-test">
 <div class="sm-feld">
   <label for="test_geraet"><?= bm_e(bm_t('TEST.L_GERAET')) ?></label>
@@ -1482,6 +1517,7 @@ if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {
 </div>
 <div class="sm-knopfreihe">
   <form action="index.php" method="post">
+    <?php echo bm_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-log">
     <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="log_leeren" value="1"><?= bm_e(bm_t('LOG.K_LEEREN')) ?></button>
   </form>
