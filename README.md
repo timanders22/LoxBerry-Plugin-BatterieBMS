@@ -239,6 +239,36 @@ Dazu drei Verbesserungen, die keine Fehlerbehebung sind:
 Der Reiter **Test** prüft alle sechs Korrekturen ohne angeschlossenen Speicher
 nach.
 
+## Fassung 0.9.14 — der Stat-Zwischenspeicher
+Die Protokollkappung (262 144 Byte bzw. 512 000 Byte) stand in
+`webfrontend/html/bm_lib.php:895`, `webfrontend/html/bm_lib.php:902`,
+`webfrontend/html/bm_lib.php:2366`. PHP merkt sich aber die Antworten von
+`stat()`: innerhalb **eines** Prozesses sieht `filesize()` die erste Größe
+und danach nie wieder eine neue — `file_put_contents(…, FILE_APPEND)` macht
+den Eintrag nicht ungültig. Die Kappung fällt dann still aus.
+
+Gemessen am 29.08.2026, 20 000 Zeilen im selben Prozess:
+
+| | ohne `clearstatcache` | mit |
+|---|---|---|
+| PHP 7.4.33 | 1 220 000 Byte, **nicht gekappt** | 220 332 Byte, gekappt |
+| PHP 8.4.24 | 220 332 Byte, gekappt | 220 332 Byte, gekappt |
+
+Die beiden PHP-Fassungen verhalten sich also verschieden — und LoxBerry 3.x
+fährt 7.4. Wer nur unter 8.4 misst, sieht den Fehler nie. **Hier war der
+Fehler wirksam, nicht nur latent**: `bin/bms_dienst.php` ruft `bm_log()` in
+seiner Warteschleife. Das Protokoll wuchs auf der Ramdisk unbegrenzt weiter,
+und niemand sah es.
+
+Ein `clearstatcache` stand hier schon **unter der Sperre** — erreicht wurde
+es nur nie, weil bereits das äußere Tor am veralteten Wert hängenblieb.
+Gemessen mit genau diesem Bau: 1 220 000 Byte, ungekappt.
+
+Abhilfe: `clearstatcache(true, …)` **vor** dem Tor; der zweite Parameter
+beschränkt das Leeren auf diese eine Datei. Dasselbe Muster tragen Robonect,
+Saugroboter, SignalBot, Octopus, Sprachsteuerung und WärmepumpeCloud schon
+länger — es ist am 29.08.2026 im ganzen Bestand nachgezogen worden.
+
 ## Lizenz
 
 MIT.

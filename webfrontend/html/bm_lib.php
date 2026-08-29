@@ -887,6 +887,11 @@ function bm_log($text)
     }
     $zeile = '[' . date('Y-m-d H:i:s') . '] ' . $text . "\n";
 
+    // Ohne diese Zeile oeffnet das Tor unten in einem langlebigen
+    // Prozess nie: filesize() sieht die erste Groesse und danach keine
+    // neue. Das clearstatcache UNTER der Sperre hilft dann nicht mehr,
+    // weil es nie erreicht wird. Gemessen 29.08.2026 unter PHP 7.4.33.
+    clearstatcache(true, $p['log']);
     if (is_file($p['log']) && filesize($p['log']) > 512000) {
         $fp = @fopen($p['log'], 'c+');
         if ($fp !== false) {
@@ -2353,6 +2358,11 @@ function bm_mitschnitt($richtung, $roh, array $g = array())
     }
     $d = bm_mitschnitt_datei();
     // Harte Obergrenze: ein Mitschnitt darf die Ramdisk nicht vollschreiben.
+    // Ohne diese Zeile oeffnet das Tor unten in einem langlebigen
+    // Prozess nie: filesize() sieht die erste Groesse und danach keine
+    // neue. Das clearstatcache UNTER der Sperre hilft dann nicht mehr,
+    // weil es nie erreicht wird. Gemessen 29.08.2026 unter PHP 7.4.33.
+    clearstatcache(true, $d);
     if (is_file($d) && filesize($d) > 262144) {
         return;
     }
