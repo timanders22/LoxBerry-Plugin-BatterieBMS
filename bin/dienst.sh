@@ -244,6 +244,17 @@ case "$1" in
         # Nur neu starten, wenn der Dienst laufen SOLL. Ein bewusst
         # angehaltener Dienst bleibt angehalten.
         if [ -f "$SOLL" ] && ! laeuft; then
+            # B31: dieser Zweig hatte bis 0.9.15 KEINE Bremse, der zweite
+            # dagegen schon. Scheitert 'starten' nach dem touch auf $SOLL,
+            # bleibt der Merker stehen und der Versuch wiederholt sich im
+            # Minutentakt - jede Minute ein PHP-Anlauf, der kurz eine
+            # Modbus-Verbindung oeffnet, an einem Geraet, das nur eine
+            # zulaesst. Der Kommentar weiter oben verbietet genau das.
+            if [ -f "$NEUSTARTMERKER" ] \
+               && [ $(( $(date +%s) - $(stat -c %Y "$NEUSTARTMERKER" 2>/dev/null || echo 0) )) -lt 600 ]; then
+                exit 0
+            fi
+            touch "$NEUSTARTMERKER"
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Waechter: Dienst lief nicht, wird neu gestartet." >> "$LOGDATEI"
             starten >> "$LOGDATEI" 2>&1
         elif [ -f "$SOLL" ] && laeuft && abbild_steht; then

@@ -586,13 +586,66 @@ function bm_steuern(array $g, array $pr, $aktion, $watt)
         $wert = (int) $wert;
         $typ = isset($schritt['typ']) ? $schritt['typ'] : 'u16';
         if ($typ === 'u32' || $typ === 's32') {
-            $erg = bm_register_schreiben_mehrere($s, $g, (int) $schritt['reg'],
-                array(($wert >> 16) & 0xFFFF, $wert & 0xFFFF));
+            /* B43: die Wortreihenfolge stand bis 0.9.15 nur beim LESEN zur
+             * Wahl ('wort' => 'nieder' in bm_wert_aus). Geschrieben wurde
+             * immer hohes Wort zuerst - ein Geraet, das es andersherum
+             * fuehrt, bekam den Sollwert mit vertauschten Worten, und ein
+             * eigenes Profil konnte das nicht richtigstellen. */
+            $worte = (isset($schritt['wort']) && $schritt['wort'] === 'nieder')
+                ? array($wert & 0xFFFF, ($wert >> 16) & 0xFFFF)
+                : array(($wert >> 16) & 0xFFFF, $wert & 0xFFFF);
+            $erg = bm_register_schreiben_mehrere($s, $g, (int) $schritt['reg'], $worte);
         } else {
             $erg = bm_register_schreiben($s, $g, (int) $schritt['reg'], $wert);
         }
         if (is_array($erg)) {
             bm_verbindung_verwerfen($g);
+            /* B10: Abbruch NACH dem ersten Schritt laesst das Geraet halb
+             * geschaltet zurueck - bei Huawei steht dann der Zwangsbetrieb
+             * (47086 = 2) mit dem zuletzt gespeicherten Leistungswert. Bis
+             * 0.9.15 entstand dabei KEINE Sollwertdatei (die schreibt der
+             * Aufrufer nur bei Erfolg), also griff weder die Totmannschaltung
+             * noch die Ruecknahme beim Anhalten: das Plugin meldete 'kein
+             * Zwang', waehrend das Geraet im Zwang stand.
+             *
+             * Erst wird die Automatik-Folge versucht. Gelingt auch die nicht,
+             * wird die Sollwertdatei TROTZDEM angelegt - als Merker, dass am
+             * Geraet etwas offen ist. */
+            if ($nr > 1) {
+                $zurueck = array(0, '');
+                if (isset($st['automatik']['schritte'])) {
+                    $s2 = bm_verbindung_holen($g, (int) $cfg['zeitueberschreitung'], false);
+                    if (!is_array($s2)) {
+                        foreach ($st['automatik']['schritte'] as $sch) {
+                            $w2 = (int) $sch['wert'];
+                            $t2 = isset($sch['typ']) ? $sch['typ'] : 'u16';
+                            $e2 = ($t2 === 'u32' || $t2 === 's32')
+                                ? bm_register_schreiben_mehrere($s2, $g, (int) $sch['reg'],
+                                    array(($w2 >> 16) & 0xFFFF, $w2 & 0xFFFF))
+                                : bm_register_schreiben($s2, $g, (int) $sch['reg'], $w2);
+                            if (is_array($e2)) {
+                                $zurueck = array(0, $e2['_fehler']);
+                                break;
+                            }
+                            $zurueck = array(1, '');
+                        }
+                    }
+                    bm_verbindung_verwerfen($g);
+                }
+                if (empty($zurueck[0])) {
+                    bm_soll_schreiben((int) $g['nr'], 'unvollstaendig', (int) $watt, 'Abbruch');
+                    bm_log($g['name'] . ': Schrittfolge nach Schritt ' . ($nr - 1)
+                        . ' abgebrochen, und die Ruecknahme in die Automatik ist '
+                        . 'ebenfalls gescheitert. Das Geraet steht moeglicherweise im '
+                        . 'Zwangsbetrieb. Der Sollwert wird als "unvollstaendig" '
+                        . 'gemerkt, damit Totmannschaltung und Dienstende es erneut '
+                        . 'versuchen. BITTE AM GERAET PRUEFEN.');
+                } else {
+                    bm_log($g['name'] . ': Schrittfolge nach Schritt ' . ($nr - 1)
+                        . ' abgebrochen; das Geraet wurde in die Automatik '
+                        . 'zurueckgestellt.');
+                }
+            }
             return array(0, sprintf(bm_t('DIENST.STEUERUNG_SCHRITT'), $nr,
                 (int) $schritt['reg'], $erg['_fehler']));
         }
@@ -628,6 +681,41 @@ function bm_soll_schreiben($nr, $aktion, $watt, $quelle = '')
 function bm_soll_loeschen($nr)
 {
     @unlink(bm_soll_datei($nr));
+    bm_nachhol_loeschen($nr);
+}
+
+/* ------------------------------------------------------------------
+ * Nachholmappe (neu in 0.9.16, B09)
+ *
+ * Ein Befehl, den die Schreibbremse abgefangen hat, ist nicht ausgefuehrt.
+ * Er wird hier vorgemerkt und im naechsten Durchlauf abgesetzt, sobald die
+ * Bremse abgelaufen ist. Ohne das lief das Geraet mit dem alten Wert weiter,
+ * waehrend ueberall der neue stand.
+ * ------------------------------------------------------------------ */
+function bm_nachhol_datei($nr)
+{
+    return bm_paths()['datadir'] . '/nachhol_geraet' . (int) $nr . '.json';
+}
+
+function bm_nachhol_schreiben($nr, $aktion, $watt, $quelle = '')
+{
+    return bm_json_schreiben(bm_nachhol_datei($nr), array(
+        'aktion' => $aktion,
+        'watt'   => (int) $watt,
+        'ts'     => time(),
+        'quelle' => bm_text_sauber((string) $quelle, 40),
+    ));
+}
+
+function bm_nachhol_lesen($nr)
+{
+    $d = bm_json_lesen(bm_nachhol_datei($nr));
+    return (is_array($d) && isset($d['aktion'])) ? $d : null;
+}
+
+function bm_nachhol_loeschen($nr)
+{
+    @unlink(bm_nachhol_datei($nr));
 }
 
 /* ==================================================================
@@ -876,12 +964,36 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
             $tot = max(0, (int) $cfg['totmann']);
             if ($tot > 0 && $alterSoll > $tot) {
                 list($ok, $meldung) = bm_steuern($g, $pr, 'automatik', 0);
-                bm_soll_loeschen($nr);
-                bm_log($g['name'] . ': Totmannschaltung nach ' . $alterSoll . ' s ohne '
-                    . 'Lebenszeichen - zurueck in die Automatik. ' . $meldung);
-                $eintrag['sollwert'] = '';
-                $eintrag['sollwert_alter'] = -1;
-                $eintrag['sollwert_quelle'] = '';
+                /* NUR bei Erfolg loeschen (B07, 04.09.2026).
+                 *
+                 * Bis 0.9.15 wurde $ok gebunden und nie gelesen: die
+                 * Sollwertdatei fiel auch dann, wenn die Ruecknahme
+                 * gescheitert war. Damit blieb das Geraet im Zwang - und die
+                 * Totmannschaltung konnte es NIE WIEDER versuchen, weil sie
+                 * nur bei vorhandener Datei greift. Die Protokollzeile
+                 * behauptete die Ruecknahme und haengte den Fehlertext als
+                 * Beiwerk an. */
+                if ($ok) {
+                    bm_soll_loeschen($nr);
+                    bm_log($g['name'] . ': Totmannschaltung nach ' . $alterSoll
+                        . ' s ohne Lebenszeichen - zurueck in die Automatik. ' . $meldung);
+                    $eintrag['sollwert'] = '';
+                    $eintrag['sollwert_alter'] = -1;
+                    $eintrag['sollwert_quelle'] = '';
+                } else {
+                    /* Zeitstempel auffrischen, damit es nicht bei jedem
+                     * Durchlauf erneut versucht wird, aber die Datei bleibt:
+                     * der naechste Anlauf soll stattfinden. */
+                    bm_soll_schreiben($nr, (string) $soll['aktion'],
+                        (int) $soll['watt'],
+                        isset($soll['quelle']) ? (string) $soll['quelle'] : '');
+                    bm_log_gebremst('totmann' . $nr, $g['name']
+                        . ': Totmannschaltung nach ' . $alterSoll . ' s - die '
+                        . 'Ruecknahme in die Automatik ist FEHLGESCHLAGEN, der '
+                        . 'Zwang steht moeglicherweise noch am Geraet. ' . $meldung
+                        . ' Es wird im naechsten Durchlauf erneut versucht.', 900);
+                    $eintrag['sollwert_ruecknahme'] = 'gescheitert';
+                }
             }
         } else {
             $eintrag['sollwert'] = '';
@@ -1012,6 +1124,45 @@ function bm_warteschlange(&$letzteSchreibzeit)
         @mkdir($antworten, 0775, true);
     }
     $sofortAbruf = false;
+
+    /* Vorgemerkte Befehle nachholen (B09).
+     *
+     * Ein Befehl, den die Schreibbremse abgefangen hat, ist NICHT ausgefuehrt.
+     * Bis 0.9.15 wurde er nur im Sollwert vermerkt und nie abgesetzt: Loxone
+     * bekam OK=1, Abbild und MQTT zeigten den neuen Wert, und das Geraet lief
+     * mit dem alten weiter. Hier wird er nachgeholt, sobald die Bremse
+     * abgelaufen ist. Ein Nachholauftrag verfaellt mit der Totmannzeit - ein
+     * Stellbefehl, den niemand mehr auffrischt, soll nicht Stunden spaeter
+     * losgehen (Hausregel zur Befehls-Warteschlange).
+     */
+    $bremse = max(0, (int) $cfg['schreibbremse']);
+    $verfall = max(60, (int) $cfg['totmann']);
+    foreach (array_keys(bm_geraete()) as $nrNach) {
+        $vor = bm_nachhol_lesen($nrNach);
+        if ($vor === null) {
+            continue;
+        }
+        if (time() - (int) $vor['ts'] > $verfall) {
+            bm_nachhol_loeschen($nrNach);
+            bm_log('Speicher ' . $nrNach . ': der vorgemerkte Befehl '
+                . $vor['aktion'] . ' ist nach ' . $verfall . ' s verfallen und '
+                . 'wird NICHT mehr abgesetzt.');
+            continue;
+        }
+        $zul = isset($letzteSchreibzeit[$nrNach]) ? $letzteSchreibzeit[$nrNach] : 0;
+        if ($bremse > 0 && (time() - $zul) < $bremse) {
+            continue;   // Bremse laeuft noch, beim naechsten Durchlauf erneut
+        }
+        bm_nachhol_loeschen($nrNach);
+        list($okN, $meldN) = bm_befehl_ausfuehren(
+            array('aktion' => $vor['aktion'], 'geraet' => $nrNach,
+                  'watt' => (int) $vor['watt'],
+                  'quelle' => isset($vor['quelle']) ? $vor['quelle'] : ''),
+            $letzteSchreibzeit, $sofortAbruf);
+        bm_log('Speicher ' . $nrNach . ': vorgemerkter Befehl ' . $vor['aktion']
+            . ' nachgeholt - ' . ($okN ? 'erledigt' : 'abgelehnt') . ' - ' . $meldN);
+    }
+
     foreach ((array) glob($ordner . '/*.json') as $datei) {
         $kennung = basename($datei, '.json');
         $befehl = bm_json_lesen($datei);
@@ -1158,10 +1309,23 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
     $zuletzt = isset($letzteSchreibzeit[$nr]) ? $letzteSchreibzeit[$nr] : 0;
     if ($bremse > 0 && (time() - $zuletzt) < $bremse) {
         $rest = $bremse - (time() - $zuletzt);
-        // Der Sollwert wird trotzdem aufgefrischt - sonst laeuft die
-        // Totmannschaltung ab, nur weil die Bremse gegriffen hat.
-        bm_soll_schreiben($nr, $aktion, $watt, $bm_quelle);
-        return array(1, sprintf(bm_t('DIENST.BREMSE'), $rest));
+        /* B09: bis 0.9.15 wurde hier der NEUE Wattwert in die Sollwertdatei
+         * geschrieben und 1 - also 'erledigt' - zurueckgegeben, ohne dass
+         * bm_steuern() gelaufen waere. Loxone bekam OK=1, Abbild und MQTT
+         * zeigten den neuen Wert, und das Geraet lief mit dem alten weiter -
+         * dauerhaft, weil nichts den Befehl nachholte.
+         *
+         * Jetzt: der bestehende Sollwert wird nur im Zeitstempel
+         * aufgefrischt (damit die Totmannschaltung nicht ablaeuft, bloss weil
+         * die Bremse griff), der NEUE Wert kommt in die Nachholmappe, und die
+         * Rueckgabe ist 2 - 'eingereiht', nicht 'erledigt'. */
+        $alt = bm_soll_lesen($nr);
+        if ($alt && isset($alt['aktion'])) {
+            bm_soll_schreiben($nr, (string) $alt['aktion'], (int) $alt['watt'],
+                isset($alt['quelle']) ? (string) $alt['quelle'] : '');
+        }
+        bm_nachhol_schreiben($nr, $aktion, $watt, $bm_quelle);
+        return array(2, sprintf(bm_t('DIENST.BREMSE'), $rest));
     }
 
     list($ok, $meldung) = bm_steuern($g, $pr, $aktion, $watt);
@@ -1225,11 +1389,29 @@ function bm_dienst_schleife($einmal = false)
         $soll = bm_soll_lesen($nr);
         if ($soll && isset($soll['aktion'])) {
             $pr = bm_profil($g['profil']);
+            $ok = false;
             if ($pr !== null) {
                 list($ok, $meldung) = bm_steuern($g, $pr, 'automatik', 0);
-                bm_log($g['name'] . ': beim Anhalten in die Automatik zurueckgestellt. ' . $meldung);
+                if ($ok) {
+                    bm_log($g['name']
+                        . ': beim Anhalten in die Automatik zurueckgestellt. ' . $meldung);
+                } else {
+                    /* B08: bis 0.9.15 wurde hier IMMER geloescht und immer
+                     * Erfolg gemeldet. Dieser Weg laeuft bei JEDEM Upgrade
+                     * (preupgrade.sh ruft dienst.sh stop). Scheitert die
+                     * Ruecknahme, bleibt der Speicher im Zwang - und mit der
+                     * Datei ist die einzige Spur weg. Der Kommentar darueber
+                     * nennt das selbst das gefaehrlichste Ergebnis dieses
+                     * Plugins. */
+                    bm_log($g['name'] . ': beim Anhalten liess sich der Zwang NICHT '
+                        . 'zuruecknehmen. ' . $meldung . ' Der Sollwert bleibt '
+                        . 'gespeichert, damit der naechste Dienststart es erneut '
+                        . 'versucht. BITTE AM GERAET PRUEFEN.');
+                }
             }
-            bm_soll_loeschen($nr);
+            if ($ok) {
+                bm_soll_loeschen($nr);
+            }
         }
     }
     bm_verbindungen_schliessen();
@@ -1484,6 +1666,21 @@ function bm_selbsttest()
     // deshalb wird hier nur der Rahmen geprueft, den es dafuer braucht.
     $zeilen[] = '[INFO] Die Laengenpruefungen greifen an sechs Stellen je Modul: Zellzahl, '
               . 'Zellspannungen, Fuehlerzahl, Temperaturen, Kapazitaeten, erweiterte Kapazitaet';
+
+    // 1b. Kein Profil darf zwei Messgroessen aus demselben Register lesen.
+    $doppelt = array();
+    foreach (bm_profile() as $pk => $pr) {
+        foreach (bm_profil_doppelregister($pr) as $d) {
+            $doppelt[] = $pk . ': ' . $d;
+        }
+    }
+    $dopOk = (count($doppelt) === 0);
+    $zeilen[] = ($dopOk ? '[OK]   ' : '[FEHL] ') . 'Kein Profil liest zwei Messgroessen aus '
+              . 'demselben Register (' . count(bm_profile()) . ' Profile geprueft'
+              . ($dopOk ? '' : '): ' . implode('; ', $doppelt)) . ($dopOk ? ')' : '');
+    if (!$dopOk) {
+        $fehler++;
+    }
 
     // 2. Zeilenumbrueche duerfen nicht ins UDP-Gateway.
     $roh = "Fehler in Zeile 1\nund Zeile 2\r\nund\tnoch was";

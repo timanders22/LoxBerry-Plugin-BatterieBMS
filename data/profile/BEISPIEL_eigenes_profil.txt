@@ -52,8 +52,14 @@ Aufbau
 Die Namen der Messgroessen sind fest vorgegeben. Ein Profil darf keine eigenen
 erfinden - nur diese werden uebernommen:
 
-  SOC SOH UBAT IBAT PBAT TMAX TMIN UZMAX UZMIN UZDIFF ZYKLEN KAPAZ
-  MODULE ZELLEN FEHLER WARNUNG LADENMAX ENTLMAX MODUS
+  SOC SOH UBAT IBAT PBAT TMAX TMIN TBAT UZMAX UZMIN UZDIFF ZYKLEN
+  KAPAZ MODULE ZELLEN FEHLER WARNUNG LADENMAX ENTLMAX MODUS
+
+Diese zwanzig lassen sich aus Registern fuellen. Daneben gibt es sechs
+GERECHNETE Groessen, die das Plugin selbst bildet - sie gehoeren NICHT in ein
+Profil, auch wenn die Pruefung sie bisher durchgelassen hat:
+
+  ALTER OK UZMINMOD UZMINZELLE RESTKWH RESTZEIT ALARM
 
 Genau darin liegt der Sinn: die Loxone-Seite sieht bei jedem Hersteller gleich
 aus. Wer den Speicher tauscht, tauscht das Profil - nicht die Bausteine.

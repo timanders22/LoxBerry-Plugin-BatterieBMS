@@ -30,6 +30,29 @@ function bm_pruefungen()
         count($geraete) > 0 ? sprintf(bm_t('TEST.A_GERAETE'), count($geraete))
                             : bm_t('TEST.A_KEINE_GERAETE'));
 
+    /* Ist die Konfiguration heil? (B02, Pflichtzeile des Hausstandards)
+     *
+     * Gefragt wird nach dem ZUERST festgestellten Zustand, nicht nach dem
+     * jetzigen: die Selbstheilung beseitigt den Schaden im selben
+     * Seitenaufruf, und eine Zeile, die danach fragt, saehe eine heile
+     * Datei. Der Bediener erfuehre nie, dass etwas war - nur das Protokoll
+     * wuesste es. Ein geheilter Schaden ist kein Nicht-Schaden: die
+     * Zweitschrift kann aelter sein als das, was verlorenging, und die
+     * Ursache (volle Platte, Stromausfall beim Schreiben) besteht fort. */
+    $lage = bm_konfig_lage();
+    $lagen = array(
+        'ok'                       => array(1, 'TEST.A_KONFIG_OK'),
+        'fehlt'                    => array(-1, 'TEST.A_KONFIG_FEHLT'),
+        'leer'                     => array(-1, 'TEST.A_KONFIG_LEER'),
+        'aus der Zweitschrift'     => array(0, 'TEST.A_KONFIG_ZWEITSCHRIFT'),
+        'kaputt'                   => array(0, 'TEST.A_KONFIG_KAPUTT'),
+        'kaputt ohne Zweitschrift' => array(0, 'TEST.A_KONFIG_KAPUTT_LEER'),
+    );
+    $l = isset($lagen[$lage]) ? $lagen[$lage] : array(0, 'TEST.A_KONFIG_KAPUTT');
+    $zeilen[] = bm_pruefzeile($l[0], bm_t('TEST.F_KONFIG'),
+        bm_t($l[1]) . (is_file($p['config'] . '.kaputt')
+            ? ' <span class="sm-mono">' . bm_e(basename($p['config'])) . '.kaputt</span>' : ''));
+
     // Rechte der Konfiguration: dort steht das Aktionstoken.
     $rechte = is_file($p['config']) ? (fileperms($p['config']) & 0777) : -1;
     if ($rechte < 0) {

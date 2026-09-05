@@ -66,17 +66,22 @@ fi
 # ---------- Serielle Schnittstelle (nur fuer Pylontech) ----------
 # Pylontech spricht kein Modbus, sondern ein eigenes Konsolenprotokoll ueber
 # RS485. Dafuer muss der Benutzer loxberry in der Gruppe dialout sein.
+# Die Gruppe dialout wird NICHT mehr bei jeder Installation gesetzt.
+#
+# Bis 0.9.15 lief hier bedingungslos ein usermod. Damit bekam der Benutzer,
+# unter dem auch die Oberflaeche laeuft, dauerhaft Zugriff auf ALLE seriellen
+# Geraete des Rechners - den Zigbee-Stick, den EnOcean-Stick, was sonst noch
+# angeschlossen ist -, obwohl das nur fuer Pylontech ueber RS485 gebraucht
+# wird und die meisten Speicher ueber Modbus TCP laufen. Eine Rechteerweiterung
+# gehoert nicht ungefragt in eine Installation.
 if id -nG loxberry 2>/dev/null | tr ' ' '\n' | grep -qx dialout; then
     echo "<OK> Benutzer loxberry ist in der Gruppe dialout (serielle Schnittstelle)."
 else
-    if usermod -a -G dialout loxberry 2>/dev/null; then
-        echo "<OK> Benutzer loxberry der Gruppe dialout hinzugefuegt."
-        echo "<INFO> Die Gruppe wirkt erst nach einem Neustart des LoxBerry."
-    else
-        echo "<INFO> Benutzer loxberry liess sich nicht in die Gruppe dialout aufnehmen."
-        echo "<INFO> Das ist NUR fuer Pylontech ueber RS485 ein Problem. Nachholen mit:"
-        echo "<INFO>   sudo usermod -a -G dialout loxberry && sudo reboot"
-    fi
+    echo "<INFO> Benutzer loxberry ist NICHT in der Gruppe dialout."
+    echo "<INFO> Das wird nur fuer Pylontech ueber RS485 gebraucht. Wer ein"
+    echo "<INFO> serielles Profil einrichtet, holt es einmal nach mit:"
+    echo "<INFO>   sudo usermod -a -G dialout loxberry && sudo reboot"
+    echo "<INFO> Der Reiter Test sagt, ob es noetig ist."
 fi
 if command -v stty >/dev/null 2>&1; then
     echo "<OK> stty vorhanden (setzt die Parameter der seriellen Schnittstelle)."
@@ -84,9 +89,43 @@ else
     echo "<INFO> stty fehlt - Pylontech ueber RS485 wird nicht funktionieren."
 fi
 
+# ---------- Eigene Profile und Verlauf zurueckspielen ----------
+DBK="$BASE/config/plugins/$PFOLDER.backup.daten.tar"
+if [ -f "$DBK" ]; then
+    if ( cd "$PDATA" && tar xf "$DBK" ) 2>/dev/null; then
+        ZAHL=$(tar tf "$DBK" 2>/dev/null | grep -c '[^/]$')
+        echo "<OK> Eigene Profile und Verlauf zurueckgespielt ($ZAHL Datei(en))."
+        rm -f "$DBK"
+    else
+        echo "<FAIL> Die gesicherten Profile und der Verlauf liessen sich NICHT"
+        echo "<FAIL> zurueckspielen. Das Archiv bleibt liegen: $DBK"
+    fi
+fi
+
 chmod 755 "$PBIN/dienst.sh" 2>/dev/null
 chmod 755 "$PBIN/bms_dienst.php" 2>/dev/null
 chown -R loxberry:loxberry "$PBIN" "$PDATA" "$PLOG" "$PCONFIG" 2>/dev/null
+
+# ---------- Lief der Dienst vor dem Update? Dann wieder starten (B29) ----------
+LIEF="$BASE/config/plugins/$PFOLDER.laeuft"
+if [ -f "$LIEF" ]; then
+    rm -f "$LIEF"
+    if [ -x "$PBIN/dienst.sh" ]; then
+        AUSGABE=$("$PBIN/dienst.sh" start 2>&1)
+        RC=$?
+        if [ $RC -eq 0 ]; then
+            echo "<OK> Der Dienst lief vor dem Update und wurde wieder gestartet."
+            echo "<INFO> $AUSGABE"
+        else
+            echo "<FAIL> Der Dienst lief vor dem Update, liess sich aber nicht"
+            echo "<FAIL> wieder starten (Rueckgabewert $RC): $AUSGABE"
+            echo "<FAIL> Bitte im Reiter Einstellungen von Hand starten."
+        fi
+    else
+        echo "<FAIL> Der Dienst lief vor dem Update, aber $PBIN/dienst.sh ist"
+        echo "<FAIL> nicht ausfuehrbar. Bitte von Hand starten."
+    fi
+fi
 
 echo "<OK> Installation abgeschlossen."
 echo "<INFO> Bitte die Plugin-Oberflaeche oeffnen, die Speicher eintragen und den"

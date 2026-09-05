@@ -198,12 +198,59 @@ if ($bm_post && isset($_POST['konfig_import'])) {
              * Fassung. Sie landeten in der Konfiguration, taten dort nichts
              * und waren an nichts zu erkennen. */
             $bm_fremd = array_diff(array_keys($bm_neu), array_keys(bm_vorgaben()));
+            $bm_zusammen = null;
             if ($bm_fremd) {
                 $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_KONFIG_FREMD'),
                     bm_e(implode(', ', array_slice($bm_fremd, 0, 8))));
-                $bm_zusammen = null;
             } else {
-                $bm_zusammen = array_merge(bm_vorgaben(), $bm_neu);
+                /* JEDER Wert wird beurteilt, nicht nur der Schluessel (B01).
+                 * Bis 0.9.15 wurde die Datei nach der Schluesselpruefung
+                 * unbesehen uebernommen - gemessen ging damit
+                 * intervall = "nicht; eine Zahl" und soc_max = 9999 durch, und
+                 * soc_max = 9999 legt die Ladeschranke des Dienstes still.
+                 * Dieselbe Beurteilung wie im Formular, aus derselben
+                 * Funktion. Alle Beanstandungen werden gesammelt. */
+                $bm_bean = array();
+                foreach ($bm_neu as $bm_k => $bm_v) {
+                    $bm_grund = bm_wert_pruefen((string) $bm_k, $bm_v);
+                    if ($bm_grund !== '') {
+                        $bm_bean[] = bm_e((string) $bm_k) . ': ' . bm_e($bm_grund);
+                    }
+                }
+                foreach (bm_geraetezeilen_pruefen(
+                             isset($bm_neu['geraete']) ? $bm_neu['geraete'] : array())
+                         as $bm_grund) {
+                    $bm_bean[] = bm_e($bm_grund);
+                }
+                if ($bm_bean) {
+                    /* Eine halb gueltige Datei aendert GAR NICHTS. */
+                    $bm_fehler[] = bm_t('EINST.FEHLER_KONFIG_WERTE');
+                    foreach ($bm_bean as $bm_b) {
+                        $bm_fehler[] = $bm_b;
+                    }
+                } else {
+                    $bm_zusammen = array_merge(bm_vorgaben(), $bm_neu);
+                    /* Ein FEHLENDES Aktionstoken in der Sicherung heisst 'kein
+                     * Token gesichert' - es darf das bestehende nicht loeschen
+                     * (B05). Gemessen: bis 0.9.15 wurde es stumm durch ein
+                     * frisches ersetzt, und jede Adresse im Miniserver war
+                     * danach ungueltig, ohne eine Zeile im Protokoll. */
+                    if (!array_key_exists('aktionstoken', $bm_neu)
+                        || trim((string) $bm_neu['aktionstoken']) === '') {
+                        /* Den BESTEHENDEN Stand hier eigens lesen: $bm_cfg wird
+                         * erst weiter unten zugewiesen (Ladeteil), und eine
+                         * nicht zugewiesene Variable wertet PHP lautlos als
+                         * leer aus - dann haette diese Wache gar nichts
+                         * getan. Beim ersten Anlauf ist mir genau das
+                         * passiert; gefunden hat es der Pruefstand. */
+                        $bm_bestand = bm_config();
+                        $bm_alt = trim((string) $bm_bestand['aktionstoken']);
+                        $bm_zusammen['aktionstoken'] = $bm_alt;
+                        if ($bm_alt !== '') {
+                            $bm_meldungen[] = bm_t('EINST.KONFIG_TOKEN_BEHALTEN');
+                        }
+                    }
+                }
             }
             if ($bm_zusammen === null) {
                 /* nichts tun - geaendert wird GAR NICHTS */
@@ -254,6 +301,25 @@ if ($bm_post && isset($_POST['profil_import'])) {
             if (isset($bm_pr['stand'])
                 && !in_array((string) $bm_pr['stand'], array('dokumentiert', 'unbestaetigt'), true)) {
                 $bm_bean[] = bm_t('EINST.FEHLER_PROFIL_STAND');
+            }
+            /* Auch den Registertyp beurteilen (B13). Ein Profil mit
+             * "typ": "S16" wurde bis 0.9.15 angenommen und lieferte danach
+             * stumm den Rohwert mal Faktor. */
+            $bm_typen = array('u16', 's16', 'u32', 's32', 'f32', 'u16hi', 'u16lo');
+            foreach (array('felder', 'rechnung') as $bm_ab2) {
+                foreach ((array) (isset($bm_pr[$bm_ab2]) ? $bm_pr[$bm_ab2] : array())
+                         as $bm_fn => $bm_fd) {
+                    if (is_array($bm_fd) && isset($bm_fd['typ'])
+                        && !in_array((string) $bm_fd['typ'], $bm_typen, true)) {
+                        $bm_bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL_TYP'),
+                            bm_e((string) $bm_fn), bm_e((string) $bm_fd['typ']),
+                            implode(', ', $bm_typen));
+                    }
+                }
+            }
+            /* Und kein Register zweimal (B14). */
+            foreach (bm_profil_doppelregister($bm_pr) as $bm_dr) {
+                $bm_bean[] = bm_e($bm_dr);
             }
             $bm_erlaubt = bm_status_felder();
             foreach (array('felder', 'rechnung') as $bm_ab) {
@@ -470,6 +536,13 @@ if ($bm_post && isset($_POST['speichern'])) {
         } else {
             $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_SPEICHERN'), $bm_p['config']);
         }
+    } else {
+        /* Blockieren ist hier richtig - eine Geraetezeile ist eine ADRESSE,
+         * und eine uebergangene Zeile laesst alle folgenden Speicher
+         * aufruecken (B06). Was bis 0.9.15 fehlte, ist der Satz: der Bediener
+         * sah die Beanstandung zur einen Zeile und nahm an, der Rest sei
+         * gespeichert (B35). */
+        $bm_fehler[] = bm_t('EINST.FEHLER_NICHTS_GESPEICHERT');
     }
     $bm_tab = 'tab-settings';
 
@@ -499,7 +572,12 @@ if ($bm_post && isset($_POST['save_mqtt'])) {
     }
     if (!$bm_fehler) {
         if (bm_config_speichern($bm_mcfg)) {
-        $bm_meldungen[] = bm_t('EINST.GESPEICHERT');
+            $bm_meldungen[] = bm_t('EINST.GESPEICHERT');
+        } else {
+            // Bis 0.9.15 fehlte dieser Zweig: ein fehlgeschlagenes Speichern
+            // blieb voellig stumm, und der Bediener glaubte, Haken und Thema
+            // seien gesetzt (B21).
+            $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_SPEICHERN'), $bm_p['config']);
         }
     }
     $bm_tab = 'tab-mqtt';
@@ -1106,6 +1184,17 @@ foreach ($bm_hinweise as $bm_h) {
 <tr><td><?= bm_e(bm_t('LOX.T_ADRESSE')) ?></td>
     <td><span class="sm-mono"><?= bm_e($bm_basis) ?>?token=<?= bm_e($bm_token) ?>&amp;aktion=status&amp;geraet=1</span></td></tr>
 <tr><td><?= bm_e(bm_t('LOX.T_ZYKLUS')) ?></td><td>60 <?= bm_e(bm_t('ALLG.SEKUNDEN')) ?></td></tr>
+<?php /* B19 (04.09.2026): diese drei Adressen beantwortet der Endpunkt
+       * seit jeher, sie standen aber in der ganzen Oberflaeche nirgends
+       * zum Abschreiben - gezaehlt ueber alle Dateien des Plugins: null
+       * Fundstellen. 'summe' ist ausgerechnet die Adresse, die bei
+       * mehreren Speichern gebraucht wird. */ ?>
+<tr><td><?= bm_e(bm_t('LOX.T_ADR_SUMME')) ?></td>
+    <td><span class="sm-mono"><?= bm_e($bm_basis) ?>?token=<?= bm_e($bm_token) ?>&amp;aktion=summe</span></td></tr>
+<tr><td><?= bm_e(bm_t('LOX.T_ADR_EVCC')) ?></td>
+    <td><span class="sm-mono"><?= bm_e($bm_basis) ?>?token=<?= bm_e($bm_token) ?>&amp;aktion=evcc&amp;geraet=1</span></td></tr>
+<tr><td><?= bm_e(bm_t('LOX.T_ADR_SELFTEST')) ?></td>
+    <td><span class="sm-mono"><?= bm_e($bm_basis) ?>?token=<?= bm_e($bm_token) ?>&amp;selftest=1</span></td></tr>
 </table>
 <div class="sm-warnung"><?= bm_t('LOX.ADRESSE_VORSCHLAG') ?></div>
 <?= bm_t('LOX.S3_BEFEHLE') ?>
@@ -1184,6 +1273,12 @@ if (!bm_felder_gemessen(1)) { ?>
     <td><span class="sm-mono">/plugins/<?= bm_e($bm_p['plugin']) ?>/index.php?token=<?= bm_e($bm_token) ?>&amp;aktion=automatik&amp;geraet=1</span></td></tr>
 <tr><td><?= bm_e(bm_t('LOX.T_VA_LEBEN')) ?></td>
     <td><span class="sm-mono">/plugins/<?= bm_e($bm_p['plugin']) ?>/index.php?token=<?= bm_e($bm_token) ?>&amp;aktion=lebenszeichen&amp;geraet=1</span></td></tr>
+<tr><td><?= bm_e(bm_t('LOX.T_VA_SPERREN')) ?></td>
+    <td><span class="sm-mono">/plugins/<?= bm_e($bm_p['plugin']) ?>/index.php?token=<?= bm_e($bm_token) ?>&amp;aktion=sperren&amp;geraet=1</span></td></tr>
+<tr><td><?= bm_e(bm_t('LOX.T_VA_ABRUF')) ?></td>
+    <td><span class="sm-mono">/plugins/<?= bm_e($bm_p['plugin']) ?>/index.php?token=<?= bm_e($bm_token) ?>&amp;aktion=abruf</span></td></tr>
+<tr><td><?= bm_e(bm_t('LOX.T_VA_MODUS')) ?></td>
+    <td><span class="sm-mono">/plugins/<?= bm_e($bm_p['plugin']) ?>/index.php?token=<?= bm_e($bm_token) ?>&amp;aktion=batteriemodus&amp;modus=&lt;v.0&gt;&amp;geraet=1</span></td></tr>
 </table>
 <div class="sm-warnung"><?= bm_t('LOX.S4_WARNUNG') ?></div>
 </div>

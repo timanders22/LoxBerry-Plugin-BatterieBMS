@@ -1,0 +1,60 @@
+#!/bin/bash
+# Batterie-Heimspeicher (BMS) - Deinstallation
+# command <TEMPFOLDER> <NAME> <FOLDER> <VERSION> <BASEFOLDER>
+#
+# Warum es diese Datei gibt (B34, 04.09.2026):
+#
+# Die Zweitschrift der Konfiguration liegt mit Absicht NEBEN dem
+# Konfigurationsordner, als config/plugins/<ordner>.backup.json - nur so
+# uebersteht sie ein Upgrade, bei dem der Installer config/plugins/<ordner>/
+# abraeumt. Dass sie damit auch die DEINSTALLATION uebersteht, war ein
+# Nebeneffekt, keine Absicht:
+#
+#   1. Nach dem Entfernen des Plugins blieb eine Datei mit dem Aktionstoken
+#      und allen Geraeteadressen dauerhaft auf dem Geraet liegen.
+#   2. Eine Neuinstallation holte die alte Konfiguration wortlos zurueck. Wer
+#      deinstalliert hat, um sauber neu anzufangen, kam daran nicht vorbei -
+#      und kein Text sagte ihm, wo die Datei liegt.
+#
+# Wer seine Einstellungen ueber eine Deinstallation retten will, benutzt den
+# Knopf "Einstellungen sichern" im Reiter Einstellungen. Dafuer ist er da.
+#
+# Das UPGRADE ist davon nicht beruehrt: dort laeuft preupgrade.sh, nicht
+# dieses Skript.
+
+ARGV3=$3
+ARGV5=$5
+PFOLDER="${ARGV3:-batteriebms}"
+BASE="${ARGV5:-$LBHOMEDIR}"
+if [ -z "$BASE" ] || [ ! -d "$BASE" ]; then
+    SELF=$(cd "$(dirname "$0")" && pwd)
+    BASE=$(cd "$SELF/../.." 2>/dev/null && pwd)
+fi
+
+# 1. Den Dienst anhalten, bevor etwas verschwindet. Er haelt eine
+#    Modbus-Verbindung offen, und manche Speicher lassen nur eine zu.
+DIENST="$BASE/bin/plugins/$PFOLDER/dienst.sh"
+if [ -f "$DIENST" ]; then
+    AUSGABE=$(bash "$DIENST" stop 2>&1)
+    echo "<INFO> dienst.sh stop: $AUSGABE"
+fi
+
+# 2. Alles entfernen, was NEBEN den Ordnern liegt und deshalb von
+#    purge_installation nicht erfasst wird. Jede Datei einzeln benannt -
+#    kein Muster, damit hier nie versehentlich etwas Fremdes getroffen wird.
+for DATEI in \
+    "$BASE/config/plugins/$PFOLDER.backup.json" \
+    "$BASE/config/plugins/$PFOLDER.backup.daten.tar" \
+    "$BASE/config/plugins/$PFOLDER.laeuft"
+do
+    if [ -f "$DATEI" ]; then
+        rm -f "$DATEI" && echo "<OK> Entfernt: $(basename "$DATEI")"
+    fi
+done
+
+echo "<INFO> Die Einstellungen sind damit endgueltig fort. Wer sie behalten"
+echo "<INFO> wollte, hat sie vorher ueber 'Einstellungen sichern' als Datei"
+echo "<INFO> heruntergeladen und kann sie in einer neuen Installation ueber"
+echo "<INFO> 'Einstellungen zurueckspielen' wieder einlesen."
+echo "<OK> Deinstallation abgeschlossen."
+exit 0

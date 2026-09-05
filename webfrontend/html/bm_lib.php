@@ -184,6 +184,12 @@ function bm_status_felder()
         'RESTKWH'    => array('kWh', 'BM_FELD.RESTKWH',    0, 500),
         'RESTZEIT'   => array('min', 'BM_FELD.RESTZEIT',   0, 6000),
         'ALARM'      => array('',    'BM_FELD.ALARM',      0, 1),
+        /* Neu in 0.9.16, wieder hinten angehaengt. TBAT ist die Temperatur,
+         * die das BMS fuer den Speicher als Ganzes meldet - neben TMAX/TMIN,
+         * die die hoechste und niedrigste ZELLtemperatur fuehren. Der Name
+         * enthaelt keinen bestehenden als Anfangsstueck, und der Suchtext
+         * traegt ohnehin das fuehrende Semikolon. */
+        'TBAT'       => array('°C', 'BM_FELD.TBAT',       -40, 100),
     );
 }
 
@@ -244,7 +250,11 @@ function bm_profile_eingebaut()
             'unit'      => 1,
             'ip'        => '192.168.16.254',
             'stand'     => 'dokumentiert',
-            'quelle'    => 'github.com/sarnau/BYD-Battery-Box-Infos, Read_Modbus.py',
+            'quelle'    => 'github.com/sarnau/BYD-Battery-Box-Infos (Read_Modbus.py) und '
+                         . 'github.com/christianh17/ioBroker.bydhvs (main.js, docs/'
+                         . 'byd-hexstructure.md); beides Rueckbau aus mitgeschnittener '
+                         . 'Kommunikation, KEIN Herstellerdokument. Die Zuordnung Byte zu '
+                         . 'Register ist an der Anfragezeile 01030500001984cc belegt (FC 3, ab 0x0500, 25 Register).',
             'hinweis'   => 'BM_PROFIL.H_BYD',
             'bloecke'   => array(
                 array('fc' => 3, 'start' => 0x0000, 'anzahl' => 0x13),
@@ -257,9 +267,36 @@ function bm_profile_eingebaut()
                 'SOH'    => array('reg' => 0x0503, 'typ' => 'u16', 'faktor' => 1,    'nk' => 0),
                 'IBAT'   => array('reg' => 0x0504, 'typ' => 's16', 'faktor' => 0.1,  'nk' => 1),
                 'UBAT'   => array('reg' => 0x0505, 'typ' => 'u16', 'faktor' => 0.01, 'nk' => 2),
-                'TMAX'   => array('reg' => 0x0506, 'typ' => 'u16', 'faktor' => 1,    'nk' => 0),
-                'TMIN'   => array('reg' => 0x0507, 'typ' => 'u16', 'faktor' => 1,    'nk' => 0),
+                /* Temperaturen sind VORZEICHENBEHAFTET. Bis 0.9.15 standen
+                 * sie hier als u16 - bei Frost meldete TMIN dann 65531 statt
+                 * -5, und der Uebertemperaturalarm feuerte genau verkehrt
+                 * herum. Belegt an drei unabhaengigen Stellen: das
+                 * HVS-Datenblatt gibt den Betrieb bis -10 Grad C an (negative
+                 * Zelltemperaturen sind also Normalbetrieb), ioBroker.bydhvs
+                 * liest beide Register ausdruecklich als int16 signed, und
+                 * bm_status_felder() nennt selbst den Bereich -40 bis 100.
+                 * sarnaus Skript wandelt hier nicht um - es behauptet aber
+                 * auch nichts Gegenteiliges, es druckt den Rohwert. Fuer
+                 * 0 bis 32767 ist s16 bitgleich mit u16; die Umstellung
+                 * aendert also nur den Frostfall. */
+                'TMAX'   => array('reg' => 0x0506, 'typ' => 's16', 'faktor' => 1,    'nk' => 0),
+                'TMIN'   => array('reg' => 0x0507, 'typ' => 's16', 'faktor' => 1,    'nk' => 0),
+                'TBAT'   => array('reg' => 0x0508, 'typ' => 's16', 'faktor' => 1,    'nk' => 0),
                 'FEHLER' => array('reg' => 0x050D, 'typ' => 'u16', 'faktor' => 1,    'nk' => 0),
+                /* VORBEHALT (B37, 05.09.2026): ob 0x0511 wirklich ein
+                 * Zyklenzaehler ist, ist NICHT geklaert. Die beiden einzigen
+                 * Quellen widersprechen sich: sarnau nennt 0x0511 'Charge
+                 * Cycles' (u16), ioBroker.bydhvs liest 0x0511/0x0512 als EIN
+                 * u32 geteilt durch 10 und nennt es 'chargeTotal' in kWh -
+                 * und die dortige Protokollmitschrift sagt fuer dasselbe Byte
+                 * 37 ebenfalls 'Total charge of the system'. Trifft das zu,
+                 * liest dieses Feld das HOHE Wort eines Energiezaehlers: es
+                 * bliebe jahrelang 0 und stiege dann je 6553,6 kWh Durchsatz
+                 * um 1 - was einem Zyklenzaehler zum Verwechseln aehnlich
+                 * sieht. Entschieden wird das an EINER Ablesung: ist 0x0512
+                 * ungleich 0, ist ZYKLEN Unsinn. Bis dahin bleibt das Feld
+                 * unveraendert stehen - eine stille Umdeutung waere schlimmer
+                 * als der Vorbehalt. */
                 'ZYKLEN' => array('reg' => 0x0511, 'typ' => 'u16', 'faktor' => 1,    'nk' => 0),
                 'MODULE' => array('reg' => 0x0010, 'typ' => 'u16', 'faktor' => 1,    'nk' => 0,
                                   'maske' => 0x000F),
@@ -360,33 +397,62 @@ function bm_profile_eingebaut()
         ),
 
         /* -----------------------------------------------------------------
-         * Huawei LUNA2000 - Batteriepakete (Zelldaten)
+         * Huawei LUNA2000 - Batteriepaket 1
          *
-         * ACHTUNG: Stand 'unbestaetigt'. Die Adressen sind im Umlauf, aber in
-         * diesem Plugin nie gegen ein Geraet gehalten worden. Wer sie benutzt,
-         * prueft sie zuerst im Reiter Test mit dem Rohregister-Leser gegen die
-         * Anzeige der FusionSolar-App.
+         * BERICHTIGT am 05.09.2026. Bis 0.9.15 stand hier eine Adressliste,
+         * von der genau EIN Feld stimmte (SOC). UBAT las den Betriebszustand,
+         * IBAT las den SOC, SOH las mitten in die Firmware-Zeichenkette
+         * (38210, 15 Register), TMAX las den Strom, TMIN das hohe Wort eines
+         * 32-Bit-Energiezaehlers, und UZMAX/UZMIN lasen reservierte Register.
+         * Der Speicher haette Zahlen geliefert - falsche.
+         *
+         * Die Adressen stehen jetzt so, wie sie das Herstellerdokument
+         * (Solar Inverter Modbus Interface Definitions, SUN2000MA
+         * V100R001C00SPC166, Tabelle 3-2) fuehrt; nachgemessen an
+         * github.com/wlcrs/huawei-solar-lib, src/huawei_solar/registers.py,
+         * Zweig v2, Zeilen 1208-1216 und 1262-1263.
+         *
+         * ZWEI BLOECKE, das ist kein Versehen: die Temperaturen der Pakete
+         * von Speichereinheit 1 liegen bei 38452/38453 - also HINTER den
+         * Paketdaten der zweiten Speichereinheit. Ein Block ab 38228 erreicht
+         * sie nicht.
+         *
+         * Zellspannungen gibt es in diesem Adressraum NICHT. UZMAX/UZMIN sind
+         * deshalb ersatzlos entfallen, und ein Paket-SOH ist ebenfalls nicht
+         * dokumentiert. Lieber vier richtige Groessen als acht, von denen
+         * sieben erfunden sind.
+         *
+         * Paketabstand 42 Register (38200 / 38242 / 38284), Temperaturabstand
+         * 2 (38452 / 38454 / 38456) - wer Paket 2 oder 3 braucht, legt sich
+         * ein eigenes Profil mit diesen Abstaenden an.
+         *
+         * NICHT gemessen: ob ein Wechselrichter OHNE zweite Speichereinheit
+         * den Block ab 38452 ueberhaupt beantwortet. Es ist kein Geraet
+         * angeschlossen.
          * ----------------------------------------------------------------- */
         'huawei_luna2000_pakete' => array(
-            'name'      => 'Huawei LUNA2000 - Batteriepaket 1 (ungeprueft)',
+            'name'      => 'Huawei LUNA2000 - Batteriepaket 1',
             'transport' => 'modbus_tcp',
             'port'      => 502,
             'unit'      => 1,
-            'stand'     => 'unbestaetigt',
-            'quelle'    => 'Im Umlauf befindliche Registerlisten; hier NICHT gemessen.',
+            'stand'     => 'dokumentiert',
+            'quelle'    => 'Solar Inverter Modbus Interface Definitions (Huawei), '
+                         . 'SUN2000MA V100R001C00SPC166, Tabelle 3-2; gegengelesen an '
+                         . 'github.com/wlcrs/huawei-solar-lib (registers.py, Zweig v2). '
+                         . 'An keinem Geraet gemessen.',
             'hinweis'   => 'BM_PROFIL.H_HUAWEI_PAKETE',
             'bloecke'   => array(
-                array('fc' => 3, 'start' => 38200, 'anzahl' => 50),
+                array('fc' => 3, 'start' => 38228, 'anzahl' => 9),
+                array('fc' => 3, 'start' => 38452, 'anzahl' => 2),
             ),
             'felder' => array(
-                'UBAT'   => array('reg' => 38228, 'typ' => 'u16', 'faktor' => 0.1, 'nk' => 1),
-                'IBAT'   => array('reg' => 38229, 'typ' => 's16', 'faktor' => 0.1, 'nk' => 1),
                 'SOC'    => array('reg' => 38229, 'typ' => 'u16', 'faktor' => 0.1, 'nk' => 1),
-                'SOH'    => array('reg' => 38214, 'typ' => 'u16', 'faktor' => 0.1, 'nk' => 1),
-                'TMAX'   => array('reg' => 38236, 'typ' => 's16', 'faktor' => 0.1, 'nk' => 1),
-                'TMIN'   => array('reg' => 38238, 'typ' => 's16', 'faktor' => 0.1, 'nk' => 1),
-                'UZMAX'  => array('reg' => 38232, 'typ' => 'u16', 'faktor' => 0.001, 'nk' => 3),
-                'UZMIN'  => array('reg' => 38234, 'typ' => 'u16', 'faktor' => 0.001, 'nk' => 3),
+                'UBAT'   => array('reg' => 38235, 'typ' => 'u16', 'faktor' => 0.1, 'nk' => 1),
+                'IBAT'   => array('reg' => 38236, 'typ' => 's16', 'faktor' => 0.1, 'nk' => 1),
+                // 38233/38234, hohes Wort zuerst - die Vorgabe von bm_wert_aus().
+                'PBAT'   => array('reg' => 38233, 'typ' => 's32', 'faktor' => 1,   'nk' => 0),
+                'TMAX'   => array('reg' => 38452, 'typ' => 's16', 'faktor' => 0.1, 'nk' => 1),
+                'TMIN'   => array('reg' => 38453, 'typ' => 's16', 'faktor' => 0.1, 'nk' => 1),
             ),
             'rechnung'  => array(),
             'zellen'    => array(),
@@ -466,6 +532,41 @@ function bm_profile_eingebaut()
  * vollstaendig. Das ist gewollt: wer ein Profil korrigiert, will nicht mit
  * einer halb ueberschriebenen Mischung dastehen.
  */
+/**
+ * Liest ein Profil zwei verschiedene Messgroessen aus DEMSELBEN Register?
+ *
+ * Anlass (B14, 04.09.2026): im Paketprofil von Huawei standen IBAT und SOC
+ * beide auf 38229. Hoechstens eine der beiden Zahlen konnte stimmen, und
+ * beide gingen ohne Vorbehalt nach Loxone und MQTT. Ein Stand
+ * 'unbestaetigt' deckt eine ungemessene Adresse ab - einen inneren
+ * Widerspruch deckt er nicht.
+ *
+ * Gezaehlt wird nur der Leseblock 'felder'; 'rechnung' darf dieselben
+ * Register benutzen (das ist dort der Sinn: PBAT entsteht bei BYD aus Strom
+ * und Ausgangsspannung). Register verschiedener BREITE, die sich
+ * ueberlappen, faengt diese Pruefung bewusst nicht - dafuer braeuchte es
+ * die Breite je Typ, und dieser Fall ist im Bestand nicht aufgetreten.
+ *
+ * Rueckgabe: Liste von Texten, je einer Doppelbelegung. Leer heisst sauber.
+ */
+function bm_profil_doppelregister(array $pr)
+{
+    $gesehen = array();
+    $funde = array();
+    foreach ((array) (isset($pr['felder']) ? $pr['felder'] : array()) as $name => $feld) {
+        if (!is_array($feld) || !isset($feld['reg'])) {
+            continue;
+        }
+        $reg = (int) $feld['reg'];
+        if (isset($gesehen[$reg])) {
+            $funde[] = $gesehen[$reg] . ' und ' . $name . ' lesen beide Register ' . $reg;
+        } else {
+            $gesehen[$reg] = $name;
+        }
+    }
+    return $funde;
+}
+
 function bm_profile()
 {
     static $alle = null;
@@ -474,7 +575,9 @@ function bm_profile()
     }
     $alle = bm_profile_eingebaut();
     foreach ($alle as $k => $v) {
-        $alle[$k]['herkunft'] = 'eingebaut';
+        // Anwendersichtbar, also uebersetzt - bis 0.9.15 stand hier
+        // fest Deutsch, und es erschien auch in der englischen Oberflaeche.
+        $alle[$k]['herkunft'] = bm_t('EINST.HERKUNFT_EINGEBAUT');
     }
     $ordner = bm_paths()['datadir'] . '/profile';
     if (is_dir($ordner)) {
@@ -491,7 +594,7 @@ function bm_profile()
                     'Profildatei nicht lesbar oder ohne Feld transport, uebergangen: ' . $datei);
                 continue;
             }
-            $d['herkunft'] = 'eigene Datei';
+            $d['herkunft'] = bm_t('EINST.HERKUNFT_DATEI');
             $d['datei'] = $datei;
             if (!isset($d['name'])) {
                 $d['name'] = $schluessel;
@@ -563,6 +666,101 @@ function bm_vorgaben()
     );
 }
 
+/**
+ * Die zulaessigen Bereiche der Einstellungen - an EINER Stelle.
+ *
+ * Anlass (B01, 04.09.2026): dieselbe Tabelle stand nur im Speichern-Zweig der
+ * Oberflaeche. Das Zurueckspielen einer Sicherung pruefte keinen einzigen
+ * Wert. Gemessen: eine Datei mit intervall = "nicht; eine Zahl" und
+ * soc_max = 9999 wurde uebernommen - und soc_max = 9999 legt die Ladeschranke
+ * still, weil bms_dienst.php gegen genau diesen Wert prueft.
+ */
+function bm_wert_grenzen()
+{
+    return array(
+        'intervall'           => array(5, 3600),
+        'zelltakt'            => array(30, 86400),
+        'schreibbremse'       => array(0, 600),
+        'totmann'             => array(0, 3600),
+        'soc_min'             => array(0, 100),
+        'soc_max'             => array(0, 100),
+        'verlauf_tage'        => array(1, 365),
+        'wartezeit'           => array(0, 30),
+        'zeitueberschreitung' => array(1, 30),
+        'drift_warnung'       => array(1, 2000),
+        'temp_max'            => array(0, 100),
+        'temp_min'            => array(0, 100),
+        'evcc_geraet'         => array(1, 99),
+        'evcc_ladewatt'       => array(0, 30000),
+    );
+}
+
+/**
+ * Einen einzelnen Wert beurteilen. Rueckgabe: '' heisst in Ordnung, sonst
+ * der Grund im Klartext.
+ *
+ * Benutzt vom Speichern-Zweig UND vom Zurueckspielen - das ist der Sinn.
+ */
+function bm_wert_pruefen($schluessel, $wert)
+{
+    $grenzen = bm_wert_grenzen();
+    if (isset($grenzen[$schluessel])) {
+        if (is_array($wert) || is_object($wert) || is_bool($wert) || $wert === null) {
+            return sprintf(bm_t('EINST.FEHLER_ZAHL'), $schluessel);
+        }
+        if (preg_match('/^[0-9]+$/', trim((string) $wert)) !== 1) {
+            return sprintf(bm_t('EINST.FEHLER_ZAHL'), $schluessel);
+        }
+        $z = (int) $wert;
+        if ($z < $grenzen[$schluessel][0] || $z > $grenzen[$schluessel][1]) {
+            return sprintf(bm_t('EINST.FEHLER_BEREICH'), $schluessel,
+                $grenzen[$schluessel][0], $grenzen[$schluessel][1]);
+        }
+        return '';
+    }
+    switch ($schluessel) {
+        case 'mqtt_ein':
+        case 'steuerung_ein':
+        case 'evcc_ein':
+            return in_array((string) $wert, array('0', '1'), true)
+                ? '' : sprintf(bm_t('EINST.FEHLER_ZAHL'), $schluessel);
+        case 'mitschnitt_bis':
+            return (is_int($wert) || preg_match('/^[0-9]{1,12}$/', (string) $wert) === 1)
+                ? '' : sprintf(bm_t('EINST.FEHLER_ZAHL'), $schluessel);
+        case 'mqtt_topic':
+            return (is_string($wert)
+                    && preg_match('#^[A-Za-z0-9_/\-]{1,64}$#', $wert) === 1)
+                ? '' : bm_t('EINST.FEHLER_TOPIC');
+        case 'aktionstoken':
+            /* Weit gefasst, wie der Hausstandard es seit VolkswagenID 0.9.12
+             * verlangt: zugelassen ist, was ohne Kodierung in eine Adresse
+             * passt. Die LEERE Zeichenkette ist zulaessig - 'kein Token
+             * gesichert' ist kein unzulaessiger Wert, sondern eine Lage. */
+            return (is_string($wert)
+                    && preg_match('/^[A-Za-z0-9_.\-]{0,64}$/', $wert) === 1)
+                ? '' : sprintf(bm_t('EINST.FEHLER_ZAHL'), $schluessel);
+        case 'geraete':
+            return is_array($wert) ? '' : sprintf(bm_t('EINST.FEHLER_ZAHL'), $schluessel);
+    }
+    return '';
+}
+
+/**
+ * Eine Geraetezeile beurteilen - dieselbe Beurteilung wie im Formular.
+ *
+ * Anlass (B04): das Muster fuer die Geraetedatei stand nur im
+ * Speichern-Zweig. Gemessen: '/dev/../etc/passwd', '/etc/passwd' und ein
+ * Geraetename mit Zeilenumbruch gingen durch bm_geraete() glatt durch,
+ * waehrend das Formular alle drei abwies. Der Wert landet in
+ * bm_seriell_einstellen() und bm_pyl_befehl().
+ */
+function bm_geraetedatei_taugt($dev)
+{
+    $dev = (string) $dev;
+    return preg_match('#^/dev/[A-Za-z0-9_/\-\.]{1,60}$#', $dev) === 1
+        && strpos($dev, '..') === false;
+}
+
 function bm_json_lesen($pfad)
 {
     if (!is_file($pfad)) {
@@ -606,6 +804,19 @@ function bm_json_schreiben($pfad, $daten, $rechte = null)
         return false;
     }
     $tmp = $pfad . '.tmp.' . getmypid() . '.' . bin2hex(random_bytes(4));
+    /* B33: Rechte VOR dem Inhalt. Bis 0.9.15 wurde erst geschrieben und dann
+     * chmod gerufen - dazwischen lag ein Fenster, in dem das Aktionstoken fuer
+     * jeden lokalen Benutzer lesbar war. Der Kommentar ueber bm_merkwort()
+     * stellt genau diese Regel auf; der Code hielt sie an drei Stellen nicht.
+     * Erst leer anlegen, dann schuetzen, dann fuellen. */
+    if ($rechte !== null) {
+        $fh = @fopen($tmp, 'c');
+        if ($fh === false) {
+            return false;
+        }
+        fclose($fh);
+        @chmod($tmp, $rechte);
+    }
     if (@file_put_contents($tmp, $json) !== strlen($json)) {
         @unlink($tmp);
         return false;
@@ -635,16 +846,130 @@ function bm_tmp_aufraeumen($ordner, $alter = 3600)
     }
 }
 
+/**
+ * Prozessweite Schreibsperre fuer den unangemeldeten Bereich.
+ *
+ * Anlass (B03, 04.09.2026): webfrontend/html/index.php ruft bm_config() VOR
+ * der Tokenpruefung. Die Selbstheilung darin legte den Konfigurationsordner
+ * an und spielte die Zweitschrift zurueck - ein Aufruf OHNE Token genuegte,
+ * gemessen. Wer die Konfiguration loescht, um das Plugin stillzulegen, hatte
+ * sie danach samt altem Aktionstoken zurueck.
+ *
+ * Warum eine Sperre und kein Parameter: bm_config() wird auch mittelbar
+ * gerufen - ueber bm_geraete(), bm_werte(), bm_token(). Ein Parameter an
+ * EINER Aufrufstelle waere von jedem inneren Aufrufer wieder aufgehoben. Die
+ * Sperre gilt fuer den ganzen Prozess und wird in der ersten Zeile des
+ * Endpunkts gesetzt.
+ */
+function bm_nur_lesen($setzen = null)
+{
+    static $an = false;
+    if ($setzen !== null) {
+        $an = (bool) $setzen;
+    }
+    return $an;
+}
+
+/**
+ * Der ZUERST festgestellte Zustand der Konfiguration.
+ *
+ * Anlass (B02): die Selbstheilung beseitigt den Schaden im selben
+ * Seitenaufruf. Eine Pruefzeile, die danach fragt, sieht eine heile Datei und
+ * meldet 'in Ordnung' - der Bediener erfaehrt nie, dass etwas war. Der erste
+ * Befund wird deshalb festgehalten und von einem spaeteren 'ok' NICHT
+ * ueberschrieben.
+ *
+ * Werte: ok | fehlt | leer | kaputt | aus der Zweitschrift |
+ *        kaputt ohne Zweitschrift
+ */
+function bm_konfig_lage($setzen = null)
+{
+    static $lage = null;
+    if ($setzen !== null && $lage === null) {
+        $lage = (string) $setzen;
+    }
+    return $lage === null ? 'ok' : $lage;
+}
+
+/**
+ * Taugt eine Zeichenkette als Konfiguration MIT Geheimnis?
+ *
+ * Die Selbstheilung entscheidet nach INHALT, nicht nach Form. Eine halb
+ * geschriebene Datei ist weder leer noch '{}': bis 0.9.15 wurde sie deshalb
+ * nicht geheilt, bm_json_lesen() gab stumm ein leeres Feld zurueck, das
+ * Aktionstoken war fort, die Oberflaeche wuerfelte ein neues - und
+ * bm_config_speichern() kopierte es ueber die Zweitschrift. Gemessen am
+ * 04.09.2026: nach EINEM Oeffnen der Oberflaeche waren Konfiguration und
+ * Zweitschrift auf Werkseinstellung, ohne eine Zeile im Protokoll.
+ */
+function bm_konfig_taugt($roh)
+{
+    $roh = trim((string) $roh);
+    if ($roh === '' || $roh === '{}') {
+        return false;
+    }
+    $d = json_decode($roh, true);
+    return is_array($d) && isset($d['aktionstoken'])
+        && trim((string) $d['aktionstoken']) !== '';
+}
+
 function bm_config()
 {
     $p = bm_paths();
-    // Selbstheilung: fehlende oder leere Konfiguration aus der Sicherung holen.
+    $darf = !bm_nur_lesen();
     $roh = is_file($p['config']) ? trim((string) @file_get_contents($p['config'])) : '';
-    if (($roh === '' || $roh === '{}') && is_file($p['sicherung'])) {
-        @mkdir($p['configdir'], 0775, true);
-        @copy($p['sicherung'], $p['config']);
+
+    if ($roh === '') {
+        $zustand = is_file($p['config']) ? 'leer' : 'fehlt';
+    } elseif ($roh === '{}') {
+        $zustand = 'leer';
+    } elseif (is_array(json_decode($roh, true))) {
+        $zustand = 'ok';
+    } else {
+        $zustand = 'kaputt';
     }
-    $cfg = array_merge(bm_vorgaben(), bm_json_lesen($p['config']));
+
+    if ($zustand !== 'ok') {
+        $sicher = is_file($p['sicherung'])
+            ? trim((string) @file_get_contents($p['sicherung'])) : '';
+        $heilbar = bm_konfig_taugt($sicher);
+
+        if ($zustand === 'kaputt') {
+            /* Eine beschaedigte Datei wird NICHT ueberschrieben, sondern zur
+             * Seite gelegt. Sie ist das einzige, was von den Einstellungen
+             * noch da ist, wenn auch die Zweitschrift nichts taugt. */
+            if ($darf && !is_file($p['config'] . '.kaputt')) {
+                @copy($p['config'], $p['config'] . '.kaputt');
+                @chmod($p['config'] . '.kaputt', 0600);
+            }
+            bm_log_gebremst('kaputt', 'Die Konfiguration ' . basename($p['config'])
+                . ' ist kein gueltiges JSON. Eine Abschrift liegt als '
+                . basename($p['config']) . '.kaputt daneben. '
+                . ($heilbar ? 'Der Stand wird aus der Zweitschrift wiederhergestellt.'
+                            : 'Die Zweitschrift traegt kein Aktionstoken - es gibt '
+                            . 'nichts wiederherzustellen. Alle Adressen im Miniserver '
+                            . 'muessen nach dem naechsten Speichern neu uebernommen werden.'),
+                3600);
+        }
+
+        if ($heilbar && $darf) {
+            @mkdir($p['configdir'], 0775, true);
+            if (@copy($p['sicherung'], $p['config'])) {
+                @chmod($p['config'], 0600);   // copy() legt sonst mit der umask an
+                bm_konfig_lage('aus der Zweitschrift');
+                $roh = $sicher;
+                $zustand = 'ok';
+            }
+        } elseif ($zustand === 'kaputt') {
+            bm_konfig_lage($heilbar ? 'kaputt' : 'kaputt ohne Zweitschrift');
+        } else {
+            bm_konfig_lage($zustand);
+        }
+    }
+    bm_konfig_lage($zustand === 'ok' ? 'ok' : $zustand);
+
+    $d = json_decode($roh, true);
+    $cfg = array_merge(bm_vorgaben(), is_array($d) ? $d : array());
     // Die EVCC-Felder werden hier begrenzt und nicht erst beim Benutzen: sie
     // koennen auch aus einer von Hand bearbeiteten Datei kommen.
     $cfg['evcc_ein']      = empty($cfg['evcc_ein']) ? 0 : 1;
@@ -660,8 +985,14 @@ function bm_config_speichern($cfg)
     if (!bm_json_schreiben($p['config'], $cfg, 0600)) {
         return false;
     }
-    @copy($p['config'], $p['sicherung']);
-    @chmod($p['sicherung'], 0600);
+    /* Die Zweitschrift wird NUR mitgezogen, wenn der geschriebene Stand das
+     * Geheimnis wirklich traegt (B02). Sonst ueberschreibt eine
+     * Werkseinstellung, die gerade erst aus einem Fehler entstanden ist, die
+     * letzte brauchbare Sicherung - und dann ist nichts mehr da. */
+    if (isset($cfg['aktionstoken']) && trim((string) $cfg['aktionstoken']) !== '') {
+        @copy($p['config'], $p['sicherung']);
+        @chmod($p['sicherung'], 0600);
+    }
     return true;
 }
 
@@ -671,18 +1002,95 @@ function bm_config_speichern($cfg)
  * Unvollstaendige Zeilen werden uebergangen - gemeldet werden sie schon beim
  * Speichern in der Oberflaeche, nicht erst hier.
  */
+/**
+ * Die Geraetezeilen einer zurueckgespielten Sicherung beurteilen.
+ *
+ * Dieselben Massstaebe wie im Formular - das ist der Sinn (B01/B04).
+ * Rueckgabe: Liste von Beanstandungen, leer heisst in Ordnung.
+ */
+function bm_geraetezeilen_pruefen($liste)
+{
+    $bean = array();
+    if (!is_array($liste)) {
+        return array(bm_t('EINST.FEHLER_KONFIG_FORM'));
+    }
+    $profile = bm_profile();
+    $nr = 0;
+    foreach ($liste as $g) {
+        $nr++;
+        if (!is_array($g)) {
+            $bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL'), $nr);
+            continue;
+        }
+        $pk = isset($g['profil']) ? (string) $g['profil'] : '';
+        if (!isset($profile[$pk])) {
+            $bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL'), $nr);
+            continue;
+        }
+        $dev = trim((string) (isset($g['geraetedatei']) ? $g['geraetedatei'] : ''));
+        if ($dev !== '' && !bm_geraetedatei_taugt($dev)) {
+            $bean[] = sprintf(bm_t('EINST.FEHLER_DEV'), $nr);
+        }
+        $ip = trim((string) (isset($g['ip']) ? $g['ip'] : ''));
+        if ($ip !== ''
+            && preg_match('/^\d{1,3}(\.\d{1,3}){3}$/', $ip) !== 1
+            && preg_match('/^[A-Za-z0-9][A-Za-z0-9\.\-]{1,80}$/', $ip) !== 1) {
+            $bean[] = sprintf(bm_t('EINST.FEHLER_IP'), $nr);
+        }
+        foreach (array('port' => array(1, 65535), 'unit' => array(0, 247),
+                       'baud' => array(300, 921600),
+                       'max_laden' => array(0, 30000),
+                       'max_entladen' => array(0, 30000)) as $f => $gr) {
+            if (!isset($g[$f]) || $g[$f] === '') {
+                continue;
+            }
+            if (preg_match('/^[0-9]{1,6}$/', (string) $g[$f]) !== 1
+                || (int) $g[$f] < $gr[0] || (int) $g[$f] > $gr[1]) {
+                $bean[] = sprintf(bm_t('EINST.FEHLER_ZAHL_ZEILE'), $nr,
+                    bm_t('EINST.T_' . strtoupper($f)), $gr[0], $gr[1]);
+            }
+        }
+    }
+    return $bean;
+}
+
 function bm_geraete()
 {
     $cfg = bm_config();
     $profile = bm_profile();
     $out = array();
+    /* Die Nummer ist eine ADRESSE und kommt aus der STELLE in der Liste,
+     * nicht aus einem Zaehler ueber die gueltigen Zeilen (B06, 04.09.2026).
+     *
+     * Gemessen: Zeile 1 mit einem Profil, das es nicht mehr gab, Zeile 2
+     * 'Garage' - bm_geraete() lieferte EINE Zeile, und die trug die Nummer 1.
+     * Loxone fragte weiter geraet=1 und bekam ab da die Werte der anderen
+     * Batterie, mit OK=1 und ohne jeden Hinweis. An derselben Nummer haengen
+     * die Sollwertdatei und der Verlauf: ein Ladezwang traf danach den
+     * falschen Speicher.
+     *
+     * Der Anlass ist nicht ausgedacht - eigene Profile liegen unter
+     * data/plugins/<ordner>/profile/, und der Installer raeumt dieses
+     * Verzeichnis bei JEDEM Upgrade ab.
+     *
+     * Auf einer heilen Anlage aendert sich dadurch nichts: sind alle Zeilen
+     * gueltig, ist Stelle+1 dieselbe Zahl wie bisher. Faellt eine Zeile aus,
+     * entsteht jetzt eine LUECKE statt einer Verschiebung - geraet=1
+     * antwortet dann GERAET_UNBEKANNT, statt still einen anderen Speicher zu
+     * liefern. */
     $n = 0;
     foreach ((array) $cfg['geraete'] as $g) {
+        $n++;
         if (!is_array($g)) {
             continue;
         }
         $pk = isset($g['profil']) ? (string) $g['profil'] : '';
         if (!isset($profile[$pk])) {
+            bm_log_gebremst('profil_weg_' . $n, 'Speicher ' . $n . ': das Profil "'
+                . $pk . '" gibt es nicht (mehr). Die Zeile wird uebergangen, ihre '
+                . 'Nummer bleibt aber belegt - geraet=' . $n . ' antwortet '
+                . 'GERAET_UNBEKANNT. Eigene Profile liegen unter '
+                . 'data/plugins/<ordner>/profile/ und ueberstehen kein Upgrade.', 3600);
             continue;
         }
         $pr = $profile[$pk];
@@ -693,6 +1101,20 @@ function bm_geraete()
             if ($dev === '') {
                 $dev = isset($pr['geraetedatei']) ? $pr['geraetedatei'] : '/dev/ttyUSB0';
             }
+            /* Dieselbe Beurteilung wie im Formular (B04). Bis 0.9.15 stand das
+             * Muster NUR im Speichern-Zweig; gemessen gingen hier
+             * '/dev/../etc/passwd', '/etc/passwd' und ein Pfad mit
+             * Zeilenumbruch glatt durch - und der Wert landet in
+             * bm_seriell_einstellen() (stty) und bm_pyl_befehl() (fopen r+b).
+             * Erreichbar ueber eine zurueckgespielte Sicherung oder eine von
+             * Hand bearbeitete Konfigurationsdatei. */
+            if (!bm_geraetedatei_taugt($dev)) {
+                bm_log_gebremst('dev_' . $n, 'Speicher ' . $n . ': die Geraetedatei '
+                    . 'ist keine zulaessige Angabe (' . strlen($dev) . ' Zeichen, '
+                    . 'erwartet wird ein Pfad unter /dev ohne ".."). Die Zeile wird '
+                    . 'uebergangen.', 3600);
+                continue;
+            }
         } else {
             if ($ip === '') {
                 $ip = isset($pr['ip']) ? $pr['ip'] : '';
@@ -701,7 +1123,6 @@ function bm_geraete()
                 continue;
             }
         }
-        $n++;
         $out[$n] = array(
             'nr'           => $n,
             'name'         => trim((string) (isset($g['name']) ? $g['name'] : '')) !== ''
@@ -777,6 +1198,23 @@ function bm_token()
     if (trim((string) $cfg['aktionstoken']) !== '') {
         return (string) $cfg['aktionstoken'];
     }
+    /* Die Sperre des unangemeldeten Bereichs gilt auch hier: der Endpunkt
+     * antwortet lieber mit 403, als ein Token anzulegen (B03). */
+    if (bm_nur_lesen()) {
+        return '';
+    }
+    /* Fehlt das Token, obwohl eine Konfiguration BESTEHT, ist das kein
+     * Neuanfang, sondern ein Verlust - meist aus einer unvollstaendigen
+     * zurueckgespielten Sicherung (B05). Gemessen: alle Adressen im
+     * Miniserver antworten danach 403, und ein Virtueller Ausgang wertet das
+     * nicht aus. Genau eine Zeile, damit niemand den Fehler in Loxone sucht. */
+    if (bm_konfig_lage() !== 'fehlt' && count($cfg) > count(bm_vorgaben()) - 1
+        && is_file(bm_paths()['config'])) {
+        bm_log_gebremst('token_neu', 'Es bestand eine Konfiguration, aber kein '
+            . 'Aktionstoken. Es wird ein neues erzeugt - alle Adressen im '
+            . 'Miniserver muessen im Reiter "Einbindung in Loxone" neu '
+            . 'uebernommen werden.', 3600);
+    }
     $p = bm_paths();
     if (!is_dir($p['datadir'])) {
         @mkdir($p['datadir'], 0775, true);
@@ -825,6 +1263,14 @@ function bm_token()
 function bm_sollart($sollwert)
 {
     $s = (string) $sollwert;
+    /* 4 = eine Schrittfolge ist mitten im Absetzen abgebrochen, und die
+     * Ruecknahme in die Automatik ist ebenfalls gescheitert (B10). Das Geraet
+     * steht dann moeglicherweise im Zwangsbetrieb, ohne dass jemand einen
+     * Sollwert gesetzt haette. Hinten angehaengt, damit die bestehenden
+     * Zahlen 0 bis 3 ihre Bedeutung behalten. */
+    if (strpos($s, 'unvollstaendig') === 0) {
+        return 4;
+    }
     // 'entladen' zuerst: 'laden' steckt darin, wenn auch nicht an Stelle 0.
     if (strpos($s, 'entladen') === 0) {
         return 2;
@@ -1458,6 +1904,25 @@ function bm_modbus_anfrage($s, array $g, $pdu)
         return $kopf;
     }
     $teile = unpack('ntrans/nproto/nlen/Cunit/Cfc', $kopf);
+    /* B16: bis 0.9.15 wurden trans, unit und fc zwar gelesen, aber nie
+     * gegengehalten - nur proto, len und das 0x80-Bit. Der RTU-Zweig prueft
+     * die Geraeteadresse dagegen sehr wohl. Verbindungen werden ueber
+     * Durchlaeufe hinweg offengehalten; traf nach einer Zeitueberschreitung
+     * die verspaetete Antwort ein, wurde sie als Messwert des AKTUELLEN
+     * Blocks uebernommen - keine Fehlermeldung, sondern die falsche Zahl. */
+    if ((int) $teile['trans'] !== (int) $transaktion) {
+        return array('_fehler' => 'Die Antwort traegt die Vorgangsnummer '
+            . (int) $teile['trans'] . ', gefragt war ' . (int) $transaktion
+            . '. Das ist die Antwort auf eine fruehere oder fremde Anforderung.');
+    }
+    if ((int) $teile['unit'] !== $unit) {
+        return array('_fehler' => 'Die Antwort traegt die Geraeteadresse '
+            . (int) $teile['unit'] . ', gefragt war ' . $unit . '.');
+    }
+    if (((int) $teile['fc'] & 0x7F) !== (ord($pdu[0]) & 0x7F)) {
+        return array('_fehler' => 'Die Antwort traegt den Funktionscode '
+            . ((int) $teile['fc'] & 0x7F) . ', gefragt war ' . (ord($pdu[0]) & 0x7F) . '.');
+    }
     if ($teile['proto'] !== 0) {
         return array('_fehler' => 'Die Antwort traegt die Protokollkennung ' . $teile['proto']
             . ' statt 0. Das ist keine Modbus-TCP-Antwort - womoeglich antwortet ein '
@@ -1517,7 +1982,21 @@ function bm_register_lesen($s, array $g, $fc, $start, $anzahl)
 function bm_register_schreiben($s, array $g, $reg, $wert)
 {
     $reg  = ((int) $reg) & 0xFFFF;
-    $wert = ((int) $wert) & 0xFFFF;
+    /* B42: bis 0.9.15 stand hier '$wert = ((int) $wert) & 0xFFFF;' - der Wert
+     * wurde also gekappt, und bm_echo_pruefen() bekam den bereits gekappten
+     * Wert zum Vergleich, konnte die Kappung also gar nicht sehen. Der
+     * Kommentar im Dienst verspricht ausdruecklich 'ABGEWIESEN, nicht
+     * stillschweigend gekappt'; fuer alles ueber 16 Bit hielt er nicht.
+     * Erreichbar ist das nur ueber ein selbst geschriebenes Profil, das
+     * '@watt' als u16 hinterlegt - die eingebauten fuehren es als u32.
+     * Abweisen statt kappen: */
+    if ((int) $wert < 0 || (int) $wert > 0xFFFF) {
+        return array('_fehler' => 'Der Wert ' . (int) $wert . ' passt nicht in ein '
+            . '16-Bit-Register (0 bis 65535). Der Befehl gilt als NICHT ausgefuehrt. '
+            . 'Ein Profil, das groessere Werte schreiben muss, hinterlegt den '
+            . 'Schritt als u32.');
+    }
+    $wert = (int) $wert;
     $pdu = pack('Cnn', 6, $reg, $wert);
     $antwort = bm_modbus_anfrage($s, $g, $pdu);
     if (is_array($antwort)) {
@@ -1589,6 +2068,24 @@ function bm_register_schreiben_mehrere($s, array $g, $reg, array $werte)
 }
 
 /** Rohwerte in eine Zahl umrechnen. Fehlt ein Register, kommt null zurueck. */
+/**
+ * Wie breit ist das Teilfeld, das eine Maske nach dem Schieben uebriglaesst?
+ *
+ * Gebraucht fuer das Vorzeichen (B12): nach 'maske 0xF000, schieben 12' ist
+ * das Feld vier Bit breit, und 0xF heisst dort -1, nicht 15. Die feste
+ * Schwelle 0x8000 traf das nie.
+ */
+function bm_maskenbreite($maske, $schieben)
+{
+    $m = ((int) $maske) >> (int) $schieben;
+    $b = 0;
+    while ($m > 0) {
+        $b++;
+        $m >>= 1;
+    }
+    return $b > 0 ? $b : 1;
+}
+
 function bm_wert_aus(array $regs, array $feld)
 {
     $reg = (int) $feld['reg'];
@@ -1597,15 +2094,42 @@ function bm_wert_aus(array $regs, array $feld)
     }
     $typ = isset($feld['typ']) ? $feld['typ'] : 'u16';
     $roh = $regs[$reg];
-    if (isset($feld['maske'])) {
-        $roh = $roh & (int) $feld['maske'];
-        if (isset($feld['schieben'])) {
-            $roh = $roh >> (int) $feld['schieben'];
-        }
+
+    /* B13: bis 0.9.15 hatte der switch darunter kein default. Ein vertippter
+     * oder anders geschriebener Typ ('S16', 'int16', 'i16') fiel still auf
+     * u16 durch und ergab den Rohwert mal Faktor - eine Zahl, die aussieht
+     * wie ein Messwert. Genau die Fehlerart, wegen der 'ascii' in 0.9.7
+     * entfernt wurde. Kein Wert ist besser als ein falscher. */
+    $bekannt = array('u16', 's16', 'u32', 's32', 'f32', 'u16hi', 'u16lo');
+    if (!in_array($typ, $bekannt, true)) {
+        bm_log_gebremst('typ_' . $typ, 'Ein Profil nennt den Registertyp "'
+            . bm_text_sauber((string) $typ, 20) . '", den es nicht gibt. Erlaubt sind: '
+            . implode(', ', $bekannt) . '. Das Feld bleibt leer - ein Rohwert mal '
+            . 'Faktor waere eine Zahl, die aussieht wie ein Messwert.', 3600);
+        return null;
     }
+
+    /* B11/B12: Maske und Schieben wirkten bis 0.9.15 NUR auf das erste
+     * Register und wurden von den 32-Bit-Zweigen ueberschrieben, weil die
+     * $roh vollstaendig neu zuweisen. Gemessen: Register 0xFF01/0x0002 mit
+     * typ=u32 und maske=0x00FF ergab 4278255618 - exakt den ungemaskten Wert.
+     * Jetzt wird zuerst der volle Wert gebildet und die Maske DANACH
+     * angewandt; das Vorzeichen richtet sich nach der Breite des Teilfelds,
+     * nicht nach der festen Schwelle 0x8000 (0xF000 mit maske=0xF000 und
+     * schieben=12 ergab 15 statt -1). */
+    $maske = isset($feld['maske']) ? (int) $feld['maske'] : null;
+    $schieben = isset($feld['schieben']) ? (int) $feld['schieben'] : 0;
+    $breite = 16;
+
     switch ($typ) {
         case 's16':
-            $roh = ($roh >= 0x8000) ? $roh - 0x10000 : $roh;
+            if ($maske !== null) {
+                $roh = ($roh & $maske) >> $schieben;
+                $breite = bm_maskenbreite($maske, $schieben);
+            }
+            $halb = 1 << ($breite - 1);
+            $roh = ($roh >= $halb) ? $roh - (1 << $breite) : $roh;
+            $maske = null;   // schon angewandt
             break;
         case 'u32':
         case 's32':
@@ -1616,8 +2140,16 @@ function bm_wert_aus(array $regs, array $feld)
             $roh = ($wort === 'nieder')
                 ? (($regs[$reg + 1] << 16) | $regs[$reg])
                 : (($regs[$reg] << 16) | $regs[$reg + 1]);
-            if ($typ === 's32' && $roh >= 0x80000000) {
-                $roh -= 0x100000000;
+            if ($maske !== null) {
+                $roh = ($roh & $maske) >> $schieben;
+                $breite = bm_maskenbreite($maske, $schieben);
+                $maske = null;
+            } else {
+                $breite = 32;
+            }
+            if ($typ === 's32') {
+                $halb = 1 << ($breite - 1);
+                $roh = ($roh >= $halb) ? $roh - (1 << $breite) : $roh;
             }
             break;
         case 'f32':
@@ -1641,10 +2173,24 @@ function bm_wert_aus(array $regs, array $feld)
             break;
         case 'u16hi':
             $roh = ($roh >> 8) & 0xFF;
+            $maske = null;
             break;
         case 'u16lo':
             $roh = $roh & 0xFF;
+            $maske = null;
             break;
+    }
+    /* u16 und f32: die Maske ist hier noch offen. Bei f32 ergibt eine Maske
+     * keinen Sinn (das Bitmuster IST die Zahl) - deshalb wird sie dort
+     * ausdruecklich uebergangen und gemeldet, statt still zu wirken. */
+    if ($maske !== null) {
+        if ($typ === 'f32') {
+            bm_log_gebremst('maske_f32', 'Ein Profil setzt eine Maske auf ein '
+                . 'f32-Feld (Register ' . $reg . '). Bei einer Gleitkommazahl ist '
+                . 'das Bitmuster die Zahl selbst - die Maske wird uebergangen.', 3600);
+        } else {
+            $roh = ($roh & $maske) >> $schieben;
+        }
     }
     $faktor = isset($feld['faktor']) ? (float) $feld['faktor'] : 1.0;
     $nk = isset($feld['nk']) ? (int) $feld['nk'] : 0;
@@ -1741,9 +2287,26 @@ function bm_pyl_befehl($geraetedatei, $baud, $adresse, $cid2, $info = '', $tmo =
         return array('_fehler' => 'Die Geraetedatei ' . $geraetedatei . ' liess sich nicht oeffnen.');
     }
     stream_set_blocking($fh, false);
-    // Alles wegwerfen, was noch im Puffer liegt - sonst wird die Antwort auf
-    // den vorigen Befehl fuer die auf diesen gehalten.
+    /* Alles wegwerfen, was noch im Puffer liegt - sonst wird die Antwort auf
+     * den vorigen Befehl fuer die auf diesen gehalten.
+     *
+     * B36: bis 0.9.15 hatte diese Schleife KEINE Zeitschranke ($tmo gilt erst
+     * fuer die Leseschleife darunter). Ein Dauerpegel auf der RS485-Leitung -
+     * zweiter Master, vertauschtes A/B-Paar, fehlender Abschlusswiderstand,
+     * also genau die Ursachen, die die Fehlertexte dieses Plugins selbst
+     * nennen - haengt den ganzen Dienst hier fest; dienst.sh stop wartet dann
+     * seine zehn Sekunden ab und setzt mit kill -9 nach. */
+    $bm_leer_bis = microtime(true) + 1.0;
+    $bm_weg = 0;
     while (@fread($fh, 4096) !== '') {
+        $bm_weg++;
+        if (microtime(true) > $bm_leer_bis) {
+            @fclose($fh);
+            return array('_fehler' => 'Auf ' . $geraetedatei . ' liegt ein Dauerpegel: '
+                . 'nach einer Sekunde kamen immer noch Daten (' . $bm_weg . ' Bloecke). '
+                . 'Meist ein zweiter Master am Bus, ein vertauschtes A/B-Paar oder ein '
+                . 'fehlender Abschlusswiderstand.');
+        }
         usleep(1000);
     }
     @fwrite($fh, bm_pyl_rahmen($adresse, $cid2, $info));
@@ -1917,12 +2480,21 @@ function bm_mqtt_senden(array $paare, $praefix)
         // deshalb in Bruchstuecke, aus denen das Gateway erfundene Topics
         // bildet. Auch ein Tabulator hat dort nichts zu suchen: Leerzeichen
         // trennt Thema und Wert.
-        $wert = str_replace(array("\r\n", "\r", "\n", "\t"), ' ', (string) $v);
-        $wert = trim(preg_replace('/ {2,}/', ' ', $wert));
+        $wert = bm_mqtt_wert_saeubern($v);
         if ($wert === '') {
             continue;
         }
-        $msg = 'publish ' . $praefix . '/' . $k . ' ' . $wert;
+        /* Auch THEMA und Schluessel saeubern, nicht nur den Wert (B41).
+         * Bis 0.9.15 lief nur der Wert durch die Reinigung. Das Praefix kommt
+         * aus mqtt_topic, und das Zurueckspielen einer Sicherung pruefte
+         * keinen Wert - ein Zeilenumbruch darin haette in jedem Datagramm
+         * eine zweite publish-Zeile erzeugt. Dieselbe Bauart wie der
+         * Saugroboter-Befund vom 27.08.2026. */
+        $thema = bm_mqtt_thema_saeubern($praefix . '/' . $k);
+        if ($thema === '') {
+            continue;
+        }
+        $msg = 'publish ' . $thema . ' ' . $wert;
         @socket_sendto($s, $msg, strlen($msg), 0, '127.0.0.1', $z['udpport']);
     }
     socket_close($s);
@@ -1937,6 +2509,21 @@ function bm_mqtt_wert_saeubern($v)
 {
     $wert = str_replace(array("\r\n", "\r", "\n", "\t"), ' ', (string) $v);
     return trim(preg_replace('/ {2,}/', ' ', $wert));
+}
+
+/**
+ * Dasselbe fuer die andere Haelfte der Zeile: das Thema.
+ *
+ * Das Gateway liest 'publish <thema> <wert>' zeilenweise und trennt Thema und
+ * Wert am Leerzeichen. Ein Zeilenumbruch im Thema erzeugt eine zweite
+ * Anweisung, ein Leerzeichen verschiebt die Grenze. Zugelassen ist deshalb
+ * nur, was in einem MQTT-Thema ohnehin vorkommt.
+ */
+function bm_mqtt_thema_saeubern($t)
+{
+    $t = preg_replace('#[^A-Za-z0-9_/\-]+#', '_', (string) $t);
+    $t = preg_replace('#/{2,}#', '/', $t);
+    return trim($t, '/');
 }
 
 /**
@@ -3010,6 +3597,13 @@ function bm_merkwort()
     /* Rechte VOR dem Inhalt: zwischen Anlegen und chmod laege sonst ein
      * Fenster, in dem das Merkwort fuer alle lesbar ist. */
     $tmp = $datei . '.tmp';
+    // Leer anlegen, schuetzen, dann fuellen - so, wie der Kommentar darueber
+    // es verlangt (B33).
+    $fh = @fopen($tmp, 'c');
+    if ($fh !== false) {
+        fclose($fh);
+        @chmod($tmp, 0600);
+    }
     if (@file_put_contents($tmp, $neu) !== false) {
         @chmod($tmp, 0600);
         if (@rename($tmp, $datei)) {

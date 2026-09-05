@@ -41,22 +41,75 @@
 
 error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE);
 require_once __DIR__ . '/bm_lib.php';
+
+/* Schreibsperre fuer den unangemeldeten Bereich - die ERSTE Anweisung nach
+ * dem Einbinden (B03, 04.09.2026).
+ *
+ * Bis 0.9.15 rief die Zeile darunter bm_config() VOR der Tokenpruefung, und
+ * die Selbstheilung darin legte den Konfigurationsordner an und spielte die
+ * Zweitschrift zurueck. Gemessen: ein Aufruf ohne jedes Token beantwortete
+ * mit 403 - und legte config/plugins/<ordner>/batteriebms.json neu an, samt
+ * altem Aktionstoken. Wer die Konfiguration loescht, um das Plugin
+ * stillzulegen, hatte sie danach zurueck.
+ *
+ * Das Protokoll bleibt beschreibbar: eine Zeile ueber einen abgewiesenen
+ * Aufruf ist genau das, was hier fehlte (B26). */
+bm_nur_lesen(true);
+
 header('Content-Type: text/plain; charset=utf-8');
+
+/**
+ * Eine Zeile ueber den Ausgang dieses Aufrufs - gebremst.
+ *
+ * Anlass (B26): der Endpunkt hatte auf KEINEM Weg einen Protokolleintrag.
+ * Damit liess sich 'der Miniserver ruft nicht an' nicht von 'er ruft an und
+ * wird abgewiesen' unterscheiden - der Fall, der bei der ACTiKamera am
+ * 22.08.2026 Stunden gekostet hat.
+ *
+ * Erfolgreiche Abrufe bleiben stumm: der Miniserver fragt im Minutentakt,
+ * das waeren 1440 Zeilen am Tag. Die Zugangsmarke steht NIE darin, und ein
+ * gerade abgewiesener Wert auch nicht - seine Laenge sagt genug.
+ */
+function bm_ep_log($grund, $zusatz = '')
+{
+    $von = isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : '?';
+    $von = preg_replace('/[^0-9a-fA-F:.]/', '', $von);
+    bm_log_gebremst('ep_' . $grund . '_' . $von,
+        'Endpunkt: Aufruf von ' . ($von === '' ? '?' : $von) . ' abgewiesen - '
+        . $grund . ($zusatz !== '' ? ' (' . $zusatz . ')' : ''), 3600);
+}
 
 $bm_cfg = bm_config();
 
-/* ---------------- Token ---------------- */
+/* ---------------- Token ----------------
+ *
+ * ?selftest=1 ist der Hausstandard-Selbsttest (B22): er beantwortet die
+ * Tokenfrage, ohne etwas auszuloesen, ohne Geraetekontakt und ohne
+ * Schreibzugriff. Drei festgelegte Antworten. */
+$bm_selftest = isset($_GET['selftest']) && is_string($_GET['selftest'])
+            && $_GET['selftest'] === '1';
 $bm_soll = (string) $bm_cfg['aktionstoken'];
-$bm_ist = isset($_GET['token']) ? (string) $_GET['token'] : '';
+$bm_ist = (isset($_GET['token']) && is_string($_GET['token']))
+        ? (string) $_GET['token'] : '';
 if ($bm_soll === '') {
     http_response_code(403);
-    echo "FEHLER;OK=0;GRUND=KEIN_TOKEN_GESETZT\n";
-    echo "Die Plugin-Oberflaeche wurde noch nie geoeffnet - es gibt noch kein Token.\n";
+    if ($bm_selftest) {
+        echo "SELFTEST;OK=0;ERR=KEIN_TOKEN_EINGERICHTET\n";
+    } else {
+        echo "FEHLER;OK=0;GRUND=KEIN_TOKEN_GESETZT\n";
+        echo "Die Plugin-Oberflaeche wurde noch nie geoeffnet - es gibt noch kein Token.\n";
+    }
+    bm_ep_log('KEIN_TOKEN_EINGERICHTET');
     exit;
 }
 if (!hash_equals($bm_soll, $bm_ist)) {
     http_response_code(403);
-    echo "FEHLER;OK=0;GRUND=TOKEN\n";
+    echo $bm_selftest ? "SELFTEST;OK=0;ERR=TOKEN\n" : "FEHLER;OK=0;GRUND=TOKEN\n";
+    bm_ep_log('TOKEN', strlen($bm_ist) . ' Zeichen uebergeben');
+    exit;
+}
+if ($bm_selftest) {
+    echo "SELFTEST;OK=1;TOKEN=OK\n";
     exit;
 }
 
@@ -69,6 +122,7 @@ if (!in_array($bm_aktion, array_merge($bm_lesend, $bm_schaltend), true)) {
     http_response_code(400);
     echo "FEHLER;OK=0;GRUND=UNBEKANNTE_AKTION\n";
     echo 'Erlaubt sind: ' . implode(', ', array_merge($bm_lesend, $bm_schaltend)) . "\n";
+    bm_ep_log('UNBEKANNTE_AKTION');
     exit;
 }
 
@@ -81,11 +135,23 @@ function bm_param($name, $muster, $vorgabe = '')
     if (!isset($_GET[$name]) || $_GET[$name] === '') {
         return $vorgabe;
     }
+    /* Erst is_string, dann alles andere: ?geraet[]=1 macht ein Feld, und
+     * (string) darauf ist unter PHP 8 ein TypeError - HTTP 500 mit leerem
+     * Rumpf, und der Miniserver liest nichts. */
+    if (!is_string($_GET[$name])) {
+        http_response_code(400);
+        echo "FEHLER;OK=0;GRUND=PARAMETER\n";
+        echo 'Der Wert von ' . $name . " passt nicht ins erlaubte Muster.\n";
+        bm_ep_log('PARAMETER', $name . ', kein Text');
+        exit;
+    }
     $w = (string) $_GET[$name];
     if (!preg_match($muster, $w)) {
         http_response_code(400);
         echo "FEHLER;OK=0;GRUND=PARAMETER\n";
         echo 'Der Wert von ' . $name . " passt nicht ins erlaubte Muster.\n";
+        // Der abgewiesene Wert selbst gehoert nicht ins Protokoll.
+        bm_ep_log('PARAMETER', $name . ', ' . strlen($w) . ' Zeichen');
         exit;
     }
     return $w;
@@ -282,14 +348,12 @@ if ($bm_aktion !== 'abruf' && empty($bm_cfg['steuerung_ein'])) {
        . "'Schreibende Befehle zulassen'.\n";
     exit;
 }
-if (bm_dienst_pid() === 0) {
-    // Nicht stillschweigend einreihen: ohne laufenden Dienst passiert nichts,
-    // und Loxone haelt den Zwang sonst faelschlich fuer gesetzt.
-    http_response_code(503);
-    echo "SET;OK=0;GRUND=DIENST_LAEUFT_NICHT\n";
-    echo "Der Abrufdienst laeuft nicht. Reiter Einstellungen, Knopf 'Dienst starten'.\n";
-    exit;
-}
+/* Die Pruefung des DIENSTES stand bis 0.9.15 hier - also VOR der Pruefung der
+ * Anfrage. Gemessen: 'laden' ohne watt und 'batteriemodus&modus=99' bekamen
+ * beide DIENST_LAEUFT_NICHT, obwohl beide auch mit laufendem Dienst
+ * abgewiesen worden waeren. Der Bediener startete daraufhin den Dienst, statt
+ * seinen Aufruf zu berichtigen. Sie steht jetzt unten, unmittelbar vor dem
+ * Absetzen (B17). */
 
 /* Betriebsart von EVCC in eine Aktion dieses Plugins uebersetzen.
  *
@@ -335,6 +399,17 @@ if ($bm_aktion === 'laden' || $bm_aktion === 'entladen') {
         exit;
     }
     $bm_befehl['watt'] = (int) $bm_watt;
+}
+
+/* Erst jetzt, unmittelbar vor dem Absetzen: laeuft der Dienst ueberhaupt?
+ * Nicht stillschweigend einreihen - ohne laufenden Dienst passiert nichts,
+ * und Loxone haelt den Zwang sonst faelschlich fuer gesetzt. */
+if (bm_dienst_pid() === 0) {
+    http_response_code(503);
+    echo "SET;OK=0;GRUND=DIENST_LAEUFT_NICHT\n";
+    echo "Der Abrufdienst laeuft nicht. Reiter Einstellungen, Knopf 'Dienst starten'.\n";
+    bm_ep_log('DIENST_LAEUFT_NICHT', $bm_aktion);
+    exit;
 }
 
 list($bm_erg, $bm_meldung) = bm_befehl_absetzen($bm_befehl);

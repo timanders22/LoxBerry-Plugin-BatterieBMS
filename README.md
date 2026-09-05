@@ -18,7 +18,7 @@ muss das BMS selbst fragen.
 | **Je Modul** | Spannung jeder einzelnen Zelle, Spannungsspanne, Temperaturen — dazu **welche** Zelle die schwächste ist |
 | **Abgeleitet** | Restenergie in kWh und geschätzte Restzeit bis voll oder leer; ein **Sammelmerker** mit Klartext, wenn Drift, Temperatur oder Fehlerbits auffällig sind |
 | **Steuerung** | Laden und Entladen erzwingen, mit Leistungsgrenze, Ladefenster, Schreibbremse und **Totmannschaltung**. Jeder Schreibbefehl wird gegen die Antwort des Geräts gehalten; ein **Trockenlauf** zeigt vorher, welche Register beschrieben würden |
-| **Ausgabe** | MQTT über das LoxBerry-Gateway und ein tokengeschützter HTTP-Endpunkt für den Miniserver, beide mit Zeitstempel |
+| **Ausgabe** | MQTT über das LoxBerry-Gateway (mit Zeitstempel `ts`) und ein tokengeschützter HTTP-Endpunkt für den Miniserver (mit `ALTER` in Sekunden – über MQTT wäre das Alter beim Senden immer null) |
 | **Loxone** | Fertige Importdateien für virtuelle Eingänge und Ausgänge — nur mit den Größen, die der jeweilige Speicher wirklich liefert —, dazu eine vollständige Baustein-Liste zum 1:1-Nachbauen |
 | **Fehlersuche** | Rohregister lesen, Mitschnitt des Datenverkehrs, Selbstprüfung, die den eigenen Endpunkt wirklich aufruft |
 
@@ -42,7 +42,9 @@ Jedes Profil trägt zwei Angaben, die die Oberfläche ungeschönt anzeigt:
 
 * **quelle** – wo die Registeradressen herkommen
 * **stand** – `dokumentiert` (die Quelle ist benannt und nachlesbar) oder
-  `unbestätigt` (im Umlauf, aber hier nicht gemessen)
+  `unbestaetigt` (im Umlauf, aber hier nicht gemessen). **Genau so
+  geschrieben, ohne Umlaut** – der Prüfer der Oberfläche vergleicht mit
+  dieser Zeichenkette und weist `unbestätigt` ab.
 
 Eine Zahl, die niemand gemessen hat, darf nicht aussehen wie eine, die jemand
 gemessen hat.
@@ -90,7 +92,7 @@ gelten:
 
 * eine **Leistungsgrenze** je Speicher – ein höherer Wert wird abgewiesen,
   nicht gekappt;
-* ein **Ladefenster** – oberhalb des eingestellten Ladezustands wird ein
+* ein **Ladefenster** – auf oder oberhalb des eingestellten Ladezustands wird ein
   Ladezwang abgewiesen, unterhalb ein Entladezwang;
 * eine **Schreibbremse** – Mindestabstand zwischen zwei Befehlen an dasselbe
   Gerät;
@@ -118,6 +120,10 @@ gelten:
 | `automatik` | schaltend | Zwang sofort beenden |
 | `lebenszeichen` | schaltend | Sollwert am Leben halten |
 | `abruf` | schaltend | sofort abrufen statt auf den Takt zu warten |
+| `sperren` | schaltend | nicht entladen (erzwungenes Entladen mit 0 W) |
+| `evcc` | lesend | `soc`, `power`, `capacity` als JSON, Vorzeichen wie EVCC es erwartet |
+| `batteriemodus` `&modus=` | schaltend | Betriebsart für EVCC: 1 normal, 2 halten, 3 aus dem Netz laden |
+| `?selftest=1` | – | Selbsttest: `SELFTEST;OK=1;TOKEN=OK`, bei falschem Token 403 `ERR=TOKEN`, ohne eingerichtetes Token 403 `ERR=KEIN_TOKEN_EINGERICHTET`. Löst nichts aus |
 
 Das Token wird beim ersten Öffnen der Oberfläche erzeugt und mit `hash_equals`
 verglichen, also in gleichbleibender Zeit. Unbekannte Aktionen und Werte mit
@@ -137,18 +143,29 @@ Sie ist an **keinem** Speicher gemessen worden.
 
 **Belegt:**
 
-* der Modbus-CRC16 gegen ein unabhängiges Tabellenverfahren und gegen den
-  Prüffall der Modbus-Spezifikation (`02 07` → `4112`);
-* der Pylontech-Rahmenbau **byteweise gegen die Originalbibliothek**
-  (`Frankkkkk/python-pylontech`) über 448 Kombinationen aus Adresse, Befehl und
-  Datenfeld;
-* die Registerumrechnung für s16, u32 und Maskenfelder gegen feste Prüfwerte;
-* die erzeugten Loxone-Importdateien: wohlgeformt, CRLF, Tabulator,
-  Attributreihenfolge, und die Gegenprobe mit Anführungszeichen und Umlaut im
-  Gerätenamen.
+* der Modbus-CRC16 gegen den Prüffall der Modbus-Spezifikation
+  (`02 07` → `4112`);
+* das Längenfeld und die Prüfsumme eines Pylontech-Rahmens **gegen sich
+  selbst** – der Rahmen ist in sich stimmig und hat die vorgeschriebene Form
+  (20 Zeichen, `~` am Anfang, CR am Ende). **Gegen die Originalbibliothek und
+  gegen ein echtes Modul ist er NICHT gemessen**; die Ausgabe des Selbsttests
+  sagt das ausdrücklich;
+* die Registerumrechnung für s16, u32, f32 und Maskenfelder gegen feste
+  Prüfwerte, dazu die Bitentnahme für FC 1 gegen das Beispiel der
+  Spezifikation (`CD 6B 05`);
+* die Spiegelung einer Schreibantwort in vier Fällen;
+* dass kein Profil zwei Messgrößen aus demselben Register liest.
 
 Diese Prüfungen stecken als `--selbsttest` im Plugin und sind im Reiter Test
-als Knopf erreichbar.
+als Knopf erreichbar; es sind **18 Fälle**. Die erzeugte Loxone-Importdatei
+wird gesondert geprüft, im Reiter Test, und zwar auf Wohlgeformtheit – CRLF,
+Tabulatoren und Attributreihenfolge prüft dort **keine** Zeile.
+
+> Bis 0.9.15 stand an dieser Stelle mehr, als das Plugin hält: ein Vergleich
+> „byteweise gegen die Originalbibliothek über 448 Kombinationen", ein
+> „unabhängiges Tabellenverfahren" für den CRC und vier Prüfungen der
+> Importdatei. Keines davon steckt im Selbsttest. Die Zahl 448 kommt im
+> ganzen Plugin nicht vor.
 
 **Nicht belegt:**
 
@@ -161,6 +178,164 @@ als Knopf erreichbar.
 
 Vor dem ersten Zwangsbefehl: Rohregister lesen, Werte gegen die
 Herstelleranzeige halten, mit kleiner Leistung anfangen und am Gerät nachsehen.
+
+## Fassung 0.9.16 — die Durchsicht vom 04./05.09.2026
+
+Diese Fassung behebt 43 Befunde aus einer vollständigen Durchsicht. Keiner
+davon ist an einem Speicher gemessen worden — es ist keiner angeschlossen.
+Gemessen ist alles an den Dateien, an nachgebauten Prüfständen und an zwei
+fremden Quellen.
+
+### Was Sie prüfen sollten, wenn Sie aktualisieren
+
+* **Wer das Profil *Huawei LUNA2000 — Batteriepaket 1* benutzt, bekommt
+  andere Zahlen.** Sieben der acht Registeradressen waren falsch. Die
+  Messgrößen `SOH`, `UZMAX` und `UZMIN` entfallen ersatzlos — es gibt sie in
+  diesem Adressraum nicht; die zugehörigen virtuellen Eingänge in Loxone
+  bekommen keinen Wert mehr. Sie haben allerdings auch bisher keinen
+  richtigen bekommen. Die Importvorlage im Reiter *Einbindung in Loxone* bitte
+  neu erzeugen.
+* **Neue Messgröße `TBAT`** (Temperatur des Speichers als Ganzes, neben
+  `TMAX`/`TMIN` für die Zellen). Sie hängt hinten an, alle bestehenden Felder
+  behalten ihre Stelle und ihren Suchtext.
+* **Die Gruppe `dialout` wird nicht mehr bei der Installation gesetzt.** Wer
+  Pylontech über RS485 fährt, holt das einmal nach:
+  `sudo usermod -a -G dialout loxberry && sudo reboot`. Der Reiter *Test* sagt,
+  ob es nötig ist.
+* **Neu: `uninstall/uninstall`.** Beim Deinstallieren wird jetzt auch die
+  Zweitschrift der Konfiguration entfernt. Bisher überlebte sie das Entfernen
+  des Plugins, und eine Neuinstallation holte die alten Einstellungen wortlos
+  zurück. Wer seine Einstellungen behalten will, sichert sie vorher über den
+  Knopf *Einstellungen sichern*.
+
+### Konfiguration und Sicherung
+
+* **Eine beschädigte Konfiguration vernichtet nicht mehr die Zweitschrift.**
+  Bisher entschied die Selbstheilung nach der Form („leer oder `{}`"). Eine
+  halb geschriebene Datei — der Fall nach einem Stromausfall oder auf einer
+  vollen Platte — galt damit als heil, das Aktionstoken war fort, die
+  Oberfläche würfelte ein neues, und dieses wurde über die Zweitschrift
+  kopiert. Gemessen: nach **einem** Öffnen der Oberfläche waren Konfiguration
+  und Zweitschrift auf Werkseinstellung, ohne eine Zeile im Protokoll; jede
+  Adresse im Miniserver war stumm ungültig. Jetzt entscheidet der Inhalt, die
+  beschädigte Datei bleibt als `.kaputt` liegen, es gibt genau eine
+  Protokollzeile, und die Zweitschrift wird nur mitgezogen, wenn der
+  geschriebene Stand ein Token trägt.
+* **Das Zurückspielen prüft jeden Wert**, nicht nur die Schlüsselnamen — mit
+  derselben Tabelle, die auch das Formular benutzt. Bisher ging eine Datei mit
+  `soc_max = 9999` durch, und damit war die Ladeschranke des Dienstes
+  stillgelegt. Eine halb gültige Datei ändert **gar nichts**.
+* **Eine Sicherung ohne Aktionstoken löscht das bestehende nicht mehr.** Sie
+  heißt „kein Token gesichert", nicht „Token löschen".
+* Ein fehlgeschlagenes Speichern im Reiter *MQTT* wird gemeldet. Bisher blieb
+  es stumm.
+* Wird das Speichern der Einstellungen wegen einer beanstandeten Gerätezeile
+  abgelehnt, steht jetzt dabei, dass auch die **übrigen** Felder nicht
+  gespeichert wurden.
+
+### Endpunkt für den Miniserver
+
+* **Der unangemeldete Endpunkt legt nichts mehr an.** Bisher rief er die
+  Konfiguration vor der Tokenprüfung; die Selbstheilung darin legte den
+  Konfigurationsordner an und spielte die Zweitschrift zurück. Gemessen: ein
+  Aufruf ohne jedes Token antwortete mit 403 — und erzeugte die
+  Konfigurationsdatei samt altem Token.
+* **`?selftest=1` gibt es jetzt**, mit den drei festgelegten Antworten.
+* **Die Prüfung der Anfrage steht vor der Prüfung des Dienstes.** Bisher
+  bekamen `laden` ohne `watt` und ein unbekannter `modus` die Antwort
+  „Dienst läuft nicht" — und der Bediener startete den Dienst, statt seinen
+  Aufruf zu berichtigen.
+* **Abgewiesene Aufrufe hinterlassen eine Zeile im Protokoll** (gebremst, mit
+  der Adresse des Anrufers, nie mit der Zugangsmarke). Bisher gab es auf
+  keinem Weg einen Eintrag: „der Miniserver ruft nicht an" ließ sich nicht von
+  „er ruft an und wird abgewiesen" unterscheiden.
+* Fünf Adressen, die der Endpunkt seit jeher beantwortet, stehen jetzt auch im
+  Reiter *Einbindung in Loxone* zum Abschreiben: `summe`, `evcc`, `sperren`,
+  `abruf` und `batteriemodus`.
+
+### Steuerung und Dienst
+
+* **Ein Zwang wird nicht mehr vergessen, wenn seine Rücknahme scheitert.**
+  Totmannschaltung und Dienstende löschten die Sollwertdatei bisher
+  bedingungslos — auch dann, wenn der Speicher gerade nicht erreichbar war.
+  Damit blieb das Gerät im Zwang, und die Totmannschaltung konnte es nie
+  wieder versuchen. Beim Anhalten läuft dieser Weg bei **jedem** Update.
+* **Die Schreibbremse meldet keinen Erfolg mehr für einen Befehl, der nicht
+  abgesetzt wurde.** Er wird vorgemerkt und nachgeholt, sobald die Bremse
+  abgelaufen ist; verfällt er vorher, steht das im Protokoll.
+* **Bricht eine Schrittfolge nach dem ersten Schritt ab**, wird die Automatik
+  versucht; gelingt auch die nicht, bleibt ein Merker stehen, damit
+  Totmannschaltung und Dienstende es erneut versuchen. Bisher stand das Gerät
+  im Zwangsbetrieb, während das Plugin „kein Zwang" meldete.
+* **Modbus TCP prüft jetzt den MBAP-Kopf** (Vorgangsnummer, Geräteadresse,
+  Funktionscode). Eine verspätete Antwort auf eine frühere Frage wurde bisher
+  als Messwert des aktuellen Blocks übernommen.
+* **Ein Sollwert über 65535 wird abgewiesen statt gekappt.**
+* Die Wortreihenfolge (`wort`) gilt jetzt auch beim **Schreiben**.
+* Das Leerräumen der seriellen Schnittstelle hat eine Zeitschranke: ein
+  Dauerpegel auf der RS485-Leitung hängt den Dienst nicht mehr fest.
+
+### Registerumrechnung und Profile
+
+* **Maske und Schieben wirken nicht auf 32-Bit-Typen** — das ist unverändert,
+  aber jetzt beschrieben: ein Profil mit `maske` auf `u32`/`s32`/`f32` bekam
+  kommentarlos den ungemaskten Wert.
+* **BYD: `TMAX` und `TMIN` werden vorzeichenbehaftet gelesen.** Bisher `u16` —
+  bei Frost meldete `TMIN` 65531 statt −5, und der Übertemperaturalarm feuerte
+  genau verkehrt herum. Belegt durch das HVS-Datenblatt (Betrieb bis −10 °C)
+  und `ioBroker.bydhvs`.
+* **BYD: neu `TBAT`** aus `0x0508`.
+* **Huawei-Paketprofil auf die dokumentierten Adressen** (siehe oben).
+* **Neue Prüfzeile im Selbsttest:** kein Profil darf zwei Messgrößen aus
+  demselben Register lesen. Im Paketprofil lasen `IBAT` und `SOC` beide 38229.
+
+### Installation und Aktualisierung
+
+* **Eigene Profile und der Verlauf überleben jetzt eine Aktualisierung.** Beide
+  liegen unter `data/plugins/<ordner>/`, und der Installer räumt dieses
+  Verzeichnis bei jedem Upgrade ab; auf der Sicherungsliste stand bisher nur
+  die Konfigurations-JSON. Besonders unangenehm daran: die mitgelieferte
+  Beispieldatei wird neu ausgeliefert, der Ordner sah hinterher heil aus.
+* **Der Dienst läuft nach einem Upgrade wieder an**, wenn er vorher lief.
+  Bisher fiel dabei der Sollmerker, kein Hakenskript startete den Dienst, und
+  der Wächter tut ohne den Merker nichts — der Speicher wurde nach jedem
+  Update nicht mehr ausgelesen, bis jemand die Oberfläche öffnete.
+* **`preupgrade.sh` prüft, ob die Sicherung wirklich geschrieben wurde**, und
+  bricht sonst ab. Bisher meldete es `<OK>`, ohne den Rückgabewert von `cp`
+  anzusehen.
+* `preupgrade.sh` meldet nur noch dann „Dienst angehalten", wenn das auch
+  stimmt.
+* `postupgrade.sh` ruft `postinstall.sh` über `bash` auf, statt am
+  Ausführungsrecht zu scheitern und dabei „nicht gefunden" zu melden.
+* **Der minütliche Wächter meldet seine Fehler** über `logger`, statt sie nach
+  `/dev/null` zu schreiben.
+* Der Wächter-Neustart hat jetzt in **beiden** Zweigen eine Bremse.
+
+### Texte
+
+Die README versprach vier Prüfungen, die es nicht gibt — darunter einen
+Vergleich des Pylontech-Rahmenbaus „byteweise gegen die Originalbibliothek
+über 448 Kombinationen". Der Selbsttest sagt selbst, dass der Rahmen nur gegen
+sich selbst geprüft ist. Diese Stellen sind berichtigt; dazu das Ladefenster
+(„auf oder über" statt „über"), die Schreibweise `unbestaetigt`, die Warnung
+vor der Steuerung („wirkt sofort am Speicher, **sofern die Registeradressen
+Ihres Geräts stimmen**") und zwei anwendersichtbare Zeichenketten, die fest auf
+Deutsch standen.
+
+### Offen geblieben
+
+* **`ZYKLEN` bei BYD (`0x0511`) ist umstritten.** `sarnau` nennt das Register
+  „Charge Cycles", `ioBroker.bydhvs` liest `0x0511/0x0512` als **ein** u32
+  geteilt durch 10 und nennt es „Total charge" in kWh — und die dortige
+  Protokollmitschrift sagt für dasselbe Byte dasselbe. Trifft das zu, liest
+  das Feld das hohe Wort eines Energiezählers: es bliebe jahrelang 0 und
+  stiege dann je 6553,6 kWh Durchsatz um 1 — was einem Zyklenzähler zum
+  Verwechseln ähnlich sieht. Entschieden wird das an einer einzigen Ablesung:
+  ist `0x0512` ungleich 0, ist `ZYKLEN` Unsinn. Bis dahin bleibt das Feld
+  unverändert; der Vorbehalt steht im Profil.
+* Es ist weiterhin **kein Speicher angeschlossen**. Kein Profil, kein
+  Übertragungsweg, keine Vorzeichenrichtung und kein Schreibbefehl ist an
+  einem Gerät gemessen.
 
 ## Änderungen
 
@@ -236,8 +411,11 @@ Dazu drei Verbesserungen, die keine Fehlerbehebung sind:
   wenn für einen eingetragenen Pfad ein stabiler existiert. Umgestellt wird
   nichts von selbst.
 
-Der Reiter **Test** prüft alle sechs Korrekturen ohne angeschlossenen Speicher
-nach.
+Der Reiter **Test** prüft vier der sechs Korrekturen ohne angeschlossenen
+Speicher nach: den Pylontech-Parser, die Zeilenumbrüche ins Gateway, das
+ungültige UTF-8 und die eindeutigen Nebendateien. Für „SIGTERM wirkt sofort"
+und „`dienst.sh` löst Symlinks auf" gibt es **keine** Prüfzeile – dort steht
+nur, ob PHP die nötige Funktion überhaupt kennt.
 
 ## Fassung 0.9.14 — der Stat-Zwischenspeicher
 Die Protokollkappung (262 144 Byte bzw. 512 000 Byte) stand in

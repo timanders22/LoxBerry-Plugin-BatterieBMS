@@ -2,4 +2,16 @@
 # Batterie-Heimspeicher (BMS) - Waechter, minuetlich.
 # Startet den Dienst neu, wenn er laufen soll, aber nicht laeuft.
 # REPLACELBPBINDIR wird bei der Installation durch den bin-Pfad des Plugins ersetzt.
-"REPLACELBPBINDIR/dienst.sh" waechter >/dev/null 2>&1
+# B30: bis 0.9.15 stand hier '>/dev/null 2>&1'. Faellt der Waechter aus -
+# Platzhalter nicht ersetzt, dienst.sh ohne x-Bit, su nicht vorhanden -,
+# geschah das restlos still: kein Logeintrag, keine Meldung. Fuer den
+# wichtigsten Ausfallschutz des Plugins gab es damit keine Rueckmeldung.
+# Die normale Ausgabe bleibt unterdrueckt (der Waechter schweigt im Regelfall),
+# die FEHLERausgabe geht ins Systemprotokoll.
+WAECHTER="REPLACELBPBINDIR/dienst.sh"
+if [ ! -x "$WAECHTER" ]; then
+    logger -t batteriebms "Waechter nicht ausfuehrbar: $WAECHTER"
+    exit 1
+fi
+"$WAECHTER" waechter 2>&1 >/dev/null | logger -t batteriebms
+exit 0
