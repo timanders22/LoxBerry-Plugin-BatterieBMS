@@ -1537,6 +1537,16 @@ function bm_selbsttest()
         $zeilen[] = '[OK]   stty vorhanden';
     }
 
+    /* B46: erst die eigene Veroeffentlichung, dann das Gateway. Die
+     * Gateway-Zeile sagt nichts darueber, ob DIESES Plugin sendet. */
+    if (!empty($cfg['mqtt_ein'])) {
+        $zeilen[] = '[OK]   MQTT-Veroeffentlichung dieses Plugins ist eingeschaltet';
+    } else {
+        $zeilen[] = '[INFO] MQTT-Veroeffentlichung dieses Plugins ist AUSGESCHALTET - es geht '
+                  . 'nichts an den Broker und damit nichts an Loxone. Reiter MQTT. '
+                  . '(So ist es ab Werk.)';
+    }
+
     $m = bm_mqtt_zustand();
     if (!$m['gefunden']) {
         $fehler++;
@@ -1679,6 +1689,33 @@ function bm_selbsttest()
               . 'demselben Register (' . count(bm_profile()) . ' Profile geprueft'
               . ($dopOk ? '' : '): ' . implode('; ', $doppelt)) . ($dopOk ? ')' : '');
     if (!$dopOk) {
+        $fehler++;
+    }
+
+    // 1c. Zustaende gehen retained hinaus, Messwerte und Lebenszeichen nicht.
+    $zust = array('ok', 'geraet1/ok', 'geraet1/alarm', 'geraet1/sollart',
+                  'geraet1/fehlertext', 'evcc/mode');
+    $mess = array('ts', 'geraet1/ts', 'geraet1/soc', 'geraet1/pbat',
+                  'geraet1/sollwert_alter', 'geraet1/modul/1/tmax',
+                  'geraet1/modul/1/zelle/3');
+    $retFalsch = array();
+    foreach ($zust as $t) {
+        if (!bm_mqtt_retained($t)) { $retFalsch[] = $t . ' muesste retained sein'; }
+    }
+    foreach ($mess as $t) {
+        if (bm_mqtt_retained($t)) { $retFalsch[] = $t . ' darf NICHT retained sein'; }
+    }
+    $retOk = (count($retFalsch) === 0);
+    $retZahl = 0;
+    foreach (array_keys(bm_mqtt_themen()) as $t) {
+        if (bm_mqtt_retained($t)) { $retZahl++; }
+    }
+    $zeilen[] = ($retOk ? '[OK]   ' : '[FEHL] ') . 'MQTT: Zustaende retained, Messwerte '
+              . 'und Lebenszeichen nicht (' . $retZahl . ' von '
+              . count(bm_mqtt_themen()) . ' Themen retained, '
+              . count($zust) . ' + ' . count($mess) . ' Faelle geprueft'
+              . ($retOk ? ')' : '): ' . implode('; ', $retFalsch));
+    if (!$retOk) {
         $fehler++;
     }
 

@@ -31,6 +31,27 @@ mkdir -p "$PDATA/befehle" "$PDATA/antworten" "$PDATA/verlauf" "$PDATA/profile" \
 }
 chmod 755 "$PDATA" "$PLOG" "$PCONFIG" 2>/dev/null
 
+# ---------- Nur einmal je Einbau laufen (B47) ----------
+# LoxBerry 4.0.0.15 ruft beim Upgrade BEIDE Haken auf: erst postinstall, dann
+# postupgrade - und postupgrade leitet hierher weiter. Am 06.09.2026 am Geraet
+# gemessen: dieses Skript lief zweimal (08:06:33 und 08:06:35) und druckte den
+# Schlussblock ein zweites Mal. Die Weiterleitung in postupgrade.sh bleibt
+# trotzdem stehen, weil aeltere LoxBerry-Fassungen beim Upgrade
+# moeglicherweise nur postupgrade aufrufen.
+#
+# Der Merker traegt den Ordner UND die Fassung des laufenden Einbaus. Ein
+# spaeterer Einbau traegt eine andere Kennung und wird deshalb nicht
+# faelschlich uebersprungen.
+UEBERNOMMEN=0
+KENNUNG="$(basename "${1:-ohne-tempordner}")|${4:-ohne-fassung}"
+MARKE="$PDATA/.postinstall_lauf"
+if [ -f "$MARKE" ] && [ "$(cat "$MARKE" 2>/dev/null)" = "$KENNUNG" ]; then
+    echo "<INFO> postinstall lief in diesem Einbau bereits - der zweite Aufruf"
+    echo "<INFO> aus postupgrade.sh wird uebersprungen."
+    exit 0
+fi
+printf '%s' "$KENNUNG" > "$MARKE"
+
 [ -f "$PCONFIG/batteriebms.json" ] || echo '{}' > "$PCONFIG/batteriebms.json"
 chmod 600 "$PCONFIG/batteriebms.json" 2>/dev/null
 
@@ -40,7 +61,10 @@ CF="$PCONFIG/batteriebms.json"
 if [ -f "$BK" ]; then
     INHALT=$(cat "$CF" 2>/dev/null)
     if [ ! -s "$CF" ] || [ "$INHALT" = "{}" ]; then
-        cp -p "$BK" "$CF" && chmod 600 "$CF" && echo "<OK> Konfiguration aus Sicherung wiederhergestellt."
+        if cp -p "$BK" "$CF" && chmod 600 "$CF"; then
+            UEBERNOMMEN=1
+            echo "<OK> Konfiguration aus Sicherung wiederhergestellt."
+        fi
     fi
 fi
 
@@ -94,6 +118,7 @@ DBK="$BASE/config/plugins/$PFOLDER.backup.daten.tar"
 if [ -f "$DBK" ]; then
     if ( cd "$PDATA" && tar xf "$DBK" ) 2>/dev/null; then
         ZAHL=$(tar tf "$DBK" 2>/dev/null | grep -c '[^/]$')
+        UEBERNOMMEN=1
         echo "<OK> Eigene Profile und Verlauf zurueckgespielt ($ZAHL Datei(en))."
         rm -f "$DBK"
     else
@@ -114,6 +139,7 @@ if [ -f "$LIEF" ]; then
         AUSGABE=$("$PBIN/dienst.sh" start 2>&1)
         RC=$?
         if [ $RC -eq 0 ]; then
+            UEBERNOMMEN=1
             echo "<OK> Der Dienst lief vor dem Update und wurde wieder gestartet."
             echo "<INFO> $AUSGABE"
         else
@@ -127,8 +153,20 @@ if [ -f "$LIEF" ]; then
     fi
 fi
 
-echo "<OK> Installation abgeschlossen."
-echo "<INFO> Bitte die Plugin-Oberflaeche oeffnen, die Speicher eintragen und den"
-echo "<INFO> Dienst im Reiter Einstellungen starten. Der Reiter Test sagt danach"
-echo "<INFO> Zeile fuer Zeile, ob die Einrichtung traegt."
+# ---------- Ein Schlusswort, das zur Lage passt (B47) ----------
+# Bis 0.9.17 stand hier immer derselbe Rat: Speicher eintragen, Dienst
+# starten - auch direkt unter der Zeile "Der Dienst lief vor dem Update und
+# wurde wieder gestartet". Das Log widersprach sich damit innerhalb von zwei
+# Sekunden, und nach einer Aktualisierung war der Rat schlicht falsch.
+if [ "$UEBERNOMMEN" = "1" ]; then
+    echo "<OK> Aktualisierung abgeschlossen."
+    echo "<INFO> Einstellungen, eigene Profile und der Verlauf wurden uebernommen."
+    echo "<INFO> Es ist nichts weiter zu tun. Der Reiter Test sagt Zeile fuer Zeile,"
+    echo "<INFO> ob die Einrichtung weiter traegt."
+else
+    echo "<OK> Installation abgeschlossen."
+    echo "<INFO> Bitte die Plugin-Oberflaeche oeffnen, die Speicher eintragen und den"
+    echo "<INFO> Dienst im Reiter Einstellungen starten. Der Reiter Test sagt danach"
+    echo "<INFO> Zeile fuer Zeile, ob die Einrichtung traegt."
+fi
 exit 0

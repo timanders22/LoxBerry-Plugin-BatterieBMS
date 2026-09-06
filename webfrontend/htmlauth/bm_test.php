@@ -117,6 +117,25 @@ function bm_pruefungen()
         $zeilen[] = bm_pruefzeile(0, bm_t('TEST.F_LETZTER_FEHLER'), bm_e($zu['fehler']));
     }
 
+    /* Veroeffentlicht DIESES Plugin ueberhaupt? (B46)
+     *
+     * Bis 0.9.17 sagte der Reiter nur etwas ueber das GATEWAY - dessen
+     * Autostart aus der general.json - und ueber den Zeitstempel im Abbild.
+     * Beides wurde gruen, auch wenn dieses Plugin gar nichts sendet.
+     *
+     * Am 06.09.2026 am Geraet gemessen: Dienst lief, Gateway lief, 35 s auf
+     * batteriebms/# mitgehoert bei 30 s Takt - keine einzige Nachricht, und
+     * --retained-only ebenfalls nichts. Die Vorgabe ist 'mqtt_ein' => 0.
+     * Der Reiter konnte die beiden Faelle nicht unterscheiden und zeigte in
+     * beiden dieselben zwei gruenen Haken.
+     *
+     * Grau statt rot: Ausgeschaltet ist kein Fehler, sondern eine
+     * Entscheidung. Dasselbe Muster steht ein paar Zeilen weiter unten bei
+     * der Erweiterung sockets. */
+    $mqttEin = !empty($cfg['mqtt_ein']);
+    $zeilen[] = bm_pruefzeile($mqttEin ? 1 : -1, bm_t('TEST.F_MQTT_EIN'),
+        bm_t($mqttEin ? 'TEST.A_MQTT_EIN_JA' : 'TEST.A_MQTT_EIN_NEIN'));
+
     $m = bm_mqtt_zustand();
     if (!$m['gefunden']) {
         $zeilen[] = bm_pruefzeile(0, bm_t('TEST.F_MQTT'), bm_t('TEST.A_MQTT_NICHT_GEFUNDEN'));
@@ -261,7 +280,11 @@ function bm_pruefungen()
      * Gerechnet wird ohne zu senden - eine Pruefung darf nichts ausloesen. */
     $paare = bm_mqtt_paare(bm_loxone(), false);
     $ts = isset($paare['ts']) ? (int) $paare['ts'] : 0;
-    if ($abbildalter < 0) {
+    if (!$mqttEin) {
+        /* B46: Ein gruener Haken auf einen Wert, der nirgends hingeht, ist
+         * eine Zusage ohne Deckung. Grau ist hier die Wahrheit. */
+        $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_MQTT_TS'), bm_t('TEST.A_MQTT_TS_AUS'));
+    } elseif ($abbildalter < 0) {
         $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_MQTT_TS'), bm_t('TEST.A_MQTT_TS_NIE'));
     } else {
         $zeilen[] = bm_pruefzeile($ts > 0 ? 1 : 0, bm_t('TEST.F_MQTT_TS'),

@@ -2494,7 +2494,11 @@ function bm_mqtt_senden(array $paare, $praefix)
         if ($thema === '') {
             continue;
         }
-        $msg = 'publish ' . $thema . ' ' . $wert;
+        /* Zustaende retained, alles andere nicht (B45). Beide Woerter
+         * stehen bewusst als Literal da - so bleibt die Sendefunktion fuer
+         * mqtt_bestand.py erkennbar, und man sieht beim Lesen sofort, dass es
+         * zwei Wege gibt. */
+        $msg = (bm_mqtt_retained($k) ? 'retain ' : 'publish ') . $thema . ' ' . $wert;
         @socket_sendto($s, $msg, strlen($msg), 0, '127.0.0.1', $z['udpport']);
     }
     socket_close($s);
@@ -2628,6 +2632,52 @@ function bm_mqtt_paare(array $abbild, $melden = true)
 }
 
 /** Alle Themen, die der Dienst veroeffentlicht, mit ihrer Bedeutung. */
+/**
+ * Welche Themen tragen einen ZUSTAND und gehen deshalb retained hinaus?
+ *
+ * Hausstandard seit 03.09.2026 (Regeln/07): Zustaende retained, damit Loxone
+ * nach einem Neustart des Miniservers oder des Gateways sofort den Stand hat;
+ * Messwerte mit Zeitbezug NICHT retained, damit kein alter Wert als aktuell
+ * erscheint; das Lebenszeichen nie.
+ *
+ * Bis 0.9.16 sendete dieses Plugin ausnahmslos 'publish' - also nichts
+ * retained. Gemessen am 06.09.2026 am Geraet: der UDP-Eingang des Gateways
+ * kennt genau vier Befehle (`sbin/mqttgateway.pl` des LoxBerry, Zeile 293),
+ * darunter `retain <thema> <wert>`; Geschwisterplugins benutzen ihn laengst
+ * (Midea2Lox 133-mal, Intercom 12-mal). Wirkung des alten Standes: nach einem
+ * Neustart stand in Loxone kein `ok`, kein `alarm` und kein `sollart`, bis der
+ * naechste Durchlauf sendete - und lief der Dienst nicht, gar nicht mehr.
+ *
+ * Entschieden wird am LETZTEN Namensteil, nicht am ganzen Thema: dieselbe
+ * Groesse heisst je Speicher `geraet1/ok`, `geraet2/ok`, und die Modulthemen
+ * liegen zwei Ebenen tiefer. `sollwert_alter` ist ein eigener Name und faellt
+ * deshalb nicht unter `sollwert` - es ist ein Alter, kein Zustand.
+ */
+function bm_mqtt_zustandsthemen()
+{
+    return array(
+        'ok',           // laeuft der Abruf? je Speicher und insgesamt
+        'geraete',      // wie viele Speicher eingerichtet sind
+        'fehler',       // Fehlerbits des BMS
+        'fehlertext',   // dazu der Klartext
+        'warnung',      // Warnbits
+        'alarm',        // Sammelmerker
+        'alarmtext',    // dazu der Klartext
+        'modus',        // Betriebsart des Speichers
+        'sollwert',     // laufender Zwang als Text
+        'sollart',      // derselbe als Zahl
+        'sollquelle',   // wer ihn gesetzt hat
+        'mode',         // evcc/mode
+    );
+}
+
+/** Geht dieses Thema retained hinaus? */
+function bm_mqtt_retained($thema)
+{
+    $teile = explode('/', (string) $thema);
+    return in_array(end($teile), bm_mqtt_zustandsthemen(), true);
+}
+
 function bm_mqtt_themen()
 {
     return array(
@@ -3437,16 +3487,16 @@ function bm_vorlage_ausgang($nummer = 1)
     $n = (int) $nummer;
     $cmds = array(
         array('title' => 'Laden erzwingen (W)', 'analog' => 1,
-              'comment' => 'Analogwert in Watt. 0 gibt die Regie zurueck.',
+              'comment' => 'Analogwert in Watt. 0 gibt die Regie zurück.',
               'on' => $basis . '&aktion=laden&geraet=' . $n . '&watt=<v.0>', 'off' => ''),
         array('title' => 'Entladen erzwingen (W)', 'analog' => 1,
-              'comment' => 'Analogwert in Watt. 0 gibt die Regie zurueck.',
+              'comment' => 'Analogwert in Watt. 0 gibt die Regie zurück.',
               'on' => $basis . '&aktion=entladen&geraet=' . $n . '&watt=<v.0>', 'off' => ''),
         array('title' => 'Automatik', 'analog' => 0,
               'comment' => 'Beendet den Zwang sofort; der Speicher regelt wieder selbst.',
               'on' => $basis . '&aktion=automatik&geraet=' . $n, 'off' => ''),
         array('title' => 'Lebenszeichen', 'analog' => 0,
-              'comment' => 'Haelt den Sollwert am Leben. Ohne Lebenszeichen faellt der '
+              'comment' => 'Hält den Sollwert am Leben. Ohne Lebenszeichen fällt der '
                          . 'Speicher nach der eingestellten Totmannzeit in die Automatik.',
               'on' => $basis . '&aktion=lebenszeichen&geraet=' . $n, 'off' => ''),
     );

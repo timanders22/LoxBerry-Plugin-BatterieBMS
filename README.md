@@ -10,6 +10,38 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.17
+
+- **Das Auswahlfeld zeichnet seinen Pfeil selbst.** Bis 0.9.16 kam er von der
+  Oberfläche des LoxBerry. Am 05.09.2026 am Gerät gemessen (LoxBerry 4.0.0.15,
+  `system/css/components.css`): deren Regel `.lb-content select`
+  gibt es erst seit der neuen Oberfläche, und jede eigene Feldregel mit der
+  Kurzform `background:` löscht sie wieder. Darauf soll sich eine
+  Plugin-Oberfläche nicht verlassen (`Regeln/04`).
+
+- **Zustände gehen jetzt zurückbehalten (retained) hinaus.** Bis 0.9.16
+  sendete das Plugin ausnahmslos `publish`, also nichts retained. Am
+  06.09.2026 am Gerät gemessen (`sbin/mqttgateway.pl` des LoxBerry, Zeile
+  293): der UDP-Eingang des Gateways kennt genau vier Befehle, darunter
+  `retain <thema> <wert>` — Geschwisterplugins benutzen ihn längst
+  (Midea2Lox 133-mal, Intercom 12-mal). Nachgemessen am echten Datagramm:
+  von 42 Themen gehen jetzt **13** retained hinaus, 29 weiter ohne.
+
+  Retained sind die **Zustände** — je Speicher `ok`, `fehler`, `fehlertext`,
+  `warnung`, `alarm`, `alarmtext`, `modus`, `sollwert`, `sollart`,
+  `sollquelle`, dazu `ok` und `geraete` insgesamt sowie `evcc/mode`. Nicht
+  retained bleiben alle **Messwerte** (`soc`, `ubat`, `ibat`, `pbat`,
+  Temperaturen, `restkwh`, `restzeit`, die Modul- und Zellthemen) und das
+  **Lebenszeichen** (`ts`, `sollwert_alter`) — ein alter Messwert, der als
+  aktueller erscheint, ist schlimmer als gar keiner.
+
+  **Was das für Sie ändert:** Nach einem Neustart des Miniservers oder des
+  Gateways stand in Loxone bisher kein `ok`, kein `alarm` und kein `sollart`,
+  bis der nächste Durchlauf sendete — bei der Vorgabe 30 Sekunden, und wenn
+  der Dienst nicht lief, gar nicht mehr. Ein stehender Sammelalarm war in
+  dieser Zeit unsichtbar. Die Namenstabelle im Reiter **MQTT** führt jetzt je
+  Thema eine Spalte, ob es zurückbehalten wird.
+
 ## Was es kann
 
 | | |

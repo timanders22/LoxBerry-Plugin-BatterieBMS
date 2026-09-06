@@ -719,6 +719,25 @@ if ($bm_rahmen) {
 .sm-log { background: #1e1e1e; color: #d4d4d4; font-family: Consolas, "Courier New", monospace;
     font-size: 0.82em; padding: 12px; border-radius: 8px; max-height: 480px; overflow: auto;
     white-space: pre-wrap; }
+/* Ein Auswahlfeld muss man als Auswahlfeld erkennen. Nachgezogen am
+   05.09.2026 nach Regeln/04; Wortlaut aus VORLAGE_hausstandard.css.html.
+
+   Am Geraet gemessen (LoxBerry 4.0.0.15, components.css): die Rahmen-CSS
+   zeichnet seit der neuen Oberflaeche selbst einen Pfeil - Regel
+   ".lb-content select". Darauf kann sich eine Plugin-Oberflaeche nicht
+   verlassen: die Regel gibt es erst seit dieser Fassung, und die eigene
+   Feldregel loescht sie, sobald sie die Kurzform "background:" benutzt.
+   Dann steht ein Auswahlfeld da, das aussieht wie ein Textfeld.
+
+   Die Raute im SVG wird als %23 geschrieben: eine rohe Raute beendet in
+   einer CSS-Adresse den Wert. */
+.sm-wrap select {
+    appearance: none; -webkit-appearance: none; -moz-appearance: none;
+    background-image: url("data:image/svg+xml;charset=UTF-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='9' viewBox='0 0 14 9'%3E%3Cpath d='M1 1l6 6 6-6' fill='none' stroke='%234f7d17' stroke-width='2'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 10px center;
+    padding-right: 32px; cursor: pointer; }
+.sm-tbl select { padding-right: 28px; background-position: right 7px center; }
+
 </style>
 <div class="sm-wrap">
 
@@ -1155,12 +1174,24 @@ foreach ($bm_hinweise as $bm_h) {
 <p class="sm-hilfe"><?= bm_t('MQTT.THEMEN_ERKLAERUNG') ?></p>
 <div class="sm-hinweis"><?= bm_t('MQTT.TS_HINWEIS') ?></div>
 <table class="sm-tbl">
-<tr><th><?= bm_e(bm_t('MQTT.T_THEMA')) ?></th><th><?= bm_e(bm_t('MQTT.T_BEDEUTUNG')) ?></th></tr>
-<?php foreach (bm_mqtt_themen() as $bm_thema => $bm_schluessel) { ?>
+<tr><th><?= bm_e(bm_t('MQTT.T_THEMA')) ?></th><th><?= bm_e(bm_t('MQTT.T_BEDEUTUNG')) ?></th>
+    <th><?= bm_e(bm_t('MQTT.T_RETAINED')) ?></th></tr>
+<?php
+/* Die Spalte kommt aus derselben Funktion wie der Sendeweg (B45) - sonst
+ * stehen hier Zusagen, die der Dienst nicht haelt. Der Hausstandard verlangt
+ * ausdruecklich, dass je Thema dabeisteht, ob es retained ist. */
+$bm_ret = 0;
+foreach (bm_mqtt_themen() as $bm_thema => $bm_schluessel) {
+    $bm_r = bm_mqtt_retained($bm_thema);
+    if ($bm_r) { $bm_ret++; }
+?>
 <tr><td><span class="sm-mono"><?= bm_e($bm_cfg['mqtt_topic'] . '/' . $bm_thema) ?></span></td>
-    <td><?= bm_t($bm_schluessel) ?></td></tr>
+    <td><?= bm_t($bm_schluessel) ?></td>
+    <td><?= bm_e(bm_t($bm_r ? 'MQTT.RETAINED_JA' : 'MQTT.RETAINED_NEIN')) ?></td></tr>
 <?php } ?>
 </table>
+<p class="sm-hilfe"><?= bm_e(sprintf(bm_t('MQTT.RETAINED_ZAHL'),
+    $bm_ret, count(bm_mqtt_themen()))) ?></p>
 <p class="sm-hilfe"><?= bm_t('MQTT.PLATZHALTER') ?></p>
 </div>
 
