@@ -54,6 +54,18 @@ PCONFIG="$LBHOMEDIR/config/plugins/$PNAME"
 PID="$PDATA/dienst.pid"
 SOLL="$PDATA/soll_laufen"
 LOGDATEI="$PLOG/batteriebms.log"
+# Eigene Datei fuer alles, was NEBEN dem Protokoll anfaellt: Meldungen des
+# Starts und alles, was das PHP-Skript nach stderr schreibt, bevor sein
+# Protokoll steht (Parsefehler, fehlende Erweiterung, Abbruch beim Laden).
+#
+# Bis 0.9.18 ging diese Ausgabe mit ">> $LOGDATEI" in DIESELBE Datei, in die
+# bin/bms_dienst.php schreibt. Das haelt einen zweiten, anhaengenden Deskriptor auf diese
+# Datei offen. Verschwindet sie - Ramdisk geleert, log_maint - dann zeigt der
+# Deskriptor dieser Shell weiter auf die geloeschte Datei, und was er traegt,
+# sieht niemand mehr. Am Geraet gemessen (06.09.2026): PID 532248 hielt batteriebms.log auf
+# den Deskriptoren 1 und 2 offen, beide auf der geloeschten Datei.
+# Regel: genau einer schreibt in eine Protokolldatei.
+STARTLOG="$PLOG/batteriebms_start.log"
 SKRIPT="$SELF/bms_dienst.php"
 
 mkdir -p "$PDATA" "$PLOG" 2>/dev/null
@@ -191,16 +203,18 @@ starten() {
         return 1
     fi
     touch "$SOLL"
-    # Ausgabe geht in die Logdatei. Das PHP-Skript protokolliert deshalb NICHT
-    # zusaetzlich nach stdout - sonst stuende jede Zeile doppelt darin.
-    nohup php "$SKRIPT" >> "$LOGDATEI" 2>&1 &
+    # Die Ausgabe des Dienstes geht in die Startdatei, NICHT in das Protokoll:
+    # dort schreibt allein das Programm selbst. Beim Start gekappt, damit sie
+    # nur die Ausgabe EINES Laufes sammelt und nicht unbegrenzt waechst.
+    : > "$STARTLOG"
+    nohup php "$SKRIPT" >> "$STARTLOG" 2>&1 &
     echo $! > "$PID"
     sleep 1
     if laeuft; then
         echo "gestartet (PID $(cat "$PID"))"
         return 0
     fi
-    echo "FEHLER: Start fehlgeschlagen - siehe $LOGDATEI"
+    echo "FEHLER: Start fehlgeschlagen - siehe $STARTLOG und $LOGDATEI"
     rm -f "$PID"
     return 1
 }
@@ -256,7 +270,7 @@ case "$1" in
             fi
             touch "$NEUSTARTMERKER"
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Waechter: Dienst lief nicht, wird neu gestartet." >> "$LOGDATEI"
-            starten >> "$LOGDATEI" 2>&1
+            starten >> "$STARTLOG" 2>&1
         elif [ -f "$SOLL" ] && laeuft && abbild_steht; then
             # Der Prozess lebt, arbeitet aber nicht mehr. Bis 0.9.6 hat der
             # Waechter genau das nicht gesehen: er fragte nur, ob eine PID da
@@ -266,8 +280,8 @@ case "$1" in
             # gewesen waere.
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Waechter: Der Dienst laeuft (PID $(cat "$PID" 2>/dev/null)), hat aber seit $(abbild_alter) s kein Abbild mehr geschrieben (Grenze $(abbild_grenze) s). Er wird neu gestartet." >> "$LOGDATEI"
             touch "$NEUSTARTMERKER"
-            anhalten >> "$LOGDATEI" 2>&1
-            starten >> "$LOGDATEI" 2>&1
+            anhalten >> "$STARTLOG" 2>&1
+            starten >> "$STARTLOG" 2>&1
         fi
         ;;
     *)
