@@ -10,6 +10,17 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.19
+
+- **Nur Schreibweise.** Die Sprachdateien führten für sichtbare Zeichen
+  noch HTML-Entitäten (`&mdash;`, `&auml;`, `&bdquo;`); jetzt stehen dort die
+  Zeichen selbst — in dieser Fassung **4** Stück. Das ist der Hausbeschluss
+  vom 14.08.2026: mit direkten Zeichen darf `htmlspecialchars` folgenlos
+  zweimal laufen, und die Doppelmaskierung fällt als Fehlerklasse weg.
+  `&nbsp;` und `&shy;` bleiben Entität (unsichtbares Zeichen im Quelltext ist
+  eine Wartungsfalle), ebenso die bedeutungstragenden `&amp;`, `&lt;`, `&gt;`,
+  `&quot;` und `&apos;`. **Am Verhalten ändert sich nichts.**
+
 ## Neu in 0.9.18
 
 ### Die Ausgabe des Dienstes ging in das Protokoll — und hielt es fest
