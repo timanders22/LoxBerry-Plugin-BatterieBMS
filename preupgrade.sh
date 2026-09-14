@@ -67,9 +67,15 @@ elif [ -f "$PID" ]; then
         if kill -0 "$P" 2>/dev/null && grep -qa "bms_dienst.php" "/proc/$P/cmdline" 2>/dev/null; then
             kill -9 "$P" 2>/dev/null || true
         fi
+        # Nur HIER gemeldet: eine liegengebliebene PID-Datei allein ist kein
+        # laufender Dienst. Bis 0.9.19 stand die Zeile hinter dem schliessenden
+        # fi - der Zweig darueber wertet Rueckgabewert UND Ausgabe aus (B28),
+        # diese Rueckfallebene tat es nicht.
+        echo "<INFO> Laufender Dienst angehalten (Rueckfallebene ohne dienst.sh)."
+    else
+        echo "<INFO> Der Dienst lief nicht - es war nichts anzuhalten."
     fi
     rm -f "$PID"
-    echo "<INFO> Laufender Dienst angehalten (Rueckfallebene ohne dienst.sh)."
 fi
 
 # ---------- Konfiguration sichern ----------

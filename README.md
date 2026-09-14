@@ -10,6 +10,35 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.20
+
+**Das Installationsprotokoll behauptete, einen Dienst angehalten zu haben, der
+gar nicht lief.** Die Meldung „Laufender Dienst angehalten." hing allein an der
+Existenz der PID-Datei — und zwar in der Rückfallebene, die greift, wenn
+`dienst.sh` fehlt. Eine liegengebliebene PID-Datei ist kein laufender
+Dienst. Sie steht jetzt **innerhalb** der Lebendprüfung, die es
+darüber ohnehin schon gab; lag die Datei nur herum, heißt es „Der Dienst lief
+nicht — es war nichts anzuhalten."
+
+**Am Verhalten ändert sich nichts** — es wird nichts anders beendet, nur anders
+gemeldet.
+
+Geeicht am Gerät (LoxBerry 4.0.0.15), in beide Richtungen, gegen einen
+Wegwerfbaum mit einer nachweislich toten Prozessnummer: 0.9.19 meldete dort
+„Laufender Dienst angehalten.", 0.9.20 meldet „Der Dienst lief nicht". Ohne
+PID-Datei kommt in beiden Fassungen keine Zeile.
+
+### Zeilenenden
+
+`plugin.cfg`, `release.cfg`, `prerelease.cfg` und beide `language_*.ini`
+liegen jetzt als LF statt CRLF — Hausbrauch seit 13.09.2026, umgestellt je
+Linie bei ihrer nächsten Veröffentlichung. Diese Linie führt **keine**
+`.gitattributes`, der Wagenrücklauf lag also bis 0.9.19 wirklich im
+Tag-Archiv. Der **Inhalt** dieser Dateien ist unverändert: rechnet man die
+Wagenrückläufe heraus, sind alt und neu byteweise gleich (nachgemessen). Für
+bestehende Installationen ändert das nichts — `plugininstall.pl` streift die
+Wagenrückläufe ohnehin ab, und `Config::Simple` liest beide Stile.
+
 ## Neu in 0.9.19
 
 - **Nur Schreibweise.** Die Sprachdateien führten für sichtbare Zeichen
