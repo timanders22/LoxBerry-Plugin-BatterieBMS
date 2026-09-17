@@ -677,6 +677,10 @@ if ($bm_rahmen) {
 .sm-tbl { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 0.9em; }
 .sm-tbl th, .sm-tbl td { border: 1px solid #ccc; padding: 5px 7px; text-align: left; vertical-align: top; }
 .sm-tbl th { background: #eef3e6; font-weight: 600; }
+/* Wortgetreu aus VORLAGE_hausstandard.css.html (B54, 17.09.2026). Fehlte bis
+   0.9.21 - die Speichertabelle hatte deshalb keinen Rollbehaelter. */
+.sm-breit { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 10px 0; }
+.sm-breit .sm-tbl { margin: 0; min-width: 760px; }
 .sm-mono { font-family: Consolas, "Courier New", monospace; background: #f0f0f0;
     padding: 1px 4px; border-radius: 3px; font-size: 0.94em; word-break: break-all; }
 .sm-pre { background: #f4f4f4; border: 1px solid #ccc; padding: 10px; font-size: 0.85em;
@@ -863,6 +867,12 @@ $bm_vtag = (isset($_GET['vtag']) && preg_match('/^[0-9]{8}$/', (string) $_GET['v
 
 <h2><?= bm_e(bm_t('EINST.H_GERAETE')) ?></h2>
 <div class="sm-hinweis"><?= bm_t('EINST.GERAETE_ERKLAERUNG') ?></div>
+<?php /* Rollbehaelter (B54, 17.09.2026, Regeln/04): 13 Spalten mit
+   Eingabefeldern. Das Auswahlfeld Profil streckt sich auf den laengsten
+   Profilnamen (472 px), und lb-content schneidet seitlich ab. Im Browser
+   gemessen bei 2560 px Fensterbreite: Vorzeichen 0 von 133 px sichtbar,
+   Schreiben 0 von 88 px - beide Felder waren nicht erreichbar. */ ?>
+<div class="sm-breit">
 <table class="sm-tbl">
 <tr><th style="width:24px;">#</th><th><?= bm_e(bm_t('EINST.T_NAME')) ?></th>
     <th><?= bm_e(bm_t('EINST.T_PROFIL')) ?></th>
@@ -910,6 +920,7 @@ for ($bm_i = 0; $bm_i < 6; $bm_i++) {
 </tr>
 <?php } ?>
 </table>
+</div>
 <?php
 /* Die tatsaechlich vorhandenen seriellen Schnittstellen zur Auswahl anbieten.
  *

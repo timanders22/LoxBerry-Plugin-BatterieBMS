@@ -2471,18 +2471,15 @@ function bm_mqtt_senden(array $paare, $praefix)
         return false;
     }
     foreach ($paare as $k => $v) {
-        if ($v === null || $v === '') {
-            continue;   // fehlender Wert: nichts senden statt eine erfundene 0
-        }
         // Der UDP-Eingang des Gateways wertet einen Zeilenumbruch als Ende
         // des Befehls. Ein mehrzeiliger Wert - etwa eine Fehlermeldung des
         // Betriebssystems oder die Ausgabe von stty - zerlegt die Uebertragung
         // deshalb in Bruchstuecke, aus denen das Gateway erfundene Topics
         // bildet. Auch ein Tabulator hat dort nichts zu suchen: Leerzeichen
         // trennt Thema und Wert.
-        $wert = bm_mqtt_wert_saeubern($v);
-        if ($wert === '') {
-            continue;
+        $wert = bm_mqtt_nutzlast($k, $v);
+        if ($wert === null) {
+            continue;   // fehlender Messwert: nichts senden statt einer erfundenen 0
         }
         /* Auch THEMA und Schluessel saeubern, nicht nur den Wert (B41).
          * Bis 0.9.15 lief nur der Wert durch die Reinigung. Das Praefix kommt
@@ -2500,6 +2497,17 @@ function bm_mqtt_senden(array $paare, $praefix)
          * zwei Wege gibt. */
         $msg = (bm_mqtt_retained($k) ? 'retain ' : 'publish ') . $thema . ' ' . $wert;
         @socket_sendto($s, $msg, strlen($msg), 0, '127.0.0.1', $z['udpport']);
+        /* 5 ms Pause je Datagramm (B50, 17.09.2026).
+         *
+         * Der UDP-Eingang des Gateways verwirft unter Last, und sendto()
+         * meldet auch fuer ein verworfenes Datagramm Erfolg (Regeln/07). Am
+         * Geraet gemessen (Fensterbilanz 0.12.9, 16.09.2026): ohne Pause kamen
+         * von 90 Datagrammen 0, 0 und 6 an, mit 5 ms alle 90. Ein Speicher
+         * mit Zelldaten schickt hier weit ueber hundert Themen je Durchlauf.
+         * Bis 0.9.21 lief diese Schleife ohne Pause; die Bestandsaufnahme vom
+         * 16.09.2026 fuehrte die Linie trotzdem als 'hat Pause' - der Sucher
+         * hatte ein usleep() in bm_pyl_befehl() gefunden, nicht hier. */
+        usleep(BM_MQTT_PAUSE_US);
     }
     socket_close($s);
     return true;
@@ -2509,6 +2517,38 @@ function bm_mqtt_senden(array $paare, $praefix)
  * Dieselbe Bereinigung wie beim Senden - fuer die Selbstpruefung, damit sich
  * nachweisen laesst, dass sie greift.
  */
+if (!defined('BM_MQTT_PAUSE_US')) {
+    define('BM_MQTT_PAUSE_US', 5000);   // Mikrosekunden zwischen zwei Datagrammen (B50)
+}
+
+/**
+ * Die Nutzlast fuer EIN Thema - oder null, wenn nichts hinausgehen soll.
+ *
+ * Eine Quelle fuer den Sendeweg und den Selbsttest (B49, 17.09.2026).
+ *
+ * Bis 0.9.21 wurde jeder leere Wert uebersprungen. Fuer Messwerte ist das
+ * richtig: nichts senden statt einer erfundenen 0. Seit 0.9.17 gehen aber
+ * die Zustaende retained hinaus (B45) - und ein Zustand, der LEER wird, kam
+ * dann nie an. Ein Speicher, der sich erholte, behielt seinen alten
+ * fehlertext im Broker, ein abgeklungener Alarm seinen alarmtext, und
+ * sollquelle nannte weiter 'loxone', waehrend sollwert schon 'automatik'
+ * sagte - nach jedem Neustart des Miniservers wieder.
+ *
+ * Eine leere Nutzlast waere keine Loesung: sie LOESCHT ein zurueckbehaltenes
+ * Thema (am Broker gemessen 14.09.2026). Deshalb der Strich - und zwar NACH
+ * dem Saeubern, weil erst die Saeuberung aus '  ' oder einem blanken
+ * Zeilenumbruch eine leere Zeichenkette macht (Regeln/07, Sprachsteuerung
+ * 0.11.5).
+ */
+function bm_mqtt_nutzlast($thema, $v)
+{
+    $wert = ($v === null) ? '' : bm_mqtt_wert_saeubern($v);
+    if ($wert !== '') {
+        return $wert;
+    }
+    return bm_mqtt_retained($thema) ? '-' : null;
+}
+
 function bm_mqtt_wert_saeubern($v)
 {
     $wert = str_replace(array("\r\n", "\r", "\n", "\t"), ' ', (string) $v);
@@ -3198,6 +3238,13 @@ function bm_selbsttest_endpunkt($aktion = 'status')
 "));
     $gut = ($code === 200) && (strpos($erste, 'BMS;') === 0 || strpos($erste, 'LISTE;') === 0
                                || strpos($erste, 'SUMME;') === 0);
+    /* Seit B51 antwortet der Endpunkt ohne Daten mit 503 und nennt den Grund.
+     * Das ist die vorgesehene Antwort, keine falsche - sonst stuende auf jeder
+     * Anlage ohne eingerichteten Speicher hier ein Kreuz. */
+    if (!$gut && $code === 503 && strpos($erste, ';GRUND=') !== false
+        && (strpos($erste, 'BMS;') === 0 || strpos($erste, 'SUMME;') === 0)) {
+        $gut = true;
+    }
     return array($gut ? 1 : 0, $code, $erste !== '' ? $erste : bm_t('TEST.A_EP_LEER'), $url);
 }
 

@@ -202,6 +202,12 @@ starten() {
         echo "FEHLER: Konfiguration fehlt ($PCONFIG/batteriebms.json). Erst die Oberflaeche oeffnen."
         return 1
     fi
+    # Der Sollmerker wird VOR dem Start gesetzt und bei einem Fehlstart NICHT
+    # entfernt. Begruendete Ausnahme zu Regeln/03 ('Der Sollmerker wird erst
+    # nach erfolgreicher Pruefung gesetzt oder im Fehlerzweig entfernt') -
+    # Entscheidung des Hausherrn vom 17.09.2026: bei einem Speicherregler ist
+    # der erneute Versuch die sicherere Richtung. Die Protokollflut, vor der
+    # die Regel warnt, verhindert die 600-s-Bremse im Waechterzweig (B31).
     touch "$SOLL"
     # Die Ausgabe des Dienstes geht in die Startdatei, NICHT in das Protokoll:
     # dort schreibt allein das Programm selbst. Beim Start gekappt, damit sie

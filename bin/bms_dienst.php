@@ -1719,6 +1719,37 @@ function bm_selbsttest()
         $fehler++;
     }
 
+    // 1d. Kein Datagramm traegt eine leere Nutzlast; ein zurueckbehaltener
+    //     Zustand, der leer wird, geht als Strich hinaus (B49).
+    $nlFaelle = array(
+        array('geraet1/fehlertext', '', '-'),
+        array('geraet1/fehlertext', " \r\n\t ", '-'),
+        array('geraet1/alarmtext', null, '-'),
+        array('geraet1/sollquelle', '', '-'),
+        array('geraet1/modus', null, '-'),
+        array('geraet1/fehlertext', 'Zeitueberschreitung', 'Zeitueberschreitung'),
+        array('geraet1/soc', null, null),
+        array('geraet1/soc', '', null),
+        array('geraet1/modul/1/zelle/3', ' ', null),
+        array('geraet1/soc', 57, '57'),
+        array('geraet1/ok', 0, '0'),
+    );
+    $nlFalsch = array();
+    foreach ($nlFaelle as $f) {
+        $ist = bm_mqtt_nutzlast($f[0], $f[1]);
+        if ($ist !== $f[2] || $ist === '') {
+            $nlFalsch[] = $f[0] . ' ' . addcslashes(var_export($f[1], true), "\r\n\t") . ' -> '
+                        . var_export($ist, true) . ' statt ' . var_export($f[2], true);
+        }
+    }
+    $nlOk = (count($nlFalsch) === 0);
+    $zeilen[] = ($nlOk ? '[OK]   ' : '[FEHL] ') . 'MQTT: keine leere Nutzlast; ein leerer '
+              . 'Zustand geht als Strich hinaus, ein leerer Messwert gar nicht ('
+              . count($nlFaelle) . ' Faelle' . ($nlOk ? ')' : '): ' . implode('; ', $nlFalsch));
+    if (!$nlOk) {
+        $fehler++;
+    }
+
     // 2. Zeilenumbrueche duerfen nicht ins UDP-Gateway.
     $roh = "Fehler in Zeile 1\nund Zeile 2\r\nund\tnoch was";
     $sauber = bm_mqtt_wert_saeubern($roh);
@@ -2013,6 +2044,30 @@ $bm_argv = isset($argv) ? $argv : array();
 if (in_array('--selbsttest', $bm_argv, true)) {
     exit(bm_selbsttest());
 }
+
+/* PHP-Fehler des laufenden Dienstes gehoeren ins Protokoll (B48, 17.09.2026).
+ *
+ * dienst.sh startet den Dienst mit 'nohup php ... >> batteriebms_start.log
+ * 2>&1'. Den Deskriptor haelt damit die SCHALE, nicht PHP. Loescht
+ * log_maint.pl die Startdatei - auf der RAM-Scheibe binnen einer Stunde,
+ * wenn nichts hineinschreibt (Regeln/06) -, zeigen stdout und stderr auf
+ * einen geloeschten Inode. Am Geraet gemessen (17.09.2026, PID 432081, seit
+ * 47 Stunden laufend): Deskriptor 1 und 2 -> batteriebms_start.log
+ * (deleted); dazu display_errors = stderr, log_errors = 1, error_log leer.
+ * Jede Warnung und jeder Absturzgrund des Dienstes ging damit ungelesen
+ * verloren; der Waechter schrieb danach nur 'Dienst lief nicht'.
+ *
+ * error_log auf die Protokolldatei oeffnet die Datei je Meldung neu und legt
+ * sie an, wenn sie fehlt - genau wie bm_log(). In einem Wegwerfbaum am Geraet
+ * in beide Richtungen geeicht: ohne diese drei Zeilen ist die Warnung nach
+ * dem Loeschen verloren, mit ihnen steht sie in der neu angelegten Datei.
+ *
+ * Die Startdatei bleibt: was VOR diesen Zeilen scheitert (Parsefehler,
+ * fehlende Bibliothek), kann PHP noch nicht umleiten. Der Selbsttest darueber
+ * bleibt bei der Kommandozeile - wer ihn aufruft, will die Meldung sehen. */
+ini_set('log_errors', '1');
+ini_set('display_errors', '0');
+ini_set('error_log', bm_paths()['log']);
 if (function_exists('pcntl_signal')) {
     pcntl_signal(SIGTERM, 'bm_signal_behandeln');
     pcntl_signal(SIGINT, 'bm_signal_behandeln');

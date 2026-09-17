@@ -85,7 +85,15 @@ $bm_cfg = bm_config();
  *
  * ?selftest=1 ist der Hausstandard-Selbsttest (B22): er beantwortet die
  * Tokenfrage, ohne etwas auszuloesen, ohne Geraetekontakt und ohne
- * Schreibzugriff. Drei festgelegte Antworten. */
+ * Schreibzugriff. Drei festgelegte Antworten.
+ *
+ * Das Token gilt fuer JEDE Aktion, auch fuer die lesenden (status, zellen,
+ * liste, roh, evcc, summe). Das ist eine begruendete Ausnahme zu Regeln/05
+ * ('abfragende Aufrufe bleiben offen') - Entscheidung des Hausherrn vom
+ * 17.09.2026: Ladezustand, Zellspannungen und Zwangszustand eines
+ * Heimspeichers sollen im Heimnetz nicht ohne Token lesbar sein. So gebaut
+ * seit mindestens 0.9.14; README, Reiter 'Einbindung in Loxone' und die
+ * Vorlage schreiben das Token in jede Adresse. */
 $bm_selftest = isset($_GET['selftest']) && is_string($_GET['selftest'])
             && $_GET['selftest'] === '1';
 $bm_soll = (string) $bm_cfg['aktionstoken'];
@@ -255,6 +263,13 @@ if ($bm_aktion === 'summe') {
         $bm_kap += $bm_k;
         $bm_kwh += $bm_r;
     }
+    if ($bm_n === 0) {
+        /* Ohne einen einzigen Speicher im Abbild gibt es keine Summe (B51):
+         * 503 mit Grund in der Zeile, wie bei status und zellen. */
+        http_response_code(503);
+        printf("SUMME;OK=0;GRUND=KEIN_SPEICHER;N=0;ALTER=%d\n", $bm_alter);
+        exit;
+    }
     printf("SUMME;OK=%d;N=%d;NOK=%d;SOC=%s;KAPAZ=%s;RESTKWH=%s;PBAT=%s;ALARM=%d;ALTER=%d\n",
         (int) ($bm_n > 0 && $bm_okn === $bm_n), $bm_n, $bm_okn,
         ($bm_voll && $bm_kap > 0) ? (string) round($bm_kwh / $bm_kap * 100, 1) : '-',
@@ -276,6 +291,25 @@ if ($bm_aktion === 'liste') {
 }
 
 if ($bm_g === null) {
+    /* Keine Daten zu dieser Nummer: HTTP 503, nicht 200 (B51, 17.09.2026).
+     *
+     * Regeln/07, 'Faellt die Quelle ganz aus, liefert der Endpunkt HTTP 503':
+     * das gilt ausdruecklich auch vor dem ersten Abruf, 'weder mit 200 und
+     * OK=0 noch mit 404'. Loxone schaltet bei 503 den Onlinestatus des
+     * Eingangs ab - der Mangel ist sichtbar. Eine 200 mit OK=0 sieht dort aus
+     * wie ein gewoehnlicher Zustand. Am Geraet gemessen (17.09.2026, kein
+     * Speicher eingerichtet): HTTP 200 'BMS;OK=0;GRUND=GERAET_UNBEKANNT;N=0'.
+     *
+     * Die Zeile selbst bleibt wortgleich - an GRUND haengen fremde Anlagen.
+     * NICHT hierher gehoert ein eingerichteter Speicher, der gerade nicht
+     * antwortet: der hat eine Nummer im Abbild, liefert Striche statt Zahlen
+     * und OK=0. Er bleibt BEWUSST bei 200 - Entscheidung des Hausherrn vom
+     * 17.09.2026, begruendete Ausnahme zu Regeln/07 'Faellt die Quelle ganz
+     * aus': bei 503 behielte Loxone die letzten Werte, auch OK=1, und ein
+     * Alarm auf OK=0 loeste bei einem ausgefallenen Speicher nie aus. Die
+     * Messfelder kommen als Strich, ein alter Stand wird also nicht
+     * geliefert. */
+    http_response_code(503);
     printf("%s;OK=0;GRUND=GERAET_UNBEKANNT;N=%d;ALTER=%d\n",
         $bm_aktion === 'zellen' ? 'ZELLEN' : 'BMS', count($bm_alle), $bm_alter);
     exit;

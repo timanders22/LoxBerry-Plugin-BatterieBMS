@@ -10,6 +10,36 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.21
+
+Am Gerät durchgemessen (17.09.2026, LoxBerry 4.0.0.15, PHP 7.4.33) und gegen
+die seit dem 06.09.2026 erweiterten Hausregeln geprüft.
+
+- **PHP-Fehler des laufenden Dienstes gingen verloren.** Der Dienst schrieb
+  Warnungen und Absturzgründe auf seine Fehlerausgabe, und die zeigte auf eine
+  Startdatei, die die Protokollwartung von LoxBerry längst gelöscht hatte — am
+  Gerät gemessen: der seit 47 Stunden laufende Dienst hielt beide Ausgaben auf
+  einer gelöschten Datei. Jetzt gehen sie in das Protokoll des Plugins, das
+  je Meldung neu geöffnet und bei Bedarf neu angelegt wird.
+- **Zurückbehaltene MQTT-Zustände, die leer werden, wurden nie geleert.** Hatte
+  sich ein Speicher erholt, stand sein alter `fehlertext` weiter im Broker;
+  ebenso ein abgeklungener `alarmtext` und eine `sollquelle`, die noch
+  „loxone" nannte, während `sollwert` schon „automatik" sagte. Ein leerer
+  Zustand geht jetzt als Strich `-` hinaus. Eine leere Nutzlast wäre keine
+  Lösung — sie löscht das Thema. Leere **Messwerte** gehen weiterhin gar nicht
+  hinaus.
+- **Zwischen den MQTT-Meldungen liegen jetzt 5 ms.** Der UDP-Eingang des
+  Gateways verwirft Meldungen, die im Stoß ankommen, ohne dass der Absender es
+  merkt; ein Speicher mit Zelldaten schickt weit über hundert je Durchlauf.
+- **Ohne Daten antwortet der Endpunkt mit HTTP 503 statt 200.** Betrifft
+  `status` und `zellen` für eine Nummer, zu der es keine Daten gibt, und
+  `summe` ohne jeden Speicher. Loxone schaltet dann den Onlinestatus des
+  Eingangs ab, statt `OK=0` wie einen gewöhnlichen Wert zu übernehmen. Die
+  Antwortzeile ist wortgleich geblieben. Ein **eingerichteter** Speicher, der
+  gerade nicht antwortet, liefert unverändert HTTP 200 mit `OK=0`.
+- Ein Kommentar in der Cron-Datei las sich am Gerät als Pfad, weil der
+  Installer den darin zitierten Platzhalter mit ersetzte.
+
 ## Neu in 0.9.20
 
 **Das Installationsprotokoll behauptete, einen Dienst angehalten zu haben, der
