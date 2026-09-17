@@ -2447,6 +2447,51 @@ function bm_abo_text()
  * MQTT-Client: so muss das Plugin ueberhaupt keine Broker-Zugangsdaten
  * kennen, um zu senden. Das Gateway hat sie ohnehin.
  */
+/**
+ * Den zurueckbehaltenen Wert von ok aus 0.9.17 bis 0.9.21 einmal loeschen.
+ *
+ * Ein spaeteres publish ersetzt einen retained Wert NICHT - ohne diese
+ * Loeschung stuende das letzte retained ok fuer immer im Broker, und nach dem
+ * Tod des Dienstes laese Loxone daraus 'laeuft'. Geloescht wird mit dem
+ * Befehlswort retain und leerer Nutzlast, VOR dem frischen Wert im selben
+ * Durchgang - wie Beschattungswaechter 0.9.19 (Regeln/07). Das ist die eine
+ * gewollte leere Nutzlast; bm_mqtt_nutzlast() erzeugt nie eine.
+ *
+ * Der Merker liegt im Datenordner, je Thema eine Zeile. Der Installer raeumt
+ * den Datenordner bei jedem Upgrade ab - dann wird eben noch einmal geloescht;
+ * fuer ein nicht zurueckbehaltenes Thema ist das wirkungslos.
+ */
+function bm_mqtt_altlast_ok($s, $port, array $paare, $praefix)
+{
+    $p = bm_paths();
+    $merker = $p['datadir'] . '/retain_ok_geloescht';
+    $erledigt = array();
+    if (is_file($merker)) {
+        $erledigt = array_values(array_filter(array_map('trim', (array) @file($merker)), 'strlen'));
+    }
+    $neu = array();
+    foreach (array_keys($paare) as $k) {
+        $teile = explode('/', (string) $k);
+        if (end($teile) !== 'ok') {
+            continue;
+        }
+        $thema = bm_mqtt_thema_saeubern($praefix . '/' . $k);
+        if ($thema === '' || in_array($thema, $erledigt, true)) {
+            continue;
+        }
+        $msg = 'retain ' . $thema . ' ';
+        @socket_sendto($s, $msg, strlen($msg), 0, '127.0.0.1', $port);
+        usleep(BM_MQTT_PAUSE_US);
+        $neu[] = $thema;
+    }
+    if ($neu) {
+        @file_put_contents($merker, implode("\n", array_merge($erledigt, $neu)) . "\n", LOCK_EX);
+        bm_log('MQTT: zurueckbehaltenen Wert geloescht fuer ' . implode(', ', $neu)
+            . ' - das Lebenszeichen ok geht seit 0.9.22 nicht mehr retained hinaus.');
+    }
+    return count($neu);
+}
+
 function bm_mqtt_senden(array $paare, $praefix)
 {
     if (!function_exists('socket_create')) {
@@ -2470,6 +2515,7 @@ function bm_mqtt_senden(array $paare, $praefix)
         bm_log_gebremst('mqtt_socket', 'MQTT: Socket nicht moeglich.');
         return false;
     }
+    bm_mqtt_altlast_ok($s, $z['udpport'], $paare, $praefix);
     foreach ($paare as $k => $v) {
         // Der UDP-Eingang des Gateways wertet einen Zeilenumbruch als Ende
         // des Befehls. Ein mehrzeiliger Wert - etwa eine Fehlermeldung des
@@ -2671,7 +2717,6 @@ function bm_mqtt_paare(array $abbild, $melden = true)
     return $paare;
 }
 
-/** Alle Themen, die der Dienst veroeffentlicht, mit ihrer Bedeutung. */
 /**
  * Welche Themen tragen einen ZUSTAND und gehen deshalb retained hinaus?
  *
@@ -2692,11 +2737,17 @@ function bm_mqtt_paare(array $abbild, $melden = true)
  * Groesse heisst je Speicher `geraet1/ok`, `geraet2/ok`, und die Modulthemen
  * liegen zwei Ebenen tiefer. `sollwert_alter` ist ein eigener Name und faellt
  * deshalb nicht unter `sollwert` - es ist ein Alter, kein Zustand.
+ *
+ * `ok` steht seit 0.9.22 NICHT mehr in dieser Liste. Es sagt, ob der letzte
+ * Abruf gelang, und gehoert damit zum Lebenszeichen: retained zeigte es nach
+ * dem Tod des Dienstes fuer immer den letzten Stand. Entscheidung des
+ * Hausherrn vom 17.09.2026 (Regeln/07, 'zum Lebenszeichen gehoert auch
+ * status/ok - nie retained'); 0.9.17 bis 0.9.21 sandten es retained, der
+ * Altwert wird einmal geloescht (bm_mqtt_altlast_ok).
  */
 function bm_mqtt_zustandsthemen()
 {
     return array(
-        'ok',           // laeuft der Abruf? je Speicher und insgesamt
         'geraete',      // wie viele Speicher eingerichtet sind
         'fehler',       // Fehlerbits des BMS
         'fehlertext',   // dazu der Klartext
@@ -2718,6 +2769,7 @@ function bm_mqtt_retained($thema)
     return in_array(end($teile), bm_mqtt_zustandsthemen(), true);
 }
 
+/** Alle Themen, die der Dienst veroeffentlicht, mit ihrer Bedeutung. */
 function bm_mqtt_themen()
 {
     return array(

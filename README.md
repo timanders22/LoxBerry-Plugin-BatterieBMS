@@ -10,6 +10,19 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.22
+
+- **Die Kachel „MQTT" zeigt jetzt, ob dieses Plugin veröffentlicht.** Bis 0.9.21
+  stand dort als großer Wert der Autostart des MQTT-Gateways von LoxBerry — neben
+  der Prüfzeile „Veröffentlichung dieses Plugins: Nein" las sich „MQTT ein" wie
+  ein Widerspruch. Der Autostart des Gateways steht jetzt klein darunter.
+- **`ok` geht nicht mehr retained hinaus** — weder `<thema>/ok` noch
+  `<thema>/geraetN/ok`. `ok` sagt, ob der letzte Abruf gelang, und gehört damit
+  zum Lebenszeichen: zurückbehalten zeigte es nach dem Tod des Dienstes für immer
+  den letzten Stand. Seit 0.9.17 war es retained; der alte Wert wird beim ersten
+  Senden einmal aus dem Broker gelöscht. Retained bleiben die Zustände
+  (`fehler`, `alarm`, `modus`, `sollart` …) und `geraete`.
+
 ## Neu in 0.9.21
 
 Am Gerät durchgemessen (17.09.2026, LoxBerry 4.0.0.15, PHP 7.4.33) und gegen

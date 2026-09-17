@@ -1693,9 +1693,10 @@ function bm_selbsttest()
     }
 
     // 1c. Zustaende gehen retained hinaus, Messwerte und Lebenszeichen nicht.
-    $zust = array('ok', 'geraet1/ok', 'geraet1/alarm', 'geraet1/sollart',
+    $zust = array('geraete', 'geraet1/alarm', 'geraet1/sollart',
                   'geraet1/fehlertext', 'evcc/mode');
-    $mess = array('ts', 'geraet1/ts', 'geraet1/soc', 'geraet1/pbat',
+    // ok ist seit 0.9.22 Lebenszeichen (Hausherr 17.09.2026) - nie retained.
+    $mess = array('ok', 'geraet1/ok', 'ts', 'geraet1/ts', 'geraet1/soc', 'geraet1/pbat',
                   'geraet1/sollwert_alter', 'geraet1/modul/1/tmax',
                   'geraet1/modul/1/zelle/3');
     $retFalsch = array();

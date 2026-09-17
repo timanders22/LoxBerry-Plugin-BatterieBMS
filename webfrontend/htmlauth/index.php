@@ -777,9 +777,18 @@ if ($bm_rahmen) {
     <b class="<?= !empty($bm_cfg['steuerung_ein']) ? 'sm-an' : 'sm-aus' ?>"><?= !empty($bm_cfg['steuerung_ein']) ? bm_e(bm_t('ALLG.FREI')) : bm_e(bm_t('ALLG.GESPERRT')) ?></b>
     <span class="sm-hilfe"><?= sprintf(bm_e(bm_t('ALLG.TOTMANN_KURZ')), (int) $bm_cfg['totmann']) ?></span>
   </div>
+  <!-- Der grosse Wert ist der Zustand DIESES Plugins, wie in den Kacheln davor
+       und in der Pruefzeile im Reiter Test (B46). Bis 0.9.21 stand hier der
+       Autostart des Gateways - neben der Pruefzeile "Veroeffentlichung dieses
+       Plugins: Nein" las sich "MQTT ein" wie ein Widerspruch (am Geraet in
+       Chrome gesehen 17.09.2026). Vorbild ZendureSolarFlow 0.9.21. Ohne
+       MQTT-Abschnitt in general.json heisst der Autostart "nicht feststellbar"
+       statt "aus". -->
   <div class="sm-kachel">MQTT
-    <b class="<?= $bm_mqtt['autostart'] ? 'sm-an' : 'sm-aus' ?>"><?= $bm_mqtt['autostart'] ? bm_e(bm_t('ALLG.EIN')) : bm_e(bm_t('ALLG.AUS')) ?></b>
-    <span class="sm-hilfe"><?= bm_e(bm_t('ALLG.GATEWAY')) ?></span>
+    <b class="<?= !empty($bm_cfg['mqtt_ein']) ? 'sm-an' : 'sm-aus' ?>"><?= !empty($bm_cfg['mqtt_ein']) ? bm_e(bm_t('ALLG.EIN')) : bm_e(bm_t('ALLG.AUS')) ?></b>
+    <span class="sm-hilfe"><?= bm_e(sprintf(bm_t('ALLG.KACHEL_MQTT_HILFE'),
+        !$bm_mqtt['gefunden'] ? bm_t('ALLG.NICHT_FESTSTELLBAR')
+        : ($bm_mqtt['autostart'] ? bm_t('ALLG.EIN') : bm_t('ALLG.AUS')))) ?></span>
   </div>
 </div>
 
