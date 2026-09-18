@@ -48,6 +48,23 @@ function bm_pruefungen()
         $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_DIENST_ZAHL'), bm_t('TEST.A_DIENST_KEINER'));
     }
 
+    /* Laeuft gerade eine Aktualisierung? Solange die Marke gilt, startet kein
+     * Weg den Dienst - weder der Minutentakt noch die Knoepfe im Reiter
+     * Einstellungen. Ohne diese Zeile gaebe es die Regel, aber nichts, was sie
+     * sichtbar macht (CLAUDE.md 6). Drei Ausgaenge, drei Saetze; eine
+     * liegengebliebene Marke ist ein Kreuz, die laufende Aktualisierung nur
+     * ein Hinweis. */
+    list($bm_mk_liegt, $bm_mk_gilt, $bm_mk_alter) = bm_upgrade_marke();
+    if (!$bm_mk_liegt) {
+        $zeilen[] = bm_pruefzeile(1, bm_t('TEST.F_UPGRADE_MARKE'), bm_t('TEST.A_UPGRADE_KEINE'));
+    } elseif ($bm_mk_gilt) {
+        $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_UPGRADE_MARKE'),
+            sprintf(bm_t('TEST.A_UPGRADE_LAEUFT'), (int) $bm_mk_alter));
+    } else {
+        $zeilen[] = bm_pruefzeile(0, bm_t('TEST.F_UPGRADE_MARKE'),
+            sprintf(bm_t('TEST.A_UPGRADE_ALT'), bm_e($p['plugin'] . '.upgrade_laeuft')));
+    }
+
     $zeilen[] = bm_pruefzeile(count($geraete) > 0 ? 1 : 0, bm_t('TEST.F_GERAETE'),
         count($geraete) > 0 ? sprintf(bm_t('TEST.A_GERAETE'), count($geraete))
                             : bm_t('TEST.A_KEINE_GERAETE'));

@@ -10,6 +10,56 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.24
+
+**Während einer Aktualisierung startet kein Weg den Dienst mehr — und `bin/dienst.sh` liest die
+LoxBerry-Wurzel, statt sie zu raten.**
+
+### Die Upgrade-Marke
+
+Zwischen `preupgrade.sh` und `postinstall.sh` liegt auf dem Gerät fast eine Minute. Die neuen
+Dateien sind dann schon da, der Datenordner ist leer — der Installer hat ihn samt Sollmerker,
+eigenen Profilen und Verlauf abgeräumt; `postinstall.sh` spielt die Sicherung erst danach zurück.
+Bis 0.9.23 startete der Knopf „Dienst starten“ oder „Dienst neu starten“ in dieser Lücke einen
+Dienst. Der las die eigenen Profile, **bevor** sie zurückgespielt waren, und behielt diesen Stand:
+ein Speicher mit einem eigenen Profil wurde nach dem Update **nicht mehr ausgelesen**, bis jemand
+den Dienst neu startete. `postinstall.sh` fand den Dienst laufend vor und ließ ihn stehen. In WSL
+gemessen (`Pruefung-BatterieBMS-0.9.24/`, Fälle U1 und U2): Speicher 2 nach dem Update gelesen —
+„nein“.
+
+Jetzt legt `preupgrade.sh` als Erstes die Marke `data/plugins/<ordner>.upgrade_laeuft` mit der
+Unixzeit an, **neben** dem Datenordner. Solange sie jünger als eine Stunde ist, startet
+`bin/dienst.sh` nicht (`start`, `restart` und der Minutentakt), und die Oberfläche sagt es, statt
+„Dienst gestartet.“ zu melden. Eine ältere Marke, eine aus der Zukunft oder eine ohne Zeitpunkt
+gilt nicht — eine abgebrochene Installation legt den Dienst nicht für immer still. Lässt sich die
+Uhr nicht lesen, gilt sie (der Schutz fällt geschlossen aus). `postinstall.sh` startet den Dienst
+wieder, wenn er vorher lief, und entfernt die Marke erst **danach**, über einen `trap` — auch dann,
+wenn es vorzeitig aussteigt; `postupgrade.sh` trägt denselben `trap`, und `uninstall` räumt sie
+weg. **Neu im Reiter Test:** „Läuft gerade eine Aktualisierung dieses Plugins?“
+
+Die Oberfläche wird bei liegender Marke **nicht** gesperrt: gemessen ging dort nichts verloren
+(die Einstellungen heilen aus der Zweitschrift, und ein Speichern mit einem Speicher, dessen Profil
+in der Lücke fehlt, wird abgewiesen, ohne etwas zu ändern).
+
+### Wurzel und Ordnername werden gelesen
+
+Bis 0.9.23 rechnete `bin/dienst.sh` die LoxBerry-Wurzel drei Ebenen über dem eigenen Ablageort
+aus, nahm den Ordnernamen aus dem Verzeichnisnamen und legte Daten- und Protokollordner bei
+**jedem** Aufruf an, auch bei `status`. Aus einem Prüfarchiv unter `<Wurzel>/pruefung/…` legte
+schon ein `status` in der laufenden Anlage `data/plugins/bin` und `log/plugins/bin` an. Jetzt
+kommt die Wurzel aus `$LBHOMEDIR`, sonst aus einer Suche nach einem Verzeichnis mit
+`config/plugins`, `data/plugins` und `config/system/general.json`; der Ordnername aus
+`$LBPPLUGINDIR`, sonst aus dem Ablageort. Ist das Plugin unter der gefundenen Wurzel nicht
+eingerichtet, bricht das Skript ab, ohne etwas anzulegen. Angelegt wird nur noch beim Start.
+
+### Offen, nicht in dieser Fassung behoben
+
+Der Reiter Test reiht „Laden“/„Entladen“ auch dann ein, wenn kein Dienst läuft, und der nächste
+Dienststart führt den Befehl aus — ohne Altersprüfung der Warteschlange. Der Endpunkt für den
+Miniserver prüft das vorher (503); der Reiter Test nicht. In WSL gemessen: zwei Schreibbefehle an
+den Speicher, abgesetzt erst beim Wiederanlauf nach dem Update. Das ist unabhängig von der
+Aktualisierung und steht zur Entscheidung aus.
+
 ## Neu in 0.9.23
 
 **Das Plugin erkennt seinen eigenen Dienst jetzt argumentweise — und beendet

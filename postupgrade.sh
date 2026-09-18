@@ -2,6 +2,12 @@
 # Batterie-Heimspeicher (BMS) - postupgrade
 # command <TEMPFOLDER> <NAME> <FOLDER> <VERSION> <BASEFOLDER>
 SELF=$(cd "$(dirname "$0")" && pwd)
+# Das letzte Hakenskript entfernt die Upgrade-Marke (preupgrade.sh) - auch
+# dann, wenn postinstall.sh fehlt oder scheitert (Fall C14). Im Regelfall hat
+# postinstall.sh sie schon entfernt; "rm -f" ist dann ein Leerlauf.
+BM_BASE="${5:-$LBHOMEDIR}"
+BM_MARKE="$BM_BASE/data/plugins/${3:-batteriebms}.upgrade_laeuft"
+trap '[ -n "$BM_BASE" ] && rm -f "$BM_MARKE"' EXIT
 # B32: bis 0.9.15 stand hier eine -x-Pruefung, gemeldet wurde aber "nicht
 # gefunden". Fehlte nur das Ausfuehrungsrecht, brach das Upgrade mit einer
 # Meldung ab, die auf die falsche Ursache zeigte - und die Rueckspielung der

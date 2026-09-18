@@ -10,6 +10,29 @@ ARGV5=$5
 PFOLDER="${ARGV3:-batteriebms}"
 BASE="${ARGV5:-$LBHOMEDIR}"
 
+# ---------- Die Marke "Aktualisierung laeuft" - als Erstes ----------
+# Zwischen diesem Skript und postinstall.sh liegt am Geraet fast eine Minute
+# (Regeln/06: preupgrade 03:31:30, Cron neu 03:31:32, postinstall 03:32:24);
+# die neuen Dateien liegen dann schon bereit, der Datenordner ist leer. Der
+# Knopf "Dienst starten" startete dort einen Dienst, der den Speicher mit
+# einem eigenen Profil danach nicht mehr auslas (Pruefung-BatterieBMS-0.9.24,
+# Faelle U1/U2). bin/dienst.sh startet nicht, solange die Marke juenger als
+# 3600 s ist; postinstall.sh entfernt sie am Ende.
+#
+# NEBEN dem Datenordner, sonst loescht purge_installation sie mit. Nur, wenn
+# der Ablageort bekannt ist - ohne BASE entstuende sie unter /data.
+MARKE="$BASE/data/plugins/$PFOLDER.upgrade_laeuft"
+if [ -n "$BASE" ] && [ -d "$BASE/data" ]; then
+    mkdir -p "$BASE/data/plugins" 2>/dev/null
+    date +%s > "$MARKE" 2>/dev/null
+fi
+if [ -n "$BASE" ] && [ -s "$MARKE" ]; then
+    echo "<OK> Dienststart bis zum Ende der Aktualisierung gesperrt."
+else
+    echo "<WARNING> Die Marke $MARKE liess sich nicht anlegen - der Dienst"
+    echo "<WARNING> koennte waehrend der Aktualisierung anlaufen."
+fi
+
 # Anhalten ueber dienst.sh, nicht mit einem eigenen kill.
 #
 # Bis 0.9.0 stand hier: SIGTERM, zwei Sekunden warten, kill -9. Zwei Sekunden

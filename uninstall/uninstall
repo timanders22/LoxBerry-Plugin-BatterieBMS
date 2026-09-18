@@ -45,7 +45,8 @@ fi
 for DATEI in \
     "$BASE/config/plugins/$PFOLDER.backup.json" \
     "$BASE/config/plugins/$PFOLDER.backup.daten.tar" \
-    "$BASE/config/plugins/$PFOLDER.laeuft"
+    "$BASE/config/plugins/$PFOLDER.laeuft" \
+    "$BASE/data/plugins/$PFOLDER.upgrade_laeuft"
 do
     if [ -f "$DATEI" ]; then
         rm -f "$DATEI" && echo "<OK> Entfernt: $(basename "$DATEI")"

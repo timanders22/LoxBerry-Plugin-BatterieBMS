@@ -1526,11 +1526,58 @@ function bm_dienst_soll()
     return is_file(bm_paths()['datadir'] . '/soll_laufen') ? 1 : 0;
 }
 
+/**
+ * Liegt die Marke "Aktualisierung laeuft"?
+ *
+ * Rueckgabe array(liegt, gilt, alter). "liegt" sagt, ob die Datei da ist,
+ * "gilt", ob bin/dienst.sh deswegen keinen Dienst startet. Beides getrennt,
+ * weil eine liegengebliebene Marke ein anderer Befund ist als eine laufende
+ * Aktualisierung - im Reiter Test steht zu jedem Fall ein eigener Satz.
+ *
+ * Die Datei liegt NEBEN dem Datenordner (data/plugins/<ordner>.upgrade_laeuft),
+ * weil purge_installation den Ordner beim Upgrade abraeumt. Die Grenze 3600 s
+ * ist dieselbe wie in bin/dienst.sh, marke_gilt(); wer eine der beiden
+ * aendert, aendert beide. preg_match statt ctype_digit: ctype ist nicht
+ * garantiert geladen (Regeln/02).
+ */
+function bm_upgrade_marke()
+{
+    $p = bm_paths();
+    if ($p['home'] === '') {
+        return array(0, 0, -1);
+    }
+    $f = $p['home'] . '/data/plugins/' . $p['plugin'] . '.upgrade_laeuft';
+    clearstatcache();
+    if (!is_file($f)) {
+        return array(0, 0, -1);
+    }
+    $roh = trim((string) @file_get_contents($f, false, null, 0, 32));
+    if ($roh === '' || !preg_match('/^[0-9]+$/', $roh)) {
+        return array(1, 0, -1);
+    }
+    $alter = time() - (int) $roh;
+    if ($alter < 0 || $alter >= 3600) {
+        return array(1, 0, $alter);
+    }
+    return array(1, 1, $alter);
+}
+
 /** $befehl ist 'start', 'stop' oder 'restart'. Rueckgabe: array(ok, Ausgabe) */
 function bm_dienst($befehl)
 {
     if (!in_array($befehl, array('start', 'stop', 'restart'), true)) {
         return array(0, 'Unbekannter Befehl.');
+    }
+    /* Waehrend einer Aktualisierung startet bin/dienst.sh ohnehin keinen
+     * Dienst. Die Oberflaeche fragt trotzdem selbst: dienst.sh endet dann
+     * mit 0, und die Seite meldete "Dienst gestartet.", obwohl nichts
+     * gestartet wurde (Fall U1, Zeile "Oberflaeche sagt es"). Anhalten
+     * bleibt erlaubt. */
+    if ($befehl !== 'stop') {
+        $bm_mk = bm_upgrade_marke();
+        if ($bm_mk[1]) {
+            return array(0, sprintf(bm_t('EINST.DIENST_MARKE'), (int) $bm_mk[2]));
+        }
     }
     $skript = bm_paths()['bindir'] . '/dienst.sh';
     if (!is_file($skript)) {

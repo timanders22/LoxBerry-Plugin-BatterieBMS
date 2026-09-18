@@ -24,6 +24,30 @@ PDATA="$BASE/data/plugins/$PFOLDER"
 PLOG="$BASE/log/plugins/$PFOLDER"
 PCONFIG="$BASE/config/plugins/$PFOLDER"
 
+# ---------- Die Upgrade-Marke faellt am Ende dieses Skripts ----------
+# preupgrade.sh legt sie an; bin/dienst.sh startet nicht, solange sie liegt.
+# Entfernt wird sie ueber einen trap auf EXIT, nicht am Dateiende: dieses
+# Skript steigt an mehreren Stellen mit "exit 1" aus (Ordner nicht anlegbar,
+# kein PHP). Ohne trap bliebe der Dienst dann eine Stunde gesperrt, ohne dass
+# irgendwo stuende, warum (Fall C12). Eine Kommandoersetzung und eine
+# Unterschale loesen den EXIT-Trap nicht aus (Regeln/06, Nachtrag 17.09.2026).
+#
+# Sie faellt NACH dem Wiederanlauf weiter unten; der eigene Start bekommt
+# deshalb die Ausnahme BM_START_TROTZ_MARKE=1. Warum nach und nicht vor dem
+# Start: Pruefung-BatterieBMS-0.9.24/messe_reihenfolge.sh.
+#
+# postupgrade.sh leitet hierher weiter, und LoxBerry ruft beim Upgrade BEIDE
+# Haken (B47). Der zweite Lauf findet die Marke bereits fort; "rm -f" ist dann
+# ein Leerlauf. postupgrade.sh traegt denselben trap, falls dieses Skript gar
+# nicht erst laeuft.
+BM_MARKE="$BASE/data/plugins/$PFOLDER.upgrade_laeuft"
+bm_marke_weg() {
+    if [ -f "$BM_MARKE" ]; then
+        rm -f "$BM_MARKE" && echo "<INFO> Upgrade-Marke entfernt - der Dienst laesst sich wieder starten."
+    fi
+}
+trap bm_marke_weg EXIT
+
 mkdir -p "$PDATA/befehle" "$PDATA/antworten" "$PDATA/verlauf" "$PDATA/profile" \
          "$PLOG" "$PCONFIG" || {
     echo "<FAIL> Ordner konnten nicht angelegt werden."
@@ -136,7 +160,8 @@ LIEF="$BASE/config/plugins/$PFOLDER.laeuft"
 if [ -f "$LIEF" ]; then
     rm -f "$LIEF"
     if [ -x "$PBIN/dienst.sh" ]; then
-        AUSGABE=$("$PBIN/dienst.sh" start 2>&1)
+        # Die Ausnahme von der Upgrade-Marke gilt nur fuer DIESEN Start.
+        AUSGABE=$(BM_START_TROTZ_MARKE=1 "$PBIN/dienst.sh" start 2>&1)
         RC=$?
         if [ $RC -eq 0 ]; then
             UEBERNOMMEN=1

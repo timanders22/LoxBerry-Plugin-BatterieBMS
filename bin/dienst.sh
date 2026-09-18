@@ -1,11 +1,12 @@
 #!/bin/bash
 # Batterie-Heimspeicher (BMS) - Start, Stopp und Waechter des Abrufdienstes.
 #
-# Die Pfade werden aus dem EIGENEN Ablageort abgeleitet, nicht ueber
-# LoxBerry::System. Grund: LoxBerry::System leitet den Pluginordner aus dem
-# Aufrufort ab; wird dieses Skript aus postinstall.sh oder aus dem Cron
-# gestartet, kommt dort ueberall Leerstring zurueck - das Skript werkelt dann
-# gegen /-Pfade und meldet trotzdem Erfolg (belegt am 02.08.2026).
+# Die Pfade kommen NICHT aus LoxBerry::System. Grund: LoxBerry::System leitet
+# den Pluginordner aus dem Aufrufort ab; wird dieses Skript aus postinstall.sh
+# oder aus dem Cron gestartet, kommt dort ueberall Leerstring zurueck - das
+# Skript werkelt dann gegen /-Pfade und meldet trotzdem Erfolg (belegt am
+# 02.08.2026). Woher Wurzel und Ordnername stattdessen kommen, steht unten
+# bei "Wurzel und Ordnername".
 
 # readlink -f loest Symlinks auf, BEVOR das Verzeichnis bestimmt wird.
 #
@@ -46,13 +47,91 @@ if [ "$(id -u)" = "0" ] && id loxberry >/dev/null 2>&1; then
 fi
 
 SELF=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)   # <home>/bin/plugins/<ordner>
-PNAME=$(basename "$SELF")
-LBHOMEDIR=$(cd "$SELF/../../.." && pwd)
+
+# ---------- Wurzel und Ordnername: GELESEN, nicht geraten ----------
+#
+# Bis 0.9.23 stand hier
+#     PNAME=$(basename "$SELF")
+#     LBHOMEDIR=$(cd "$SELF/../../.." && pwd)
+# und gleich darauf ein 'mkdir -p' auf oberster Ebene. Ein gesetztes
+# $LBHOMEDIR wurde damit ueberschrieben, der Ordnername kam aus dem
+# Verzeichnisnamen, und der geratene Pfad wurde bei JEDEM Aufruf angelegt -
+# auch bei 'status'. In WSL gemessen (Pruefung-BatterieBMS-0.9.24,
+# messe_h1.sh; Bauart H1 in Bestand-2026-09-18/klasse-H/Ergebnis.md):
+#   - 'status' aus einem Pruefarchiv <Wurzel>/pruefung/batteriebms/bin legte
+#     in der LAUFENDEN Anlage data/plugins/bin und log/plugins/bin an (H3);
+#   - dieselbe Datei aus einem ausgepackten Archiv uebersah das gesetzte
+#     $LBHOMEDIR, der laufende Dienst galt als "gestoppt" (H2);
+#   - nach purge_installation legte schon ein 'status' den Datenordner wieder
+#     an - "der Ordner ist da" sagte in der Upgrade-Luecke nichts mehr (H4).
+#
+# Stufe 1 ist $LBHOMEDIR aus der Umgebung (am Geraet aus /etc/environment,
+# der Cron laedt es ueber pam_env), wenn es eine Wurzel bezeichnet. Stufe 2
+# sucht aufwaerts nach einem Verzeichnis mit config/plugins, data/plugins UND
+# config/system/general.json (der dritte Nachweis seit dem Raumklima-Vorfall,
+# Regeln/06, lb_wurzel_suchen). Eine feste Zahl '..' waere nur die naechste
+# Wette; findet keine Stufe etwas, wird abgebrochen, ohne etwas anzulegen (H8).
+bm_wurzel_suchen() {
+    bm_v="$SELF"
+    bm_i=0
+    while [ -n "$bm_v" ] && [ "$bm_v" != "/" ] && [ "$bm_i" -lt 8 ]; do
+        if [ -d "$bm_v/config/plugins" ] && [ -d "$bm_v/data/plugins" ] \
+           && [ -f "$bm_v/config/system/general.json" ]; then
+            echo "$bm_v"
+            return 0
+        fi
+        bm_v=$(dirname "$bm_v")
+        bm_i=$((bm_i + 1))
+    done
+    return 1
+}
+if [ -n "${LBHOMEDIR:-}" ] && [ -d "$LBHOMEDIR/config/plugins" ] \
+   && [ -d "$LBHOMEDIR/data/plugins" ]; then
+    :
+else
+    LBHOMEDIR=$(bm_wurzel_suchen) || LBHOMEDIR=""
+fi
+if [ -z "$LBHOMEDIR" ]; then
+    echo "FEHLER: Es wurde kein LoxBerry-Wurzelverzeichnis gefunden."
+    echo "        \$LBHOMEDIR ist nicht gesetzt, und oberhalb von $SELF"
+    echo "        traegt kein Verzeichnis config/plugins, data/plugins und"
+    echo "        config/system/general.json. Es wurde nichts angelegt."
+    exit 1
+fi
+# Der Ordnername ebenso: $LBPPLUGINDIR steht am Geraet zwar nie in der
+# Umgebung (Regeln/03, am 17.09.2026 gemessen) - wer sie setzt, meint sie
+# ernst. Sonst der eigene Ablageort; bei einer regulaeren Installation ist
+# das genau richtig.
+if [ -n "${LBPPLUGINDIR:-}" ]; then
+    PNAME=$(basename "$LBPPLUGINDIR")
+else
+    PNAME=$(basename "$SELF")
+fi
+# Die Gegenprobe steht VOR jedem Schreiben: liegt dieses Skript nicht im
+# bin-Ordner des Plugins UND gibt es das Plugin unter dieser Wurzel nicht,
+# kommt der Aufruf aus einem ausgepackten Archiv oder einem Pruefordner.
+# Dann wird abgebrochen - ein Schutz faellt geschlossen aus (CLAUDE.md 4).
+LBH_R=$(readlink -f "$LBHOMEDIR" 2>/dev/null)
+if [ "$SELF" != "$LBH_R/bin/plugins/$PNAME" ] \
+   && [ ! -d "$LBHOMEDIR/config/plugins/$PNAME" ]; then
+    echo "FEHLER: '$PNAME' ist unter $LBHOMEDIR kein eingerichtetes Plugin,"
+    echo "        und $SELF ist nicht dessen bin-Ordner. Der Aufruf kommt"
+    echo "        offenbar aus einem ausgepackten Archiv oder einem Pruefordner."
+    echo "        Es wurde nichts angelegt. Abhilfe: LBHOMEDIR und LBPPLUGINDIR"
+    echo "        setzen oder dienst.sh aus <Wurzel>/bin/plugins/<ordner> rufen."
+    exit 1
+fi
 PDATA="$LBHOMEDIR/data/plugins/$PNAME"
 PLOG="$LBHOMEDIR/log/plugins/$PNAME"
 PCONFIG="$LBHOMEDIR/config/plugins/$PNAME"
 PID="$PDATA/dienst.pid"
 SOLL="$PDATA/soll_laufen"
+# Die Marke "Aktualisierung laeuft". Sie liegt NEBEN dem Datenordner, weil
+# purge_installation data/plugins/<ordner>/ zwischen preupgrade.sh und
+# postinstall.sh restlos abraeumt (Regeln/06) - im Ordner waere sie genau dann
+# fort, wenn sie gebraucht wird. preupgrade.sh legt sie als Erstes an,
+# postinstall.sh entfernt sie am Ende (trap), postupgrade.sh ebenso.
+MARKE="$LBHOMEDIR/data/plugins/$PNAME.upgrade_laeuft"
 LOGDATEI="$PLOG/batteriebms.log"
 # Eigene Datei fuer alles, was NEBEN dem Protokoll anfaellt: Meldungen des
 # Starts und alles, was das PHP-Skript nach stderr schreibt, bevor sein
@@ -66,7 +145,11 @@ LOGDATEI="$PLOG/batteriebms.log"
 # den Deskriptoren 1 und 2 offen, beide auf der geloeschten Datei.
 # Regel: genau einer schreibt in eine Protokolldatei.
 STARTLOG="$PLOG/batteriebms_start.log"
-SKRIPT="$SELF/bms_dienst.php"
+# Das Dienstskript der GELESENEN Wurzel, nicht das neben diesem Skript: sonst
+# verwaltete eine Datei aus einem Archiv den Dienst des Archivs, waehrend der
+# Aufrufer die Installation meinte (H2). Aus der Installation aufgerufen ist
+# es derselbe Pfad wie bisher.
+SKRIPT="$LBHOMEDIR/bin/plugins/$PNAME/bms_dienst.php"
 # Zweite Schreibweise desselben Skripts fuer den Vergleich weiter unten: wurde
 # der Dienst ueber einen anderen Weg auf dieselbe Datei gestartet (Symlink im
 # Pfad, LBHOMEDIR gegen den aufgeloesten Ablageort), steht in seiner
@@ -80,7 +163,9 @@ SKRIPT_R=$(readlink -f "$SKRIPT" 2>/dev/null)
 # eigene. Die Suche ueber /proc sieht nur dessen Prozesse an.
 DIENST_UID=$(id -u loxberry 2>/dev/null || id -u)
 
-mkdir -p "$PDATA" "$PLOG" 2>/dev/null
+# Angelegt wird erst beim START (in starten()), nicht bei jedem Aufruf. Bis
+# 0.9.23 stand hier 'mkdir -p "$PDATA" "$PLOG"' - auch 'status' und 'stop'
+# legten damit Ordner an (H3, H4).
 
 # ==================================================================
 # Arbeitet der Dienst noch, oder lebt nur sein Prozess?
@@ -262,6 +347,47 @@ laeuft() {
     [ -n "$(dienste)" ]
 }
 
+# ==================================================================
+# Laeuft gerade eine Aktualisierung dieses Plugins?
+#
+# In WSL gemessen (Pruefung-BatterieBMS-0.9.24, Faelle U1 und U2, 18.09.2026):
+# ohne diese Frage startete der Knopf "Dienst starten" bzw. "neu starten" der
+# Oberflaeche mitten in der Upgrade-Luecke einen Dienst. Der las die eigenen
+# Profile, BEVOR postinstall.sh sie aus der Sicherung zurueckspielt, und
+# behielt diesen Stand (bm_profile() in bm_lib.php liest nur einmal je
+# Prozess): der Speicher mit dem eigenen Profil wurde nach dem Upgrade NICHT
+# mehr ausgelesen, bis jemand den Dienst neu startete. postinstall.sh fand
+# den Dienst laufend vor und liess ihn stehen.
+#
+# Ausgaenge, alle gemessen (Faelle C1 bis C9):
+#   Marke juenger als 3600 s -> sie gilt, es wird nicht gestartet
+#   aelter, aus der Zukunft, ohne Zeitpunkt -> sie gilt NICHT; eine
+#                                 abgebrochene Installation darf den Dienst
+#                                 nicht fuer immer stilllegen
+#   keine lesbare Uhr             -> sie gilt (geschlossen, CLAUDE.md 4)
+#   BM_START_TROTZ_MARKE=1        -> Ausnahme fuer postinstall.sh selbst
+#
+# Die Ausnahme reicht als Umgebungsvariable auch durch den Abstieg ueber
+# "su" oben (su ohne -l laesst die Umgebung bis auf HOME, SHELL, USER und
+# LOGNAME stehen) - gelesen, nicht gemessen: in WSL gibt es keinen Benutzer
+# loxberry, und die Hakenskripte laufen am Geraet ohnehin als loxberry.
+# ==================================================================
+marke_gilt() {
+    [ -f "$MARKE" ] || return 1
+    [ "${BM_START_TROTZ_MARKE:-0}" = "1" ] && return 1
+    MJ=$(date +%s 2>/dev/null)
+    case "$MJ" in
+        ''|*[!0-9]*) return 0 ;;   # keine lesbare Uhr - geschlossen
+    esac
+    MI=$(head -c 32 "$MARKE" 2>/dev/null | tr -d ' \t\n\r')
+    case "$MI" in
+        ''|*[!0-9]*) return 1 ;;   # kein Zeitpunkt - die Marke gilt nicht
+    esac
+    [ "$MI" -gt "$MJ" ] && return 1              # aus der Zukunft
+    [ $((MJ - MI)) -lt 3600 ]
+}
+MARKE_TEXT="Eine Aktualisierung dieses Plugins laeuft - es wird jetzt kein Dienst gestartet. postinstall.sh startet ihn am Ende selbst, falls er vorher lief."
+
 starten() {
     LAUFEND=$(dienste)
     if [ -n "$LAUFEND" ]; then
@@ -271,6 +397,15 @@ starten() {
         # Mustersuche darf hier nie hinein.
         echo "$ERSTE" > "$PID" 2>/dev/null
         echo "laeuft bereits (PID $ERSTE)"
+        return 0
+    fi
+    # VOR dem touch auf soll_laufen weiter unten: stuende die Frage dahinter,
+    # legte der abgewiesene Start den Sollmerker trotzdem an, und der Waechter
+    # startete den Dienst eine Minute spaeter doch (Fall C1; an Govee 0.9.19
+    # so gemessen). Rueckgabewert 0: eine laufende Aktualisierung ist kein
+    # Fehlschlag.
+    if marke_gilt; then
+        echo "$MARKE_TEXT"
         return 0
     fi
     if ! command -v php >/dev/null 2>&1; then
@@ -291,6 +426,9 @@ starten() {
     # Entscheidung des Hausherrn vom 17.09.2026: bei einem Speicherregler ist
     # der erneute Versuch die sicherere Richtung. Die Protokollflut, vor der
     # die Regel warnt, verhindert die 600-s-Bremse im Waechterzweig (B31).
+    #
+    # Hier, und nur hier, werden Daten- und Protokollordner angelegt (H3, H4).
+    mkdir -p "$PDATA" "$PLOG" 2>/dev/null
     touch "$SOLL"
     # Die Ausgabe des Dienstes geht in die Startdatei, NICHT in das Protokoll:
     # dort schreibt allein das Programm selbst. Beim Start gekappt, damit sie
@@ -349,7 +487,14 @@ anhalten() {
 case "$1" in
     start)   starten ;;
     stop)    anhalten ;;
-    restart) anhalten; sleep 1; starten ;;
+    restart)
+        # Bei liegender Marke gar nicht erst anhalten: ein Neustart, der nur
+        # die erste Haelfte ausfuehrt, ist ein Anhalten (Fall C9).
+        if marke_gilt; then
+            echo "$MARKE_TEXT"
+            exit 0
+        fi
+        anhalten; sleep 1; starten ;;
     status)
         # Gemeldet werden die GEFUNDENEN Nummern, nicht der Inhalt der
         # PID-Datei: liegt dort eine fremde oder veraltete Nummer, waere sie
@@ -363,6 +508,12 @@ case "$1" in
         exit 1
         ;;
     waechter)
+        # Waehrend einer Aktualisierung tut der Waechter NICHTS - weder
+        # starten noch den Neustart-Zweig unten (der haelt erst an und startet
+        # dann; mit der Marke bliebe davon nur das Anhalten). Fall C7.
+        if marke_gilt; then
+            exit 0
+        fi
         # Nur neu starten, wenn der Dienst laufen SOLL. Ein bewusst
         # angehaltener Dienst bleibt angehalten.
         if [ -f "$SOLL" ] && ! laeuft; then
