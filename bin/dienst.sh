@@ -67,6 +67,18 @@ LOGDATEI="$PLOG/batteriebms.log"
 # Regel: genau einer schreibt in eine Protokolldatei.
 STARTLOG="$PLOG/batteriebms_start.log"
 SKRIPT="$SELF/bms_dienst.php"
+# Zweite Schreibweise desselben Skripts fuer den Vergleich weiter unten: wurde
+# der Dienst ueber einen anderen Weg auf dieselbe Datei gestartet (Symlink im
+# Pfad, LBHOMEDIR gegen den aufgeloesten Ablageort), steht in seiner
+# Befehlszeile eine andere Zeichenkette fuer dieselbe Datei. Ein Vergleich, der
+# das uebersieht, meldet "laeuft nicht" und laesst den Dienst stehen - bei
+# einem Speicherregler heisst das: der naechste Start findet die Modbus-
+# Verbindung belegt.
+SKRIPT_R=$(readlink -f "$SKRIPT" 2>/dev/null)
+[ -n "$SKRIPT_R" ] || SKRIPT_R="$SKRIPT"
+# Der Dienst laeuft als loxberry; wo es den Benutzer nicht gibt, als der
+# eigene. Die Suche ueber /proc sieht nur dessen Prozesse an.
+DIENST_UID=$(id -u loxberry 2>/dev/null || id -u)
 
 mkdir -p "$PDATA" "$PLOG" 2>/dev/null
 
@@ -175,19 +187,90 @@ abbild_steht() {
     return 0
 }
 
+# ==================================================================
+# Die eigenen Prozesse erkennen
+#
+# Argumentweise, nicht ueber eine Teilzeichenkette (Regeln/03, "Prozesse
+# argumentweise erkennen"). Bis 0.9.23 stand hier
+#     grep -qa "bms_dienst.php" "/proc/$P/cmdline"
+# und das trifft JEDE Befehlszeile, in der die Zeichenkette irgendwo vorkommt:
+# einen Editor mit der Datei offen, ein Sicherungsskript, das den Ordner
+# durchsucht, und den Einmallauf des Reiters Test. In WSL gemessen
+# (Pruefung-BatterieBMS-0.9.23, Fall 1): ein fremder Prozess
+# "tail -f <dienstpfad>", dessen Nummer in der PID-Datei stand, galt als
+# Dienst - "status" meldete "laeuft 507313", und nach "stop" war er tot.
+#
+# Ein Treffer hat GENAU zwei Argumente: argv[0] ist ein PHP, argv[1] ist genau
+# der eigene Dienstpfad. Das dritte Argument schliesst die Einmallaeufe aus
+# (--einmal, --selbsttest): sie laufen als eigener Prozess, sind aber nicht der
+# Dauerlaeufer und duerfen von "stop" nicht getroffen werden (Fall 3). Der
+# Dauerlaeufer wird an genau einer Stelle gestartet, in starten(), als
+# "nohup php $SKRIPT".
+#
+# Gelesen wird ohne Hilfsprogramm: "read -d ''" zerlegt die Befehlszeile am
+# Nullbyte. Das spart je Prozess einen Aufruf von tr - der Waechter laeuft
+# minuetlich.
+# ==================================================================
+ist_dienst() {
+    [ -r "/proc/$1/cmdline" ] || return 1
+    {
+        IFS= read -r -d '' bm_a0 || return 1
+        IFS= read -r -d '' bm_a1 || return 1
+        case "${bm_a0##*/}" in php|php[0-9]*) ;; *) return 1 ;; esac
+        if [ "$bm_a1" != "$SKRIPT" ]; then
+            [ "$(readlink -f "$bm_a1" 2>/dev/null)" = "$SKRIPT_R" ] || return 1
+        fi
+        IFS= read -r -d '' bm_a2 && return 1
+        return 0
+    # Die Fehlerausgabe wird VOR der Umleitung stillgelegt, nicht danach: ein
+    # Prozess kann zwischen der Auflistung und dem Lesen enden, und dann meldet
+    # die Schale "read error: No such process" - in WSL gemessen
+    # (Pruefung-BatterieBMS-0.9.23, Fall 1). Die Meldung landete in der
+    # Ausgabe von "dienst.sh status" und damit in der Oberflaeche.
+    } 2>/dev/null < "/proc/$1/cmdline"
+}
+
+# Alle eigenen Dienste, aufsteigend und ohne Dubletten.
+#
+# Zwei Quellen, weil keine allein reicht:
+#   - die Suche ueber /proc findet auch einen Dienst OHNE PID-Datei.
+#     purge_installation raeumt data/plugins/<ordner>/ bei jedem Upgrade ab
+#     (Regeln/06); der Minutentakt kann in der Luecke einen zweiten starten.
+#     In WSL gemessen (Pruefung-BatterieBMS-0.9.23, Fall 4 und 5): "stop"
+#     meldete "angehalten", und danach lief noch ein eigener Dienst - der
+#     sprach weiter mit einem Speicher, der nur EINE Verbindung zulaesst.
+#   - die PID-Datei findet auch einen Dienst, der einem anderen Benutzer
+#     gehoert (von Hand als root gestartet) und deshalb durch den
+#     Benutzerfilter faellt.
+dienste() {
+    {
+        for bm_d in /proc/[0-9]*; do
+            ist_dienst "${bm_d#/proc/}" || continue
+            [ "$(stat -c %u "$bm_d" 2>/dev/null)" = "$DIENST_UID" ] || continue
+            echo "${bm_d#/proc/}"
+        done
+        bm_p=""
+        [ -f "$PID" ] && IFS= read -r bm_p < "$PID" 2>/dev/null
+        case "$bm_p" in
+            ''|*[!0-9]*) ;;
+            *) ist_dienst "$bm_p" && echo "$bm_p" ;;
+        esac
+    } | sort -un
+}
+
 laeuft() {
-    [ -f "$PID" ] || return 1
-    P=$(cat "$PID" 2>/dev/null)
-    [ -n "$P" ] || return 1
-    kill -0 "$P" 2>/dev/null || return 1
-    # Nummernrecycling ausschliessen: der Prozess muss unser Skript sein
-    grep -qa "bms_dienst.php" "/proc/$P/cmdline" 2>/dev/null || return 1
-    return 0
+    [ -n "$(dienste)" ]
 }
 
 starten() {
-    if laeuft; then
-        echo "laeuft bereits (PID $(cat "$PID"))"
+    LAUFEND=$(dienste)
+    if [ -n "$LAUFEND" ]; then
+        ERSTE=$(printf '%s\n' "$LAUFEND" | head -n 1)
+        # Die PID-Datei nachziehen, wenn sie fehlt oder veraltet ist. Die
+        # Nummer ist argumentweise geprueft - eine ungepruefte Nummer aus einer
+        # Mustersuche darf hier nie hinein.
+        echo "$ERSTE" > "$PID" 2>/dev/null
+        echo "laeuft bereits (PID $ERSTE)"
         return 0
     fi
     if ! command -v php >/dev/null 2>&1; then
@@ -227,23 +310,38 @@ starten() {
 
 anhalten() {
     rm -f "$SOLL"
-    if ! laeuft; then
+    # ALLE eigenen Dienste, nicht nur den aus der PID-Datei. Ein Waise ohne
+    # PID-Datei haelt sonst die Modbus-Verbindung, und der neu gestartete
+    # Dienst kommt nicht mehr an das Geraet heran.
+    ZIEL=$(dienste)
+    if [ -z "$ZIEL" ]; then
         rm -f "$PID"
         echo "laeuft nicht"
         return 0
     fi
-    P=$(cat "$PID")
     # SIGTERM, damit der Dienst einen laufenden Zwang noch zuruecknehmen kann.
-    kill "$P" 2>/dev/null
+    kill $ZIEL 2>/dev/null
     for i in 1 2 3 4 5 6 7 8 9 10; do
-        laeuft || break
+        [ -n "$(dienste)" ] || break
         sleep 1
     done
-    if laeuft; then
-        kill -9 "$P" 2>/dev/null
+    # Vor dem harten Signal wird NEU gesucht, nicht die Liste von vorhin
+    # wiederverwendet: zwischen den beiden Signalen kann ein Prozess enden und
+    # seine Nummer neu vergeben werden, und der Minutentakt kann in der
+    # Wartezeit einen zweiten Dienst gestartet haben (Fall 6).
+    REST=$(dienste)
+    if [ -n "$REST" ]; then
+        kill -9 $REST 2>/dev/null
         sleep 1
     fi
     rm -f "$PID"
+    # "angehalten" ist eine Zusicherung, kein Rueckgabewert: es wird
+    # nachgesehen (Kernschicht 2, "Wirkung pruefen, nicht Rueckgabewert").
+    UEBRIG=$(dienste)
+    if [ -n "$UEBRIG" ]; then
+        echo "FEHLER: Dienst laeuft weiter (PID $(printf '%s' "$UEBRIG" | tr '\n' ' '))"
+        return 1
+    fi
     echo "angehalten"
     return 0
 }
@@ -253,8 +351,12 @@ case "$1" in
     stop)    anhalten ;;
     restart) anhalten; sleep 1; starten ;;
     status)
-        if laeuft; then
-            echo "laeuft $(cat "$PID")"
+        # Gemeldet werden die GEFUNDENEN Nummern, nicht der Inhalt der
+        # PID-Datei: liegt dort eine fremde oder veraltete Nummer, waere sie
+        # eine Falschaussage. Laufen zwei, stehen beide da.
+        LAUFEND=$(dienste)
+        if [ -n "$LAUFEND" ]; then
+            echo "laeuft $(printf '%s' "$LAUFEND" | tr '\n' ' ')"
             exit 0
         fi
         echo "gestoppt"
@@ -284,7 +386,7 @@ case "$1" in
             # geschrieben hat, galt damit als gesund - und in Loxone standen
             # die alten Werte weiter, ohne dass irgendwo etwas davon zu lesen
             # gewesen waere.
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Waechter: Der Dienst laeuft (PID $(cat "$PID" 2>/dev/null)), hat aber seit $(abbild_alter) s kein Abbild mehr geschrieben (Grenze $(abbild_grenze) s). Er wird neu gestartet." >> "$LOGDATEI"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Waechter: Der Dienst laeuft (PID $(printf '%s' "$(dienste)" | tr '\n' ' ')), hat aber seit $(abbild_alter) s kein Abbild mehr geschrieben (Grenze $(abbild_grenze) s). Er wird neu gestartet." >> "$LOGDATEI"
             touch "$NEUSTARTMERKER"
             anhalten >> "$STARTLOG" 2>&1
             starten >> "$STARTLOG" 2>&1

@@ -10,6 +10,46 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.23
+
+**Das Plugin erkennt seinen eigenen Dienst jetzt argumentweise — und beendet
+alle seine Dienste, nicht nur den aus der PID-Datei.**
+
+Bis 0.9.22 fragte `bin/dienst.sh`, ob in der Befehlszeile des Prozesses
+irgendwo die Zeichenkette `bms_dienst.php` vorkommt
+(`grep -qa "bms_dienst.php" /proc/<nummer>/cmdline`). Zwei Folgen, beide am
+18.09.2026 in WSL gemessen (`Pruefung-BatterieBMS-0.9.23/`):
+
+- **Ein fremder Prozess wurde beendet.** Stand in der PID-Datei eine Nummer,
+  die inzwischen einem anderen Vorgang gehörte, und kam der Dateiname in dessen
+  Befehlszeile vor — ein Editor mit der Datei offen, ein Sicherungslauf über den
+  Ordner —, dann meldete `dienst.sh status` „läuft" und `dienst.sh stop` beendete
+  ihn. Gemessen mit einem `tail -f` auf die Dienstdatei: `laeuft 507313`,
+  `angehalten`, der fremde Prozess war tot.
+- **Bei zwei eigenen Diensten blieb einer stehen.** `stop` schickte das Signal
+  nur an die Nummer aus der PID-Datei und meldete danach „angehalten". Ein
+  zweiter Dienst ohne PID-Datei — so startet ihn der minütliche Wächter in der
+  Lücke eines Upgrades, weil der Installer `data/plugins/<ordner>/` abräumt —
+  lief weiter. Er hielt die Modbus-Verbindung, und manche Speicher lassen nur
+  **eine** zu.
+
+Jetzt gilt ein Prozess nur dann als der Dienst, wenn `argv[0]` ein PHP ist,
+`argv[1]` **genau** der eigene Dienstpfad und ein drittes Argument fehlt. Die
+Einmalläufe (`--einmal`, `--selbsttest`) sind damit ausgenommen und überleben ein
+`stop`. Gesucht wird zusätzlich über `/proc`, gefiltert nach dem Benutzer, damit
+ein Dienst **ohne** PID-Datei mitgeht. Vor **jedem** Signal — auch vor `kill -9`
+— wird neu gesucht; `stop` meldet „angehalten" erst nach einer Nachkontrolle und
+sonst `FEHLER: Dienst laeuft weiter`.
+
+Dieselbe Erkennung tragen jetzt auch `preupgrade.sh` (der Rückfallweg ohne
+`dienst.sh` prüfte vor dem ersten Signal gar nicht) und die Oberfläche
+(`bm_dienst_pid()` in `webfrontend/html/bm_lib.php`, bis dahin `strpos()` über
+die ganze Befehlszeile). **Neu im Reiter Test:** „Läuft der Abrufdienst nur
+einmal?" — zwei gleichzeitige Dienste waren bisher nirgends zu sehen.
+
+Gemessen: 46 Fälle, vorher 24 Fehlschläge, nachher 0. Die Eichung baut jede
+Korrektur einzeln zurück; ohne sie wird jeweils die vorhergesagte Zeile rot.
+
 ## Neu in 0.9.22
 
 - **Die Kachel „MQTT" zeigt jetzt, ob dieses Plugin veröffentlicht.** Bis 0.9.21

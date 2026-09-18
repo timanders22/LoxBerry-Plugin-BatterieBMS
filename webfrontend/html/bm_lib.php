@@ -1375,18 +1375,150 @@ function bm_log_gebremst($schluessel, $text, $sekunden = 3600)
 
 /* ---------------- Dienst ---------------- */
 
+/** Der eigene Dauerlaeufer mit vollstaendigem Pfad, nicht nur mit Dateinamen. */
+function bm_dienst_skript()
+{
+    return bm_paths()['bindir'] . '/bms_dienst.php';
+}
+
+/**
+ * Ist die Prozessnummer $pid der Dauerlaeufer DIESES Plugins?
+ *
+ * Argumentweise (Regeln/03, "Prozesse argumentweise erkennen"), nicht ueber
+ * eine Teilzeichenkette. Bis 0.9.23 stand hier
+ *     strpos($cmd, 'bms_dienst.php') !== false
+ * und das hielt jeden Prozess fuer den Dienst, in dessen Befehlszeile der Name
+ * irgendwo vorkommt: einen Editor mit der Datei offen, ein Sicherungsskript,
+ * das den Ordner durchsucht, den Einmallauf des Reiters Test. In WSL gemessen
+ * (Pruefung-BatterieBMS-0.9.23, Fall 11): fuer einen fremden Prozess
+ * "tail -f <dienstpfad>", dessen Nummer in der PID-Datei stand, gab
+ * bm_dienst_pid() dessen Nummer zurueck - die Kachel meldete "Dienst laeuft".
+ *
+ * Ein Treffer hat GENAU zwei Argumente: argv[0] ist ein PHP, argv[1] ist genau
+ * der eigene Dienstpfad. bin/dienst.sh startet den Dauerlaeufer an genau einer
+ * Stelle als  nohup php <bindir>/bms_dienst.php ; die Einmallaeufe (--einmal,
+ * --selbsttest) haben ein drittes Argument und sind kein laufender Dienst.
+ *
+ * Der zweite Vergleich ueber realpath() deckt den Fall ab, dass der Dienst
+ * ueber einen anderen Pfad auf dieselbe Datei gestartet wurde: bin/dienst.sh
+ * loest seinen Ablageort mit readlink -f auf, bm_paths() baut ihn aus
+ * LBHOMEDIR. Ohne ihn meldete die Oberflaeche "gestoppt", waehrend der Dienst
+ * laeuft.
+ */
+function bm_ist_dienst($pid)
+{
+    $pid = (int) $pid;
+    if ($pid <= 0) {
+        return false;
+    }
+    $roh = @file_get_contents('/proc/' . $pid . '/cmdline');
+    if (!is_string($roh) || $roh === '') {
+        return false;
+    }
+    // Die Befehlszeile ist eine Folge von Argumenten, jedes mit einem Nullbyte
+    // abgeschlossen; das letzte Stueck nach dem Trennen ist deshalb leer.
+    $teile = explode("\0", $roh);
+    if ($teile[count($teile) - 1] === '') {
+        array_pop($teile);
+    }
+    if (count($teile) !== 2) {
+        return false;
+    }
+    $a0 = basename($teile[0]);
+    if ($a0 !== 'php' && !preg_match('/^php[0-9][0-9.]*$/', $a0)) {
+        return false;
+    }
+    $soll = bm_dienst_skript();
+    if ($teile[1] === $soll) {
+        return true;
+    }
+    $r1 = @realpath($teile[1]);
+    $r2 = @realpath($soll);
+    return $r1 !== false && $r2 !== false && $r1 === $r2;
+}
+
+/**
+ * Unter welcher Benutzernummer laeuft der Dienst? -1 heisst "unbekannt".
+ *
+ * Gestartet wird er als loxberry (bin/dienst.sh steigt dafuer eigens ab).
+ * Laesst sich die Nummer nicht ermitteln - ohne die POSIX-Erweiterung geht es
+ * nicht -, wird NICHT gefiltert, und die Erkennung stuetzt sich allein auf die
+ * Befehlszeile. Das ist hier die geschlossene Seite: ein uebersehener Dienst
+ * haelt die Modbus-Verbindung, waehrend ein Beenden ueber die Benutzergrenze
+ * hinweg ohnehin scheitern wuerde.
+ */
+function bm_dienst_uid()
+{
+    if (function_exists('posix_getpwnam')) {
+        $pw = @posix_getpwnam('loxberry');
+        if (is_array($pw) && isset($pw['uid'])) {
+            return (int) $pw['uid'];
+        }
+    }
+    return -1;
+}
+
+/**
+ * Alle laufenden Dienste dieses Plugins, aufsteigend nach Prozessnummer.
+ *
+ * Auch die OHNE PID-Datei: purge_installation raeumt data/plugins/<ordner>/
+ * bei jedem Upgrade ab (Regeln/06), und der minuetliche Waechter kann in der
+ * Luecke einen zweiten starten. Bis 0.9.23 sah die Oberflaeche nur die
+ * PID-Datei und meldete "gestoppt", waehrend ein Dienst am Speicher hing.
+ */
+function bm_dienste_suchen()
+{
+    clearstatcache();
+    $treffer = array();
+    // Erst nachsehen, ob es /proc ueberhaupt gibt - sonst steht bei jedem
+    // Aufruf dieselbe Warnung im Protokoll, und eine Warnung, die immer kommt,
+    // liest am Ende niemand mehr.
+    if (!@is_dir('/proc')) {
+        return $treffer;
+    }
+    $uid = bm_dienst_uid();
+    $dh = @opendir('/proc');
+    if ($dh === false) {
+        return $treffer;
+    }
+    while (($e = readdir($dh)) !== false) {
+        if (!preg_match('/^[0-9]+$/', $e)) {
+            continue;
+        }
+        if ($uid >= 0) {
+            $o = @fileowner('/proc/' . $e);
+            if ($o === false || (int) $o !== $uid) {
+                continue;
+            }
+        }
+        if (bm_ist_dienst($e)) {
+            $treffer[] = (int) $e;
+        }
+    }
+    closedir($dh);
+    sort($treffer);
+    return $treffer;
+}
+
+/**
+ * Prozessnummer des laufenden Dienstes, oder 0.
+ *
+ * Zuerst die PID-Datei - sie ist die billige und die richtige Antwort, solange
+ * sie stimmt -, danach die Suche ueber /proc. Beide Wege pruefen die
+ * Befehlszeile argumentweise.
+ */
 function bm_dienst_pid()
 {
+    clearstatcache();
     $f = bm_paths()['datadir'] . '/dienst.pid';
-    if (!is_file($f)) {
-        return 0;
+    if (is_file($f)) {
+        $pid = (int) trim((string) @file_get_contents($f));
+        if (bm_ist_dienst($pid)) {
+            return $pid;
+        }
     }
-    $pid = (int) trim((string) @file_get_contents($f));
-    if ($pid <= 0 || !is_dir('/proc/' . $pid)) {
-        return 0;
-    }
-    $cmd = (string) @file_get_contents('/proc/' . $pid . '/cmdline');
-    return strpos($cmd, 'bms_dienst.php') !== false ? $pid : 0;
+    $alle = bm_dienste_suchen();
+    return $alle ? $alle[0] : 0;
 }
 
 function bm_dienst_soll()

@@ -26,6 +26,70 @@ BASE="${ARGV5:-$LBHOMEDIR}"
 # Cron den Dienst nicht mitten im Update wieder hochzieht.
 DIENST="$BASE/bin/plugins/$PFOLDER/dienst.sh"
 PID="$BASE/data/plugins/$PFOLDER/dienst.pid"
+
+# ---------- Die eigenen Prozesse erkennen ----------
+#
+# Argumentweise (Regeln/03, "Prozesse argumentweise erkennen"): argv[0] ist ein
+# PHP, argv[1] genau der eigene Dienstpfad, ein drittes Argument gibt es nicht.
+# Bis 0.9.23 stand im Rueckfallweg unten das erste Signal ganz ohne Pruefung
+# und vor dem harten eine Teilzeichenkettensuche (grep -qa "bms_dienst.php").
+# In WSL gemessen (Pruefung-BatterieBMS-0.9.23, Fall 9): ein fremder Prozess
+# "tail -f <dienstpfad>", dessen Nummer in der PID-Datei stand, war nach
+# preupgrade.sh tot.
+#
+# Die zweite Schreibweise deckt den Fall ab, dass der Dienst ueber einen
+# anderen Pfad auf dieselbe Datei gestartet wurde (bin/dienst.sh loest seinen
+# Ablageort mit readlink -f auf, hier kommt er aus $5).
+BM_SKRIPT="$BASE/bin/plugins/$PFOLDER/bms_dienst.php"
+BM_SKRIPT_R=$(readlink -f "$BM_SKRIPT" 2>/dev/null)
+[ -n "$BM_SKRIPT_R" ] || BM_SKRIPT_R="$BM_SKRIPT"
+BM_UID=$(id -u loxberry 2>/dev/null || id -u)
+
+bm_ist_dienst() {
+    [ -r "/proc/$1/cmdline" ] || return 1
+    {
+        IFS= read -r -d '' bm_a0 || return 1
+        IFS= read -r -d '' bm_a1 || return 1
+        case "${bm_a0##*/}" in php|php[0-9]*) ;; *) return 1 ;; esac
+        if [ "$bm_a1" != "$BM_SKRIPT" ]; then
+            [ "$(readlink -f "$bm_a1" 2>/dev/null)" = "$BM_SKRIPT_R" ] || return 1
+        fi
+        IFS= read -r -d '' bm_a2 && return 1
+        return 0
+    # Die Fehlerausgabe wird VOR der Umleitung stillgelegt, nicht danach: ein
+    # Prozess kann zwischen der Auflistung und dem Lesen enden, und dann meldet
+    # die Schale "read error: No such process" - in WSL gemessen
+    # (Pruefung-BatterieBMS-0.9.23, Fall 1). Die Meldung landete in der
+    # Ausgabe von "dienst.sh status" und damit in der Oberflaeche.
+    } 2>/dev/null < "/proc/$1/cmdline"
+}
+
+# Alle eigenen Dienste des eigenen Benutzers - auch die ohne PID-Datei.
+bm_dienste() {
+    for bm_d in /proc/[0-9]*; do
+        bm_ist_dienst "${bm_d#/proc/}" || continue
+        [ "$(stat -c %u "$bm_d" 2>/dev/null)" = "$BM_UID" ] || continue
+        echo "${bm_d#/proc/}"
+    done
+    return 0
+}
+
+# Beendet sie: freundlich, bis zu fuenfzehn Sekunden Zeit, dann hart - und vor
+# JEDEM Signal wird neu gesucht, auch vor dem kill -9. Gibt die Nummern aus,
+# die beim ersten Signal gemeint waren.
+bm_dienste_beenden() {
+    bm_ziel=$(bm_dienste)
+    [ -n "$bm_ziel" ] || return 0
+    kill $bm_ziel 2>/dev/null
+    bm_i=0
+    while [ $bm_i -lt 15 ] && [ -n "$(bm_dienste)" ]; do
+        sleep 1
+        bm_i=$((bm_i + 1))
+    done
+    bm_rest=$(bm_dienste)
+    [ -n "$bm_rest" ] && kill -9 $bm_rest 2>/dev/null
+    echo $bm_ziel
+}
 # Merken, OB der Dienst lief - NEBEN dem Datenverzeichnis, denn das raeumt
 # der Installer beim Upgrade ab (B29). Bis 0.9.15 fiel dabei der Sollmerker
 # soll_laufen, kein Hakenskript startete den Dienst wieder, und der Waechter
@@ -53,29 +117,49 @@ if [ -x "$DIENST" ]; then
         echo "<FAIL> Ein alter Prozess haelt moeglicherweise noch die Verbindung"
         echo "<FAIL> zum Speicher. Manche Geraete lassen nur EINE zu."
     fi
-elif [ -f "$PID" ]; then
+else
     # Rueckfallebene, falls dienst.sh fehlt: von Hand, aber mit Geduld.
-    P=$(cat "$PID" 2>/dev/null)
-    if [ -n "$P" ] && kill -0 "$P" 2>/dev/null; then
-        kill "$P" 2>/dev/null || true
-        i=0
-        while [ $i -lt 15 ] && kill -0 "$P" 2>/dev/null; do
-            sleep 1
-            i=$((i + 1))
-        done
-        # Nummernrecycling ausschliessen, bevor mit -9 nachgesetzt wird.
-        if kill -0 "$P" 2>/dev/null && grep -qa "bms_dienst.php" "/proc/$P/cmdline" 2>/dev/null; then
-            kill -9 "$P" 2>/dev/null || true
+    if [ -f "$PID" ]; then
+        P=$(cat "$PID" 2>/dev/null)
+        # Geprueft wird VOR dem ersten Signal, nicht erst vor dem harten.
+        # Prozessnummern werden wiederverwendet: liegt eine alte PID-Datei
+        # herum und traegt ihre Zahl inzwischen einen fremden Vorgang, traf
+        # das erste Signal genau den.
+        if [ -n "$P" ] && kill -0 "$P" 2>/dev/null && bm_ist_dienst "$P"; then
+            kill "$P" 2>/dev/null || true
+            i=0
+            while [ $i -lt 15 ] && kill -0 "$P" 2>/dev/null && bm_ist_dienst "$P"; do
+                sleep 1
+                i=$((i + 1))
+            done
+            # Vor dem harten Signal erneut pruefen - der Dienst kann inzwischen
+            # weg und die Nummer neu vergeben sein.
+            if kill -0 "$P" 2>/dev/null && bm_ist_dienst "$P"; then
+                kill -9 "$P" 2>/dev/null || true
+            fi
+            # Nur HIER gemeldet: eine liegengebliebene PID-Datei allein ist kein
+            # laufender Dienst. Bis 0.9.19 stand die Zeile hinter dem schliessenden
+            # fi - der Zweig darueber wertet Rueckgabewert UND Ausgabe aus (B28),
+            # diese Rueckfallebene tat es nicht.
+            echo "<INFO> Laufender Dienst angehalten (Rueckfallebene ohne dienst.sh)."
+        elif [ -n "$P" ] && kill -0 "$P" 2>/dev/null; then
+            echo "<INFO> Die Nummer $P aus der PID-Datei gehoert einem fremden"
+            echo "<INFO> Vorgang - es wurde nichts beendet, die Datei wird entfernt."
+        else
+            echo "<INFO> Der Dienst lief nicht - es war nichts anzuhalten."
         fi
-        # Nur HIER gemeldet: eine liegengebliebene PID-Datei allein ist kein
-        # laufender Dienst. Bis 0.9.19 stand die Zeile hinter dem schliessenden
-        # fi - der Zweig darueber wertet Rueckgabewert UND Ausgabe aus (B28),
-        # diese Rueckfallebene tat es nicht.
-        echo "<INFO> Laufender Dienst angehalten (Rueckfallebene ohne dienst.sh)."
-    else
-        echo "<INFO> Der Dienst lief nicht - es war nichts anzuhalten."
+        rm -f "$PID"
     fi
-    rm -f "$PID"
+    # Dazu jeder eigene Dienst OHNE PID-Datei. purge_installation raeumt
+    # data/plugins/<ordner>/ bei jedem Upgrade ab (Regeln/06), der Minutentakt
+    # kann in der Luecke einen zweiten starten. In WSL gemessen
+    # (Pruefung-BatterieBMS-0.9.23, Fall 9): ohne diesen Schritt lief er durch
+    # das ganze Upgrade weiter - mit offener Modbus-Verbindung an einem
+    # Speicher, der nur eine zulaesst.
+    WAISEN=$(bm_dienste_beenden)
+    if [ -n "$WAISEN" ]; then
+        echo "<INFO> Ein Dienst ohne PID-Datei lief und wurde beendet (PID $WAISEN)."
+    fi
 fi
 
 # ---------- Konfiguration sichern ----------

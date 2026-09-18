@@ -26,6 +26,28 @@ function bm_pruefungen()
         $pid > 0 ? bm_t('TEST.A_DIENST_LAEUFT') . ' ' . $pid
                  : (bm_dienst_soll() ? bm_t('TEST.A_DIENST_SOLL_TOT') : bm_t('TEST.A_DIENST_GESTOPPT')));
 
+    /* Laeuft der Dauerlaeufer nur EINMAL?
+     *
+     * Zwei Dienste sind hier kein Schoenheitsfehler: manche Speicher lassen
+     * nur EINE Verbindung zu (belegt fuer die BYD-BCU), und beide schreiben
+     * dieselbe loxone.json. Der zweite entsteht in der Upgrade-Luecke -
+     * purge_installation loescht die PID-Datei, der Minutentakt findet den
+     * laufenden Dienst nicht und startet einen neuen (Regeln/06). Bis 0.9.23
+     * hat das niemand gesehen: bm_dienst_pid() las allein die PID-Datei.
+     * Gesucht wird jetzt argumentweise ueber /proc.
+     *
+     * Der graue Punkt ist der dritte Ausgang: "keiner laeuft" ist keine
+     * Beanstandung dieser Zeile - ob das gewollt ist, sagt die Zeile darueber. */
+    $bm_alle = bm_dienste_suchen();
+    if (count($bm_alle) > 1) {
+        $zeilen[] = bm_pruefzeile(0, bm_t('TEST.F_DIENST_ZAHL'),
+            sprintf(bm_t('TEST.A_DIENST_DOPPELT'), count($bm_alle), implode(', ', $bm_alle)));
+    } elseif (count($bm_alle) === 1) {
+        $zeilen[] = bm_pruefzeile(1, bm_t('TEST.F_DIENST_ZAHL'), bm_t('TEST.A_DIENST_EINER'));
+    } else {
+        $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_DIENST_ZAHL'), bm_t('TEST.A_DIENST_KEINER'));
+    }
+
     $zeilen[] = bm_pruefzeile(count($geraete) > 0 ? 1 : 0, bm_t('TEST.F_GERAETE'),
         count($geraete) > 0 ? sprintf(bm_t('TEST.A_GERAETE'), count($geraete))
                             : bm_t('TEST.A_KEINE_GERAETE'));
