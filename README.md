@@ -10,6 +10,38 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.25
+
+**Ohne laufenden Dienst wird kein Befehl mehr eingereiht, und was beim Dienststart älter als
+60 Sekunden ist, geht nicht mehr an den Speicher.**
+
+Bis 0.9.24 legte der Reiter Test „Laden“, „Entladen“, „Automatik“, „Rohregister lesen“ und
+„Abruf“ auch dann in die Warteschlange, wenn kein Dienst lief. Der nächste Dienststart führte den
+Befehl aus — ungefragt und möglicherweise Stunden nach dem Knopfdruck. In WSL gegen eine
+Modbus-Attrappe gemessen (`Pruefung-BatterieBMS-0.9.24/`, Fall U3; `Pruefung-BatterieBMS-0.9.25/`,
+Fall W2): ein „Laden 500 W“ ohne Dienst wurde beim nächsten Start als **zwei Schreibbefehle** an
+den Speicher geschickt. Der Endpunkt für den Miniserver wies schon vorher mit 503 ab.
+
+Jetzt gilt beides:
+
+* **Der Reiter Test weist ab**, wenn kein Dienst läuft: „Dienst läuft nicht — nichts
+  eingereiht.“ Die Sperre sitzt in `bm_befehl_absetzen()`, über die Reiter Test und Endpunkt
+  gleichermaßen einreihen; erkannt wird der Dienst mit `bm_dienst_pid()`, derselben
+  argumentweisen Suche wie überall im Plugin.
+* **Der Dienst verwirft beim Start** jeden Eintrag der Warteschlange, der älter als 60 Sekunden
+  ist oder einen Zeitpunkt mehr als 5 Sekunden in der Zukunft trägt, und ebenso einen
+  liegengebliebenen Nachholauftrag der Schreibbremse. Jeder verworfene Befehl steht mit Aktion,
+  Speicher, Leistung, Herkunft und Alter im Protokoll, etwa: `Warteschlange beim Start: Befehl
+  laden (Speicher 2, 500 W, Quelle Loxone) ist 120 s alt, aelter als 60 s - VERWORFEN, nicht an
+  den Speicher geschickt.`
+
+Warum 60 Sekunden: gemessen lagen zwischen Einreihen und Abholen im Normalbetrieb höchstens
+0,4 s, mit einem Speicher, der nicht antwortet, höchstens 8,2 s, und bei einem Neustart unmittelbar
+nach dem Einreihen höchstens 1,2 s. Wer einreiht, wartet höchstens die eingestellte Wartezeit auf
+die Antwort, und die ist auf 30 s begrenzt. Ein älterer Eintrag hat niemanden mehr, der auf ihn
+wartet. Im laufenden Betrieb gilt die Grenze nicht — dort holt der Dienst jeden Eintrag nach
+höchstens einem Durchlauf ab.
+
 ## Neu in 0.9.24
 
 **Während einer Aktualisierung startet kein Weg den Dienst mehr — und `bin/dienst.sh` liest die
@@ -331,6 +363,8 @@ gelten:
 * eine **Totmannschaltung** – bleibt länger als die eingestellte Zeit ein
   Lebenszeichen aus, geht der Speicher von selbst in die Automatik zurück.
   Auch beim Anhalten des Dienstes wird jeder laufende Zwang zurückgenommen.
+* **keine Befehle auf Vorrat** – ohne laufenden Dienst wird nichts eingereiht, und beim
+  Dienststart verwirft der Dienst jeden Befehl, der älter als 60 Sekunden ist.
 
 `watt=0` ist etwas anderes als „laden mit 0 Watt": es beendet den Zwang.
 

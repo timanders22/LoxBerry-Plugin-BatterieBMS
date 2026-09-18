@@ -1663,9 +1663,21 @@ function bm_serielle_empfehlung($pfad)
  * Rueckgabe: array(ok, Meldung). ok = 1 erledigt, 0 abgelehnt,
  * 2 eingereiht, aber ohne Antwort in der Wartezeit - Ergebnis unbekannt.
  * Es wird nie ein Erfolg gemeldet, den niemand geprueft hat.
+ *
+ * Ohne laufenden Dienst wird NICHTS eingereiht. Bis 0.9.24 legte der Reiter
+ * Test den Befehl trotzdem ab, und der naechste Dienststart schrieb ihn an den
+ * Speicher - gemessen 2 Schreibbefehle fuer ein "Laden 500 W", das niemand
+ * mehr erwartete (Pruefung-BatterieBMS-0.9.24, Fall U3; 0.9.25, Fall W2).
+ * Der Endpunkt prueft schon vorher selbst (webfrontend/html/index.php, 503);
+ * hier steht die Sperre fuer jeden Weg, der ueber diese Funktion einreiht.
+ * Erkannt wird mit bm_dienst_pid(), derselben argumentweisen Suche wie
+ * ueberall in diesem Plugin.
  */
 function bm_befehl_absetzen($befehl, $wartezeit = null)
 {
+    if (bm_dienst_pid() === 0) {
+        return array(0, bm_t('TEST.M_DIENST_LAEUFT_NICHT'));
+    }
     $p = bm_paths();
     $cfg = bm_config();
     if ($wartezeit === null) {

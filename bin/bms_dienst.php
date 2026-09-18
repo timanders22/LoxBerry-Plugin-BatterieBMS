@@ -1108,6 +1108,121 @@ function bm_veroeffentlichen(array $abbild, $topic)
 }
 
 /* ==================================================================
+ * Alte Befehle beim Dienststart verwerfen
+ * ================================================================== */
+
+/* Hoechstalter eines Befehls, den der Dienst beim Start noch ausfuehrt.
+ *
+ * Bis 0.9.24 fuehrte der Dienst beim Start jeden Eintrag der Warteschlange
+ * aus, gleich wie alt. Gemessen (Pruefung-BatterieBMS-0.9.24, Fall U3): ein
+ * im Reiter Test ohne laufenden Dienst eingereihtes "Laden 500 W" ging beim
+ * naechsten Dienststart als 2 Schreibbefehle an den Speicher - ungefragt und
+ * moeglicherweise Stunden nach dem Knopfdruck.
+ *
+ * Warum 60 s (Pruefung-BatterieBMS-0.9.25, protokoll_abholzeit.txt): zwischen
+ * Einreihen und Abholen lagen im Normalbetrieb hoechstens 0,4 s, mit einem
+ * stummen Speicher im Durchlauf hoechstens 8,2 s, bei einem Neustart
+ * unmittelbar nach dem Einreihen hoechstens 1,2 s. Wer einreiht, wartet
+ * hoechstens 'wartezeit' Sekunden auf die Antwort, und die ist auf 30 s
+ * begrenzt (bm_wert_grenzen(), bm_befehl_absetzen()). Ein Eintrag, der beim
+ * Start aelter als 60 s ist, hat niemanden mehr, der auf ihn wartet.
+ *
+ * Ein Zeitpunkt in der Zukunft heisst: die Uhr ist seit dem Einreihen
+ * zurueckgesprungen (etwa ein Neustart ohne Echtzeituhr, bevor die Zeit
+ * nachgestellt ist) - das Alter ist dann unbekannt, der Eintrag wird
+ * verworfen. Ein Spiel von 5 s bleibt, weil die Uhr in WSL beim Messen um
+ * 0,9 s zurueckgesprungen ist (protokoll_abholzeit.txt, M1, erster Wert). */
+define('BM_BEFEHL_HOECHSTALTER', 60);
+define('BM_BEFEHL_UHRSPIEL', 5);
+
+/** Ein Eintrag fuers Protokoll: Aktion, Speicher, Leistung, Herkunft. */
+function bm_befehl_beschreiben($art, $befehl, $nr = null)
+{
+    if (!is_array($befehl)) {
+        return $art . ' (unlesbar)';
+    }
+    $teile = array();
+    $g = ($nr !== null) ? $nr : (isset($befehl['geraet']) ? $befehl['geraet'] : null);
+    if ($g !== null) {
+        $teile[] = 'Speicher ' . (int) $g;
+    }
+    if (isset($befehl['watt'])) {
+        $teile[] = (int) $befehl['watt'] . ' W';
+    }
+    if (isset($befehl['quelle']) && (string) $befehl['quelle'] !== '') {
+        $teile[] = 'Quelle ' . bm_text_sauber((string) $befehl['quelle'], 40);
+    }
+    $aktion = isset($befehl['aktion']) ? bm_text_sauber((string) $befehl['aktion'], 20) : '?';
+    return $art . ' ' . $aktion . ($teile ? ' (' . implode(', ', $teile) . ')' : '');
+}
+
+/** Gilt ein Eintrag dieses Alters beim Start noch? null = Alter unbekannt. */
+function bm_befehl_alter_text($alter)
+{
+    if ($alter === null) {
+        return 'hat kein lesbares Alter';
+    }
+    if ($alter < -BM_BEFEHL_UHRSPIEL) {
+        return 'liegt ' . (-$alter) . ' s in der Zukunft (Uhr zurueckgestellt?)';
+    }
+    return 'ist ' . $alter . ' s alt, aelter als ' . BM_BEFEHL_HOECHSTALTER . ' s';
+}
+
+function bm_befehl_alter_gilt($alter)
+{
+    return $alter !== null && $alter <= BM_BEFEHL_HOECHSTALTER
+        && $alter >= -BM_BEFEHL_UHRSPIEL;
+}
+
+/**
+ * Einmal beim Start: Eintraege der Warteschlange und Nachholauftraege, die
+ * aelter als BM_BEFEHL_HOECHSTALTER sind, werden verworfen und protokolliert.
+ *
+ * Die Nachholmappe gehoert dazu: ein Nachholauftrag ueberlebt das Anhalten,
+ * wenn dort die Ruecknahme in die Automatik scheitert (gelesen: das Ende von
+ * bm_dienst_schleife() loescht Sollwert und Nachholmappe nur bei Erfolg), und
+ * verfaellt in bm_warteschlange() erst nach der Totmannzeit (Vorgabe 300 s,
+ * mindestens 60 s). Gemessen: ein 120 s alter
+ * Nachholauftrag ging beim Start als 2 Schreibbefehle an den Speicher
+ * (Pruefung-BatterieBMS-0.9.25, Fall W10).
+ *
+ * Nur beim Start, wie entschieden (Hausherr, 18.09.2026): im laufenden
+ * Betrieb holt der Dienst jeden Eintrag nach hoechstens einem Durchlauf ab.
+ */
+function bm_alte_befehle_verwerfen()
+{
+    $p = bm_paths();
+    $jetzt = time();
+    clearstatcache();
+    foreach ((array) glob($p['datadir'] . '/befehle/*.json') as $datei) {
+        $mt = @filemtime($datei);
+        $alter = ($mt === false) ? null : $jetzt - (int) $mt;
+        if (bm_befehl_alter_gilt($alter)) {
+            continue;
+        }
+        $befehl = bm_json_lesen($datei);
+        @unlink($datei);
+        bm_log('Warteschlange beim Start: ' . bm_befehl_beschreiben('Befehl', $befehl) . ' '
+            . bm_befehl_alter_text($alter) . ' - VERWORFEN, nicht an den Speicher geschickt.');
+    }
+    foreach ((array) glob($p['datadir'] . '/nachhol_geraet*.json') as $datei) {
+        if (!preg_match('/nachhol_geraet([0-9]+)\.json$/', $datei, $m)) {
+            continue;
+        }
+        $vor = bm_json_lesen($datei);
+        $ts = (is_array($vor) && isset($vor['ts']) && preg_match('/^[0-9]{1,12}$/', (string) $vor['ts']))
+            ? (int) $vor['ts'] : null;
+        $alter = ($ts === null) ? null : $jetzt - $ts;
+        if (bm_befehl_alter_gilt($alter)) {
+            continue;
+        }
+        @unlink($datei);
+        bm_log('Nachholmappe beim Start: ' . bm_befehl_beschreiben('Nachholauftrag', $vor, (int) $m[1])
+            . ' ' . bm_befehl_alter_text($alter) . ' - VERWORFEN, nicht an den Speicher geschickt.');
+    }
+}
+
+/* ==================================================================
  * Befehlswarteschlange abarbeiten
  * ================================================================== */
 
@@ -1358,6 +1473,9 @@ function bm_dienst_schleife($einmal = false)
     if (!$geraete) {
         bm_log('Es ist kein Speicher eingerichtet - der Dienst laeuft, hat aber nichts zu tun.');
     }
+    // Vor dem ersten Abholen: was beim Start schon zu alt ist, geht nicht
+    // mehr an den Speicher (BM_BEFEHL_HOECHSTALTER).
+    bm_alte_befehle_verwerfen();
 
     $letzteZellen = array();
     $letzteSchreibzeit = array();
