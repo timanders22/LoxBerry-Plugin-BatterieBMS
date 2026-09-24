@@ -183,9 +183,23 @@ fi
 # starten - auch direkt unter der Zeile "Der Dienst lief vor dem Update und
 # wurde wieder gestartet". Das Log widersprach sich damit innerhalb von zwei
 # Sekunden, und nach einer Aktualisierung war der Rat schlicht falsch.
-if [ "$UEBERNOMMEN" = "1" ]; then
+#
+# Entschieden wird nach dem INHALT der Konfiguration nach dem Zurueckspielen,
+# nicht danach, ob etwas zurueckgespielt wurde: preupgrade.sh sichert
+# batteriebms.json auch dann, wenn sie nur "{}" enthaelt, und bis 0.9.26 hiess
+# es dann "Einstellungen wurden uebernommen, nichts weiter zu tun", obwohl
+# kein Speicher eingetragen war (Pruefung-BatterieBMS-0.9.27, Faelle c und d).
+# Eingerichtet heisst: die Liste "geraete" ist nicht leer. PHP ist hier
+# sicher da - ohne PHP bricht dieses Skript weiter oben ab.
+bm_eingerichtet() {
+    php -r '$d = json_decode((string) @file_get_contents($argv[1]), true);
+            exit(is_array($d) && !empty($d["geraete"]) ? 0 : 1);' "$1" 2>/dev/null
+}
+if bm_eingerichtet "$CF"; then
     echo "<OK> Aktualisierung abgeschlossen."
-    echo "<INFO> Einstellungen, eigene Profile und der Verlauf wurden uebernommen."
+    if [ "$UEBERNOMMEN" = "1" ]; then
+        echo "<INFO> Einstellungen, eigene Profile und der Verlauf wurden uebernommen."
+    fi
     echo "<INFO> Es ist nichts weiter zu tun. Der Reiter Test sagt Zeile fuer Zeile,"
     echo "<INFO> ob die Einrichtung weiter traegt."
 else

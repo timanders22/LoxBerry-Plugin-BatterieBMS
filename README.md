@@ -10,6 +10,15 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.27
+
+**Das Schlusswort der Installation richtet sich nach dem Inhalt der Konfiguration.**
+Bis 0.9.26 hieß es nach jedem Update „Einstellungen … wurden übernommen, es ist nichts weiter
+zu tun", sobald irgendetwas zurückgespielt worden war — auch wenn nie ein Speicher eingetragen
+war. Jetzt erscheint diese Zeile nur, wenn die Liste der Speicher nach dem Zurückspielen nicht
+leer ist; sonst steht dort die Anleitung zur Einrichtung. In WSL nachgestellt
+(`Pruefung-BatterieBMS-0.9.27/`), nicht am Gerät.
+
 ## Neu in 0.9.25
 
 **Ohne laufenden Dienst wird kein Befehl mehr eingereiht, und was beim Dienststart älter als
