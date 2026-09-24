@@ -58,11 +58,15 @@ if (!function_exists('bm_e')) {
 /* Den LoxBerry-Wurzelordner ohne festen Systempfad bestimmen.
  *
  * Vom eigenen Ablageort aufwaerts, bis ein Verzeichnis gefunden ist, das
- * config/plugins UND webfrontend enthaelt. Das trifft die uebliche
- * Installation genauso wie eine an einem anderen Ort - und es trifft auch
- * den Fall, dass das Plugin noch als entpacktes Archiv daliegt (dann findet
- * es nichts und gibt einen Leerstring zurueck, was der Aufrufer ohnehin
- * abfangen muss).
+ * config/plugins, data/plugins UND config/system/general.json enthaelt - der
+ * dritte Nachweis wie in bin/dienst.sh (Regeln/06, "Eine Wurzelsuche ueber
+ * config/plugins und data/plugins trifft auf einem Pruefrechner das Laufwerk
+ * selbst"). Bis 0.9.27 genuegten config/plugins und webfrontend: ein
+ * ausgepacktes Archiv in einem fremden Baum mit diesen beiden Ordnern nahm
+ * ihn als Wurzel, und "bms_dienst.php --einmal" legte dort 13 Eintraege unter
+ * data/plugins/html/ an (in WSL gemessen, Pruefung-BatterieBMS-0.9.28,
+ * Fall T8). Findet sich nichts, ist das Ergebnis leer; die Aufrufer arbeiten
+ * dann im eigenen Ordner (bm_paths(), Archivmodus).
  *
  * Der Name traegt kein Plugin-Kuerzel und ist deshalb abgesichert: zwei
  * Bibliotheken landen nie im selben Prozess, aber die Pruefung kostet nichts.
@@ -72,7 +76,8 @@ if (!function_exists('lb_wurzel_ermitteln')) {
     {
         $d = __DIR__;
         for ($i = 0; $i < 8; $i++) {
-            if (is_dir($d . '/config/plugins') && is_dir($d . '/webfrontend')) {
+            if (is_dir($d . '/config/plugins') && is_dir($d . '/data/plugins')
+                && is_file($d . '/config/system/general.json')) {
                 return $d;
             }
             $eltern = dirname($d);
@@ -83,35 +88,77 @@ if (!function_exists('lb_wurzel_ermitteln')) {
     }
 }
 
+/* Die LoxBerry-Wurzel fuer bm_paths(), in dieser Reihenfolge:
+ *   1. $LBHOMEDIR, wenn darunter config/plugins und data/plugins liegen.
+ *      general.json wird hier NICHT verlangt: die Pruefkette setzt
+ *      LBHOMEDIR auf eine Attrappe (Werkzeuge/lb), die nur so aussieht.
+ *   2. lb_wurzel_ermitteln() - aufwaerts, mit general.json.
+ *   3. sonst leer. Dahinter steht KEIN fester Standardort mehr.
+ * Bis 0.9.27 galt jedes vorhandene Verzeichnis in $LBHOMEDIR als Wurzel, und
+ * fand die Suche nichts, folgte /home/loxberry/loxberry - Regeln/06: ohne
+ * brauchbare Wurzel warnen statt vollziehen (Bauart ZendureSolarFlow 0.9.26,
+ * zd_lbhome()). */
+function bm_lbhome()
+{
+    $home = getenv('LBHOMEDIR');
+    if ($home && is_dir($home . '/config/plugins') && is_dir($home . '/data/plugins')) {
+        return rtrim($home, '/');
+    }
+    return lb_wurzel_ermitteln();
+}
+
 function bm_paths()
 {
     static $p = null;
     if ($p !== null) {
         return $p;
     }
-    $home = getenv('LBHOMEDIR');
-    if (!$home || !is_dir($home)) {
-        foreach (array(lb_wurzel_ermitteln(), '/home/loxberry/loxberry') as $k) {
-            if (is_dir($k)) {
-                $home = $k;
-                break;
-            }
-        }
-    }
+    $home = bm_lbhome();
     // Der Pluginordner ergibt sich aus dem Ablageort dieser Datei. Der
     // MD5-Schluessel aus der plugindatabase.json wird bewusst NICHT benutzt -
     // er wird aus Autorenname, E-Mail und Plugin-Name gebildet und aendert
     // sich bei jedem Fork.
     $dir = basename(dirname(__FILE__));
-    if ($home && !is_dir($home . '/config/plugins/' . $dir)) {
-        foreach (array(getenv('LBPPLUGINDIR'), 'batteriebms') as $kand) {
-            if ($kand && is_dir($home . '/config/plugins/' . $kand)) {
-                $dir = $kand;
-                break;
-            }
+    /* LBPPLUGINDIR ist die Auskunft von LoxBerry selbst und hat Vorrang; von
+     * ihr zaehlt nur der letzte Pfadteil, und Namen, die nachweislich kein
+     * Pluginordner sind, gelten dort nicht. Der feste Name greift nur da, wo
+     * der abgeleitete kein Pluginordner sein KANN - aus dem ausgepackten
+     * Archiv heraus heisst er "html". Bis 0.9.27 fiel die Ermittlung auch
+     * dann auf "batteriebms" zurueck, wenn nur config/plugins/<ordner> noch
+     * fehlte (Bauart Spotpreis-Tibber 0.9.19, tb_paths()). */
+    $lbp = basename(rtrim((string) getenv('LBPPLUGINDIR'), '/'));
+    $lbp_gilt = ($lbp !== '' && !in_array($lbp, array('.', '/', 'html', 'bin', 'plugins'), true));
+    if ($lbp_gilt) {
+        $dir = $lbp;
+    } elseif (in_array($dir, array('', '.', '/', 'html', 'bin', 'plugins'), true)) {
+        $dir = 'batteriebms';
+    }
+    /* Archivmodus. Die Pfade DER ANLAGE gelten nur, wenn diese Bibliothek
+     * dort installiert liegt (<Wurzel>/webfrontend/html/plugins/<ordner>,
+     * physisch verglichen) oder der Aufrufer Wurzel UND Ordner ausdruecklich
+     * nennt ($LBHOMEDIR und $LBPPLUGINDIR - so arbeiten die Pruefwerkzeuge und
+     * die Deinstallation). Sonst ist das ein ausgepacktes Archiv oder ein
+     * Pruefordner: alles bleibt in dessen eigenem Ordner, der Dienst steigt
+     * aus (bm_keine_wurzel_abbruch() in bin/bms_dienst.php), und die Knoepfe
+     * fassen den Dienst der Anlage nicht an (bm_dienst()).
+     *
+     * Bis 0.9.27 nahm ein Archiv unterhalb einer echten Wurzel diese Wurzel
+     * und den festen Namen "batteriebms" - Konfiguration, Aktionstoken,
+     * Warteschlange und Dienst der Anlage; mit $LBHOMEDIR allein, wie es am
+     * Geraet in /etc/environment steht, ebenso. In WSL gemessen
+     * (Pruefung-BatterieBMS-0.9.28, Faelle T9, T10, T12): der Knopf "Dienst
+     * anhalten" eines ausgepackten Archivs hielt den Dienst der Anlage an. */
+    $gefunden = $home;
+    if ($home !== '') {
+        $soll = @realpath($home . '/webfrontend/html/plugins/' . basename(__DIR__));
+        $ist = @realpath(__DIR__);
+        $installiert = ($soll !== false && $ist !== false && $soll === $ist);
+        $ausdruecklich = $lbp_gilt && $home === rtrim((string) getenv('LBHOMEDIR'), '/');
+        if (!$installiert && !$ausdruecklich) {
+            $home = '';
         }
     }
-    if ($home) {
+    if ($home !== '') {
         $p = array(
             'home'      => $home,
             'plugin'    => $dir,
@@ -122,8 +169,11 @@ function bm_paths()
             'bindir'    => $home . '/bin/plugins/' . $dir,
             'logdir'    => $home . '/log/plugins/' . $dir,
             'log'       => $home . '/log/plugins/' . $dir . '/batteriebms.log',
+            'archiv'    => '',
         );
     } else {
+        /* Keine Wurzel oder Archivmodus: neben dem Plugin arbeiten, nie an
+         * der Laufwerkswurzel. */
         $basis = dirname(dirname(__DIR__));
         $p = array(
             'home'      => '',
@@ -135,6 +185,9 @@ function bm_paths()
             'bindir'    => $basis . '/bin',
             'logdir'    => $basis . '/log',
             'log'       => $basis . '/log/batteriebms.log',
+            // Die gefundene Wurzel, wenn diese Datei NICHT darin installiert
+            // liegt (Archivmodus) - fuer die Meldung; sonst leer.
+            'archiv'    => $gefunden,
         );
     }
     return $p;
@@ -1546,10 +1599,16 @@ function bm_dienst_soll()
  * Aktualisierung - im Reiter Test steht zu jedem Fall ein eigener Satz.
  *
  * Die Datei liegt NEBEN dem Datenordner (data/plugins/<ordner>.upgrade_laeuft),
- * weil purge_installation den Ordner beim Upgrade abraeumt. Die Grenze 3600 s
- * ist dieselbe wie in bin/dienst.sh, marke_gilt(); wer eine der beiden
- * aendert, aendert beide. preg_match statt ctype_digit: ctype ist nicht
- * garantiert geladen (Regeln/02).
+ * weil purge_installation den Ordner beim Upgrade abraeumt. Die Grenzen -
+ * 3600 s Alter und 300 s Vorlauf "aus der Zukunft" - sind dieselben wie in
+ * bin/dienst.sh, marke_gilt(); wer eine der beiden aendert, aendert beide.
+ * Der Vorlauf: die Uhr kann nach dem Setzen der Marke ein Stueck
+ * zurueckspringen (in WSL bis 0,64 s, Pruefung-Govee-0.9.20); bis 0.9.27 galt
+ * eine Marke schon eine Sekunde "aus der Zukunft" nicht mehr (in WSL gemessen,
+ * Pruefung-BatterieBMS-0.9.28, Faelle M1/M3: Marke +2 s, dienst.sh startete).
+ * Bauart Govee 0.9.20, gv_upgrade_marke(). Der Inhalt ist hoechstens zwoelf
+ * Ziffern lang - mehr kann keine Unixzeit sein. preg_match statt ctype_digit:
+ * ctype ist nicht garantiert geladen (Regeln/02).
  */
 function bm_upgrade_marke()
 {
@@ -1563,14 +1622,14 @@ function bm_upgrade_marke()
         return array(0, 0, -1);
     }
     $roh = trim((string) @file_get_contents($f, false, null, 0, 32));
-    if ($roh === '' || !preg_match('/^[0-9]+$/', $roh)) {
+    if ($roh === '' || !preg_match('/^[0-9]{1,12}$/', $roh)) {
         return array(1, 0, -1);
     }
     $alter = time() - (int) $roh;
-    if ($alter < 0 || $alter >= 3600) {
+    if ($alter < -300 || $alter >= 3600) {
         return array(1, 0, $alter);
     }
-    return array(1, 1, $alter);
+    return array(1, 1, max(0, $alter));
 }
 
 /** $befehl ist 'start', 'stop' oder 'restart'. Rueckgabe: array(ok, Ausgabe) */
@@ -1584,6 +1643,14 @@ function bm_dienst($befehl)
      * mit 0, und die Seite meldete "Dienst gestartet.", obwohl nichts
      * gestartet wurde (Fall U1, Zeile "Oberflaeche sagt es"). Anhalten
      * bleibt erlaubt. */
+    /* Aus einem ausgepackten Archiv oder Pruefordner (Archivmodus in
+     * bm_paths()) fassen die Knoepfe keinen Dienst an - auch "anhalten"
+     * nicht. Bis 0.9.27 zeigte bindir dort auf die Anlage, und der Knopf
+     * hielt deren Dienst an (in WSL gemessen, Pruefung-BatterieBMS-0.9.28,
+     * Fall T12). */
+    if (bm_paths()['home'] === '') {
+        return array(0, bm_t('EINST.DIENST_ARCHIV'));
+    }
     if ($befehl !== 'stop') {
         $bm_mk = bm_upgrade_marke();
         if ($bm_mk[1]) {
@@ -2580,7 +2647,7 @@ function bm_mqtt_zustand()
 {
     $p = bm_paths();
     $leer = array('gefunden' => 0, 'autostart' => 0, 'fassung' => 0, 'udpport' => 0, 'broker' => '',
-                  'brokerport' => '', 'user' => '', 'lokal' => 0);
+                  'brokerport' => '', 'user' => '', 'pw' => '', 'lokal' => 0);
     if ($p['home'] === '') {
         return $leer;
     }
@@ -2613,6 +2680,10 @@ function bm_mqtt_zustand()
         'broker'     => (string) $hol('Brokerhost', 'brokerhost'),
         'brokerport' => (string) $hol('Brokerport', 'brokerport'),
         'user'       => (string) $hol('Brokeruser', 'brokeruser'),
+        /* Nur fuer die Rueckfrage beim Broker (bm_mqtt_behalten_fragen()).
+         * Es steht nie in einem Protokoll, einer Ausgabe oder auf einer
+         * Kommandozeile - nur im CONNECT-Paket. */
+        'pw'         => (string) $hol('Brokerpass', 'brokerpass'),
         'lokal'      => in_array((string) $hol('Uselocalbroker', 'uselocalbroker'), array('1', 'true'), true) ? 1 : 0,
     );
 }
@@ -2650,48 +2721,378 @@ function bm_abo_text()
  * kennen, um zu senden. Das Gateway hat sie ohnehin.
  */
 /**
- * Den zurueckbehaltenen Wert von ok aus 0.9.17 bis 0.9.21 einmal loeschen.
+ * Welche Themen gingen in einer veroeffentlichten Fassung retained hinaus und
+ * heute nicht mehr? Entschieden am letzten Namensteil wie bm_mqtt_retained().
  *
- * Ein spaeteres publish ersetzt einen retained Wert NICHT - ohne diese
- * Loeschung stuende das letzte retained ok fuer immer im Broker, und nach dem
- * Tod des Dienstes laese Loxone daraus 'laeuft'. Geloescht wird mit dem
- * Befehlswort retain und leerer Nutzlast, VOR dem frischen Wert im selben
- * Durchgang - wie Beschattungswaechter 0.9.19 (Regeln/07). Das ist die eine
- * gewollte leere Nutzlast; bm_mqtt_nutzlast() erzeugt nie eine.
- *
- * Der Merker liegt im Datenordner, je Thema eine Zeile. Der Installer raeumt
- * den Datenordner bei jedem Upgrade ab - dann wird eben noch einmal geloescht;
- * fuer ein nicht zurueckbehaltenes Thema ist das wirkungslos.
+ *   ok          0.9.17-0.9.21 (auch geraetN/ok) - seit 0.9.22 fluechtig
+ *   fehlertext  0.9.17-0.9.27 - der Text der EIGENEN Abrufausnahme bzw. der
+ *               Ausfallpause ("noch N s"): eine Aussage des Dienstes ueber
+ *               seinen Abruf, dazu eine mit Zeitbezug
+ *   alarm,      0.9.17-0.9.27 - bei ok=0 trug der Sammelmerker den eigenen
+ *   alarmtext   Abruffehler ("antwortet nicht"), sonst Geraetebits und
+ *               Rechnung; gemischt, deshalb fluechtig, und die Geraeteseite
+ *               steht retained daneben (bmsalarm, bmsalarmtext)
+ * Entscheidung des Hausherrn vom 18./19.09.2026 (Regeln/07, Abschnitt 3):
+ * jede Aussage des Dienstes ueber sich selbst ist nie retained; Liste
+ * Bestand-2026-09-18/klasse-E/Dienstzustand-retained_2026-09-19.md.
  */
-function bm_mqtt_altlast_ok($s, $port, array $paare, $praefix)
+function bm_mqtt_frueher_retained()
 {
-    $p = bm_paths();
-    $merker = $p['datadir'] . '/retain_ok_geloescht';
-    $erledigt = array();
-    if (is_file($merker)) {
-        $erledigt = array_values(array_filter(array_map('trim', (array) @file($merker)), 'strlen'));
+    return array('ok', 'fehlertext', 'alarm', 'alarmtext');
+}
+
+/** Ging dieses Thema in irgendeiner veroeffentlichten Fassung retained hinaus? */
+function bm_mqtt_je_retained($thema)
+{
+    $teile = explode('/', (string) $thema);
+    return bm_mqtt_retained($thema) || in_array(end($teile), bm_mqtt_frueher_retained(), true);
+}
+
+/**
+ * Den Broker der Anlage fragen, welche dieser Themen zurueckbehalten stehen.
+ *
+ * Rueckgabe: array('lage' => 'ok'|'unbekannt', 'belegt' => array(thema => wert))
+ *   ok         der Broker hat das Abonnement bestaetigt; was nicht unter
+ *              'belegt' steht, steht nicht zurueckbehalten da
+ *   unbekannt  keine Wurzel, kein Mqtt-Abschnitt, keine Verbindung,
+ *              Anmeldung abgewiesen oder keine Bestaetigung
+ *
+ * Warum fragen: gesendet wird ueber den UDP-Eingang des Gateways, und dort
+ * meldet sendto() auch fuer ein verworfenes Datagramm Erfolg. Am Geraet
+ * gemessen (Regeln/07, "Ein Absender merkt nichts davon", 19.09.2026; an
+ * dieser Linie Stand-Protokolle/2026-09-19_BatterieBMS_0.9.25.md, Abschnitt 4):
+ * der Eingang verwarf 7 von 10 Datagrammen, und bis 0.9.27 setzte diese Linie
+ * nach einem einzigen Senden den Merker "geloescht".
+ *
+ * MQTT 3.1.1 von Hand - CONNECT, SUBSCRIBE (QoS 0), DISCONNECT -, ohne fremde
+ * Bibliothek; uebernommen aus ZendureSolarFlow 0.9.26
+ * (zd_mqtt_behalten_fragen). Die Anmeldung nimmt Brokeruser/Brokerpass aus
+ * der general.json (Regeln/07, Abschnitt 2); das Kennwort steht nur im
+ * CONNECT-Paket, nie in einem Protokoll und nie auf einer Kommandozeile.
+ */
+function bm_mqtt_behalten_fragen(array $themen)
+{
+    $aus = array('lage' => 'unbekannt', 'belegt' => array());
+    $soll = array();
+    foreach ($themen as $t) {
+        if ((string) $t !== '') {
+            $soll[(string) $t] = true;
+        }
     }
+    if (!$soll) {
+        $aus['lage'] = 'ok';
+        return $aus;
+    }
+    $m = bm_mqtt_zustand();
+    if (!$m['gefunden']) {
+        return $aus;
+    }
+    $host = trim((string) $m['broker']);
+    if ($host === '' || $host === 'localhost') {
+        $host = '127.0.0.1';
+    }
+    $port = (int) $m['brokerport'];
+    if ($port <= 0 || $port > 65535) {
+        $port = 1883;
+    }
+    $s = @stream_socket_client('tcp://' . $host . ':' . $port, $errno, $errstr, 2);
+    if (!$s) {
+        return $aus;
+    }
+    stream_set_timeout($s, 1);
+
+    $zk = function ($t) { return pack('n', strlen($t)) . $t; };
+    $laenge = function ($n) {
+        $o = '';
+        do {
+            $b = $n % 128;
+            $n = intdiv($n, 128);
+            if ($n > 0) { $b |= 128; }
+            $o .= chr($b);
+        } while ($n > 0);
+        return $o;
+    };
+    /* Genau $n Bytes lesen oder null - bei Zeitablauf und Verbindungsende. */
+    $lies = function ($n) use ($s) {
+        $d = '';
+        while (strlen($d) < $n) {
+            $t = @fread($s, $n - strlen($d));
+            if ($t === false || $t === '') {
+                $meta = stream_get_meta_data($s);
+                if (!empty($meta['timed_out']) || !empty($meta['eof']) || feof($s)) { return null; }
+                continue;
+            }
+            $d .= $t;
+        }
+        return $d;
+    };
+    $paket = function () use ($lies) {
+        $k = $lies(1);
+        if ($k === null) { return null; }
+        $n = 0; $mult = 1;
+        for ($i = 0; $i < 4; $i++) {
+            $b = $lies(1);
+            if ($b === null) { return null; }
+            $n += (ord($b) & 127) * $mult;
+            $mult *= 128;
+            if (!(ord($b) & 128)) { break; }
+        }
+        $r = ($n > 0) ? $lies($n) : '';
+        return ($r === null) ? null : array(ord($k), $r);
+    };
+
+    $benutzer = (string) $m['user'];
+    $kennwort = (string) $m['pw'];
+    $flags = 0x02;                                  // saubere Sitzung
+    $nutz = $zk('bmrueck' . getmypid());
+    if ($benutzer !== '') {
+        $flags |= 0x80;
+        // Ein Kennwort ohne Benutzer laesst MQTT 3.1.1 nicht zu.
+        if ($kennwort !== '') { $flags |= 0x40; }
+        $nutz .= $zk($benutzer);
+        if ($kennwort !== '') { $nutz .= $zk($kennwort); }
+    }
+    $kopf = $zk('MQTT') . chr(4) . chr($flags) . pack('n', 10);
+    if (@fwrite($s, chr(0x10) . $laenge(strlen($kopf . $nutz)) . $kopf . $nutz) !== false) {
+        $ack = $paket();
+        if ($ack !== null && ($ack[0] >> 4) === 2 && strlen($ack[1]) >= 2 && ord($ack[1][1]) === 0) {
+            $sub = pack('n', 1);
+            foreach (array_keys($soll) as $t) {
+                $sub .= $zk($t) . chr(0);
+            }
+            @fwrite($s, chr(0x82) . $laenge(strlen($sub)) . $sub);
+            $bestaetigt = false;
+            $ende = microtime(true) + 3.0;
+            while (microtime(true) < $ende) {
+                $pk = $paket();
+                if ($pk === null) { break; }           // Zeitablauf: nichts mehr gekommen
+                $art = $pk[0] >> 4;
+                if ($art === 9) {
+                    $bestaetigt = true;
+                    // Zurueckbehaltenes kommt unmittelbar nach dem SUBACK.
+                    $ende = min($ende, microtime(true) + 1.0);
+                } elseif ($art === 3 && strlen($pk[1]) >= 2) {
+                    $tl = unpack('n', substr($pk[1], 0, 2));
+                    $t = substr($pk[1], 2, $tl[1]);
+                    $versatz = 2 + $tl[1] + ((($pk[0] >> 1) & 3) > 0 ? 2 : 0);
+                    $wert = (string) substr($pk[1], $versatz);
+                    if (isset($soll[$t]) && ($pk[0] & 1) && $wert !== '') {
+                        $aus['belegt'][$t] = $wert;
+                    }
+                }
+            }
+            if ($bestaetigt) {
+                $aus['lage'] = 'ok';
+            }
+        }
+        @fwrite($s, chr(0xE0) . chr(0));
+    }
+    fclose($s);
+    return $aus;
+}
+
+/**
+ * Welche Altwerte muessen in DIESEM Senden noch abgeraeumt werden?
+ *
+ * $themen: Themen ohne Praefix, die gleich fluechtig gesendet werden und in
+ * einer Vorfassung retained hinausgingen (bm_mqtt_je_retained()).
+ * Rueckgabe: array(thema => true) - fuer diese geht unmittelbar vor dem
+ * gueltigen Wert die leere retain-Nutzlast hinaus (bm_mqtt_senden()).
+ *
+ * Je Thema, bis der Merker es fuehrt:
+ *   Broker sagt "steht nicht da"  -> Merker, nichts abraeumen
+ *   Broker sagt "steht da"        -> abraeumen, KEIN Merker - beim naechsten
+ *                                    Senden wird wieder gefragt
+ *   Broker nicht zu fragen        -> abraeumen, kein Merker
+ * Der Merker liegt im Datenordner, eine Zeile "leer-bestaetigt <praefix>/
+ * <thema>" je Thema. Der Merker der Vorfassungen (retain_ok_geloescht, nach
+ * einem einzigen Senden gesetzt) hat einen anderen Namen und eine andere
+ * Form, ein anderes Praefix traegt andere Zeilen - beides gilt also nicht als
+ * erledigt. purge_installation raeumt den Merker bei jedem Upgrade mit ab;
+ * dann wird genau einmal nachgefragt. Bauart ZendureSolarFlow 0.9.26.
+ */
+function bm_mqtt_altlast_pruefen($praefix, array $themen)
+{
+    $datei = bm_paths()['datadir'] . '/.mqtt_altlast_geraeumt';
+    $kennung = 'leer-bestaetigt ';
+    $zeilen = is_file($datei) ? preg_split('/\r?\n/', (string) @file_get_contents($datei)) : array();
+    $bestaetigt = array_flip(array_map('trim', $zeilen));
+    $offen = array();
+    foreach ($themen as $t) {
+        $voll = bm_mqtt_thema_saeubern($praefix . '/' . $t);
+        if ($voll === '' || isset($bestaetigt[$kennung . $voll])) {
+            continue;
+        }
+        $offen[(string) $t] = $voll;
+    }
+    if (!$offen) {
+        return array();
+    }
+    $f = bm_mqtt_behalten_fragen(array_values($offen));
+    if ($f['lage'] !== 'ok') {
+        bm_log_gebremst('mqtt_rueckfrage', 'MQTT: der Broker liess sich nicht befragen, ob unter '
+            . implode(', ', $offen) . ' noch ein zurueckbehaltener Wert einer Vorfassung steht. '
+            . 'Er wird deshalb bei jedem Senden geloescht, bis der Broker antwortet.');
+        return array_fill_keys(array_keys($offen), true);
+    }
+    $raeumen = array();
     $neu = array();
-    foreach (array_keys($paare) as $k) {
-        $teile = explode('/', (string) $k);
-        if (end($teile) !== 'ok') {
+    foreach ($offen as $t => $voll) {
+        if (isset($f['belegt'][$voll])) {
+            $raeumen[$t] = true;
             continue;
         }
-        $thema = bm_mqtt_thema_saeubern($praefix . '/' . $k);
-        if ($thema === '' || in_array($thema, $erledigt, true)) {
-            continue;
-        }
-        $msg = 'retain ' . $thema . ' ';
-        @socket_sendto($s, $msg, strlen($msg), 0, '127.0.0.1', $port);
-        usleep(BM_MQTT_PAUSE_US);
-        $neu[] = $thema;
+        $neu[] = $kennung . $voll;
     }
     if ($neu) {
-        @file_put_contents($merker, implode("\n", array_merge($erledigt, $neu)) . "\n", LOCK_EX);
-        bm_log('MQTT: zurueckbehaltenen Wert geloescht fuer ' . implode(', ', $neu)
-            . ' - das Lebenszeichen ok geht seit 0.9.22 nicht mehr retained hinaus.');
+        $alt = array();
+        foreach ($zeilen as $z) {
+            $z = trim((string) $z);
+            if (strpos($z, $kennung) === 0) {
+                $alt[] = $z;
+            }
+        }
+        $alle = array_values(array_unique(array_merge($alt, $neu)));
+        if (@file_put_contents($datei, implode("\n", $alle) . "\n") === false) {
+            bm_log_gebremst('mqtt_merker', 'MQTT: der Merker ' . $datei . ' liess sich nicht '
+                . 'schreiben - der Broker wird beim naechsten Senden wieder gefragt.');
+        } else {
+            bm_log('MQTT: vom Broker bestaetigt, kein zurueckbehaltener Altwert mehr unter '
+                . implode(', ', array_map(function ($z) use ($kennung) {
+                    return substr($z, strlen($kennung));
+                }, $neu)) . '. Diese Themen gehen fluechtig hinaus.');
+        }
     }
-    return count($neu);
+    return $raeumen;
+}
+
+/**
+ * Die Themen (ohne Praefix), die die Deinstallation leert: jedes, das eine
+ * veroeffentlichte Fassung je retained gesendet hat (bm_mqtt_je_retained()),
+ * fuer jede Speichernummer aus der Konfiguration (jeder Eintrag, auch ein
+ * unvollstaendiger) und aus dem letzten Abbild (loxone.json).
+ */
+function bm_mqtt_leer_themen()
+{
+    $p = bm_paths();
+    $cfg = bm_config();
+    $nummern = array();
+    $n = (isset($cfg['geraete']) && is_array($cfg['geraete'])) ? count($cfg['geraete']) : 0;
+    for ($i = 1; $i <= $n; $i++) {
+        $nummern[$i] = true;
+    }
+    $lox = bm_json_lesen($p['datadir'] . '/loxone.json');
+    if (isset($lox['geraete']) && is_array($lox['geraete'])) {
+        foreach (array_keys($lox['geraete']) as $nr) {
+            if ((int) $nr > 0) {
+                $nummern[(int) $nr] = true;
+            }
+        }
+    }
+    $themen = array();
+    foreach (array_keys(bm_mqtt_themen()) as $st) {
+        if (strpos($st, '/M/') !== false) {
+            continue;       // Modul- und Zellthemen gingen nie retained hinaus
+        }
+        if (strncmp($st, 'geraetN/', 8) === 0) {
+            foreach (array_keys($nummern) as $nr) {
+                $t = 'geraet' . $nr . '/' . substr($st, 8);
+                if (bm_mqtt_je_retained($t)) {
+                    $themen[$t] = true;
+                }
+            }
+        } elseif (bm_mqtt_je_retained($st)) {
+            $themen[$st] = true;
+        }
+    }
+    ksort($themen);
+    return array_keys($themen);
+}
+
+/**
+ * Aus der Deinstallation: alle zurueckbehaltenen Themen der Linie leeren.
+ *
+ * Der Weg ist derselbe wie beim Senden - der UDP-Eingang des Gateways,
+ * "retain <thema> " mit leerer Nutzlast (mqttgateway.pl, am Geraet belegt:
+ * die leere Nachricht geht als Loeschung an den Broker, Regeln/07). Nach
+ * jeder Runde wird der Broker gefragt (bm_mqtt_behalten_fragen()); nur was
+ * dort noch steht, geht in der naechsten Runde wieder hinaus. Hoechstens
+ * $runden Runden. Ist der Broker nicht zu fragen, gehen alle Runden hinaus,
+ * und die Ausgabe sagt, dass nicht nachgelesen wurde.
+ *
+ * Schreibt kein Protokoll und legt nichts an (der Aufrufer setzt
+ * bm_nur_lesen(true)). Rueckgabe 0 geleert oder nicht nachpruefbar, 1 es
+ * steht noch etwas bzw. Senden gescheitert, 2 nicht moeglich.
+ * Bauart ZendureSolarFlow 0.9.26, zd_mqtt_leeren().
+ */
+function bm_mqtt_leeren($runden = 3, $pause = 1.0)
+{
+    if (bm_paths()['home'] === '') {
+        echo "<INFO> MQTT: keine LoxBerry-Wurzel - zurueckbehaltene Themen wurden nicht geleert.\n";
+        return 2;
+    }
+    $cfg = bm_config();
+    $praefix = bm_mqtt_thema_saeubern((string) $cfg['mqtt_topic']);
+    if ($praefix === '') {
+        $praefix = 'batteriebms';
+    }
+    $z = bm_mqtt_zustand();
+    if (!$z['udpport']) {
+        echo "<INFO> MQTT: in general.json steht kein UDP-Eingangsport des Gateways - "
+           . "zurueckbehaltene Themen unter " . $praefix . "/ wurden nicht geleert.\n";
+        return 2;
+    }
+    $offen = array();
+    foreach (bm_mqtt_leer_themen() as $t) {
+        $offen[] = $praefix . '/' . $t;
+    }
+    $n = count($offen);
+    $strom = @stream_socket_client('udp://127.0.0.1:' . (int) $z['udpport'], $errno, $errstr, 2);
+    if (!$strom) {
+        echo "<WARNING> MQTT: der UDP-Eingang des Gateways war nicht erreichbar - "
+           . "zurueckbehaltene Themen unter " . $praefix . "/ wurden nicht geleert.\n";
+        return 1;
+    }
+    $nachgelesen = false;
+    $datagramme = 0;
+    for ($r = 1; $r <= max(1, (int) $runden) && $offen; $r++) {
+        if ($r > 1) {
+            usleep((int) ($pause * 1000000));
+        }
+        foreach ($offen as $t) {
+            // Ein Leerzeichen hinter dem Thema, sonst keine Nutzlast: die
+            // Form, die das Gateway als Loeschung liest.
+            @fwrite($strom, 'retain ' . $t . ' ');
+            $datagramme++;
+            usleep(BM_MQTT_PAUSE_US);
+        }
+        usleep(300000);     // dem Gateway Zeit bis zum Broker lassen
+        $f = bm_mqtt_behalten_fragen($offen);
+        if ($f['lage'] === 'ok') {
+            $nachgelesen = true;
+            $offen = array_keys($f['belegt']);
+        } else {
+            $nachgelesen = false;
+        }
+    }
+    fclose($strom);
+    echo "<INFO> MQTT: " . $n . " zurueckbehaltene Themen unter " . $praefix . "/ mit leerer "
+       . "Nutzlast an den UDP-Eingang " . (int) $z['udpport'] . " des Gateways gesendet ("
+       . $datagramme . " Datagramme).\n";
+    if ($nachgelesen && !$offen) {
+        echo "<OK> MQTT: der Broker bestaetigt: keines der " . $n . " Themen steht mehr zurueckbehalten.\n";
+        return 0;
+    }
+    if ($nachgelesen) {
+        echo "<WARNING> MQTT: " . count($offen) . " Themen stehen noch zurueckbehalten im Broker ("
+           . implode(', ', array_slice($offen, 0, 5)) . (count($offen) > 5 ? ', ...' : '')
+           . "). Von Hand: mosquitto_pub -r -n -t <thema>\n";
+        return 1;
+    }
+    echo "<INFO> MQTT: der Broker liess sich nicht befragen - nicht nachgelesen. Der UDP-Eingang "
+       . "verwirft unter Last Datagramme; was stehen bleibt, laesst sich mit "
+       . "mosquitto_pub -r -n -t <thema> von Hand loeschen.\n";
+    return 0;
 }
 
 function bm_mqtt_senden(array $paare, $praefix)
@@ -2717,7 +3118,20 @@ function bm_mqtt_senden(array $paare, $praefix)
         bm_log_gebremst('mqtt_socket', 'MQTT: Socket nicht moeglich.');
         return false;
     }
-    bm_mqtt_altlast_ok($s, $z['udpport'], $paare, $praefix);
+    /* Altwerte der Vorfassungen: fuer jedes Thema, das heute fluechtig geht
+     * und frueher retained ging, erst den Broker fragen; steht dort noch
+     * etwas, geht die leere retain-Nutzlast unmittelbar vor dem gueltigen
+     * Wert hinaus (bm_mqtt_altlast_pruefen()). Bis 0.9.27 raeumte
+     * bm_mqtt_altlast_ok() nur ok ab, einmal, und setzte den Merker auf
+     * sendto() - in WSL gemessen (Pruefung-BatterieBMS-0.9.28, Fall R12): ging
+     * die Loeschung verloren, wurde nie wieder geraeumt. */
+    $alt = array();
+    foreach (array_keys($paare) as $k) {
+        if (!bm_mqtt_retained($k) && bm_mqtt_je_retained($k)) {
+            $alt[] = (string) $k;
+        }
+    }
+    $raeumen = $alt ? bm_mqtt_altlast_pruefen($praefix, $alt) : array();
     foreach ($paare as $k => $v) {
         // Der UDP-Eingang des Gateways wertet einen Zeilenumbruch als Ende
         // des Befehls. Ein mehrzeiliger Wert - etwa eine Fehlermeldung des
@@ -2738,6 +3152,13 @@ function bm_mqtt_senden(array $paare, $praefix)
         $thema = bm_mqtt_thema_saeubern($praefix . '/' . $k);
         if ($thema === '') {
             continue;
+        }
+        if (isset($raeumen[(string) $k])) {
+            // Die eine gewollte leere Nutzlast: sie loescht den Altwert, und
+            // der gueltige Wert folgt unmittelbar (Regeln/07, Abschnitt 3).
+            $leer = 'retain ' . $thema . ' ';
+            @socket_sendto($s, $leer, strlen($leer), 0, '127.0.0.1', $z['udpport']);
+            usleep(BM_MQTT_PAUSE_US);
         }
         /* Zustaende retained, alles andere nicht (B45). Beide Woerter
          * stehen bewusst als Literal da - so bleibt die Sendefunktion fuer
@@ -2787,6 +3208,12 @@ if (!defined('BM_MQTT_PAUSE_US')) {
  * dem Saeubern, weil erst die Saeuberung aus '  ' oder einem blanken
  * Zeilenumbruch eine leere Zeichenkette macht (Regeln/07, Sprachsteuerung
  * 0.11.5).
+ *
+ * Seit 0.9.28 gehen fehlertext und alarmtext fluechtig hinaus
+ * (bm_mqtt_frueher_retained()). Der Strich bleibt ihnen trotzdem: ein
+ * virtueller Eingang behaelt seinen letzten Wert, und ein Text, der beim
+ * Leerwerden gar nicht mehr gesendet wird, stuende in Loxone fuer immer da
+ * (Regeln/07, "`0` und `''` sind Werte und werden gesendet").
  */
 function bm_mqtt_nutzlast($thema, $v)
 {
@@ -2794,7 +3221,14 @@ function bm_mqtt_nutzlast($thema, $v)
     if ($wert !== '') {
         return $wert;
     }
-    return bm_mqtt_retained($thema) ? '-' : null;
+    return (bm_mqtt_retained($thema) || bm_mqtt_leertext($thema)) ? '-' : null;
+}
+
+/** Ein fluechtiger Text, der leer wird, geht als Strich hinaus (siehe oben). */
+function bm_mqtt_leertext($thema)
+{
+    $teile = explode('/', (string) $thema);
+    return in_array(end($teile), array('fehlertext', 'alarmtext'), true);
 }
 
 function bm_mqtt_wert_saeubern($v)
@@ -2857,8 +3291,18 @@ function bm_mqtt_paare(array $abbild, $melden = true)
          * im Reiter Einbindung in Loxone. */
         'ts'      => (int) (isset($abbild['ts']) ? $abbild['ts'] : 0),
     );
+    /* Diese Geraetethemen gehen retained hinaus und tragen, was das BMS
+     * meldet. Ist der Abruf gescheitert (ok=0), meldet es nichts - dann gehen
+     * sie gar nicht hinaus, und im Broker bleibt der letzte gemessene Stand.
+     * Bis 0.9.27 ging hier ein retained '-' (bm_mqtt_nutzlast()) ueber den
+     * Geraetestand: eine Aussage des Dienstes ("weiss ich nicht") in einem
+     * Geraetethema (Regeln/07, Abschnitt 3, "Ueber MQTT geht bei einer
+     * Stoerung nur das Signal hinaus, nicht die Werte"; in WSL gemessen,
+     * Pruefung-BatterieBMS-0.9.28, Faelle R13/R14). */
+    $nurBeiAntwort = array('fehler' => true, 'warnung' => true, 'modus' => true);
     foreach ($geraete as $nr => $e) {
         $vor = 'geraet' . (int) $nr;
+        $geraetOk = !empty($e['ok']);
         foreach (array('SOC' => 'soc', 'SOH' => 'soh', 'UBAT' => 'ubat', 'IBAT' => 'ibat',
                        'PBAT' => 'pbat', 'TMAX' => 'tmax', 'TMIN' => 'tmin',
                        'UZMAX' => 'uzmax', 'UZMIN' => 'uzmin', 'UZDIFF' => 'uzdiff',
@@ -2867,9 +3311,22 @@ function bm_mqtt_paare(array $abbild, $melden = true)
                        'MODUS' => 'modus', 'UZMINMOD' => 'uzminmod',
                        'UZMINZELLE' => 'uzminzelle', 'RESTKWH' => 'restkwh',
                        'RESTZEIT' => 'restzeit', 'ALARM' => 'alarm') as $feld => $thema) {
+            if (!$geraetOk && isset($nurBeiAntwort[$thema])) {
+                continue;
+            }
             $paare[$vor . '/' . $thema] = isset($e[$feld]) ? $e[$feld] : null;
         }
         $paare[$vor . '/alarmtext'] = isset($e['alarmtext']) ? $e['alarmtext'] : null;
+        /* Der Geraetealarm neben dem Sammelmerker (Klasse E, 19.09.2026).
+         * alarm/alarmtext enthalten bei ok=0 den eigenen Abruffehler und gehen
+         * deshalb fluechtig; was das BMS meldet oder seine Messwerte zeigen
+         * (Fehler- und Warnbits, Zelldrift, Temperatur - bm_alarm_geraet()),
+         * steht retained daneben, und zwar nur, wenn der Abruf gelang. */
+        if ($geraetOk) {
+            $ga = bm_alarm_geraet($e, $cfg);
+            $paare[$vor . '/bmsalarm'] = $ga ? 1 : 0;
+            $paare[$vor . '/bmsalarmtext'] = $ga ? bm_text_sauber(implode(' | ', $ga)) : '';
+        }
         $paare[$vor . '/sollquelle'] = isset($e['sollwert_quelle']) ? $e['sollwert_quelle'] : null;
         $paare[$vor . '/ok'] = (int) (isset($e['ok']) ? $e['ok'] : 0);
         /* Zeitstempel des letzten ERFOLGREICHEN Abrufs dieses Speichers.
@@ -2944,18 +3401,23 @@ function bm_mqtt_paare(array $abbild, $melden = true)
  * Abruf gelang, und gehoert damit zum Lebenszeichen: retained zeigte es nach
  * dem Tod des Dienstes fuer immer den letzten Stand. Entscheidung des
  * Hausherrn vom 17.09.2026 (Regeln/07, 'zum Lebenszeichen gehoert auch
- * status/ok - nie retained'); 0.9.17 bis 0.9.21 sandten es retained, der
- * Altwert wird einmal geloescht (bm_mqtt_altlast_ok).
+ * status/ok - nie retained'); 0.9.17 bis 0.9.21 sandten es retained.
+ *
+ * `fehlertext`, `alarm` und `alarmtext` stehen seit 0.9.28 NICHT mehr in
+ * dieser Liste: sie tragen (ganz bzw. bei ok=0) die Aussage des Dienstes ueber
+ * seinen eigenen Abruf - Entscheidung des Hausherrn vom 19.09.2026, Regeln/07
+ * Abschnitt 3. Die Geraeteseite des Alarms steht als `bmsalarm` und
+ * `bmsalarmtext` daneben. Altwerte raeumt bm_mqtt_altlast_pruefen() ab.
+ * Prueffrage je Thema: wer stellt es fest, das Geraet oder der Dienst?
  */
 function bm_mqtt_zustandsthemen()
 {
     return array(
         'geraete',      // wie viele Speicher eingerichtet sind
         'fehler',       // Fehlerbits des BMS
-        'fehlertext',   // dazu der Klartext
         'warnung',      // Warnbits
-        'alarm',        // Sammelmerker
-        'alarmtext',    // dazu der Klartext
+        'bmsalarm',     // Geraetealarm: Bits, Zelldrift, Temperatur
+        'bmsalarmtext', // dazu der Klartext
         'modus',        // Betriebsart des Speichers
         'sollwert',     // laufender Zwang als Text
         'sollart',      // derselbe als Zahl
@@ -3008,6 +3470,8 @@ function bm_mqtt_themen()
         'geraetN/restzeit'         => 'BM_MQTT.RESTZEIT',
         'geraetN/alarm'            => 'BM_MQTT.ALARM',
         'geraetN/alarmtext'        => 'BM_MQTT.ALARMTEXT',
+        'geraetN/bmsalarm'         => 'BM_MQTT.BMSALARM',
+        'geraetN/bmsalarmtext'     => 'BM_MQTT.BMSALARMTEXT',
         'geraetN/modul/M/uzmax'    => 'BM_MQTT.M_UZMAX',
         'geraetN/modul/M/uzmin'    => 'BM_MQTT.M_UZMIN',
         'geraetN/modul/M/uzdiff'   => 'BM_MQTT.M_UZDIFF',
@@ -3222,6 +3686,21 @@ function bm_alarm(array $e, ?array $cfg = null)
         $t = isset($e['fehlertext']) ? trim((string) $e['fehlertext']) : '';
         $g[] = $t !== '' ? $t : bm_t('ALARM.STUMM');
     }
+    return array_merge($g, bm_alarm_geraet($e, $cfg));
+}
+
+/**
+ * Der Teil des Sammelmerkers, den das GERAET feststellt: Fehler- und
+ * Warnbits des BMS, Zelldrift und Zelltemperaturen gegen die Schwellen - ohne
+ * den eigenen Abruffehler. Geht als bmsalarm/bmsalarmtext retained hinaus
+ * (bm_mqtt_paare()), waehrend alarm/alarmtext fluechtig sind.
+ */
+function bm_alarm_geraet(array $e, $cfg = null)
+{
+    if (!is_array($cfg)) {
+        $cfg = bm_config();
+    }
+    $g = array();
     if (isset($e['UZDIFF']) && is_numeric($e['UZDIFF'])
         && $e['UZDIFF'] > max(1, (int) $cfg['drift_warnung'])) {
         $g[] = sprintf(bm_t('ALARM.DRIFT'), (int) $e['UZDIFF'], (int) $cfg['drift_warnung']);
@@ -3856,18 +4335,21 @@ function bm_t($schluessel)
 {
     static $texte = null;
     if ($texte === null) {
-        $home = getenv('LBHOMEDIR');
-        if (!$home || !is_dir($home)) {
-            foreach (array(lb_wurzel_ermitteln(), '/home/loxberry/loxberry') as $k) {
-                if (is_dir($k)) {
-                    $home = $k;
-                    break;
-                }
-            }
+        /* Installiert die Sprachdateien der Anlage, sonst NUR die eigenen.
+         * Bis 0.9.27 wurde der Installationspfad auch ohne Wurzel gebildet und
+         * abgefragt - aus einem ausgepackten Archiv also
+         * /templates/plugins/html/lang ab der Laufwerkswurzel, dahinter der
+         * feste Standardort /home/loxberry/loxberry; lag dort etwas, zeigte
+         * die Oberflaeche fremde Texte (in WSL gemessen,
+         * Pruefung-BatterieBMS-0.9.28, Fall T1; Bauart ZendureSolarFlow 0.9.26,
+         * zd_t()). */
+        $bm_tp = bm_paths();
+        $pfad = '';
+        if ($bm_tp['home'] !== ''
+            && is_dir($bm_tp['home'] . '/templates/plugins/' . $bm_tp['plugin'] . '/lang')) {
+            $pfad = $bm_tp['home'] . '/templates/plugins/' . $bm_tp['plugin'] . '/lang';
         }
-        $ordner = basename(dirname(__FILE__));
-        $pfad = $home . '/templates/plugins/' . $ordner . '/lang';
-        if (!is_dir($pfad)) {
+        if ($pfad === '') {
             $pfad = dirname(dirname(dirname(__FILE__))) . '/templates/lang';
         }
         $texte = @parse_ini_file($pfad . '/language_' . bm_sprache() . '.ini', true, INI_SCANNER_RAW);

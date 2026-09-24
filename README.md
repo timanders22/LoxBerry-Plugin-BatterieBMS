@@ -10,6 +10,73 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.28
+
+**Ein Schreibbefehl, der zu lange gewartet hat, geht auch im laufenden Betrieb nicht mehr an den
+Speicher.** Seit 0.9.25 verwarf der Dienst beim Start jeden Befehl, der älter als 60 Sekunden
+war. Im Lauf galt die Grenze nicht, weil der Dienst jeden Eintrag „nach höchstens einem
+Durchlauf" abholt — nur ist ein Durchlauf keine Zeitgrenze: ein Speicher, der nicht antwortet,
+hält ihn bis zur Zeitüberschreitung auf, zweimal je Speicher. In WSL gegen eine Modbus-Attrappe
+gemessen (`Pruefung-BatterieBMS-0.9.28/`, Fall H1): zwei stumme Speicher bei 25 s
+Zeitüberschreitung, ein frisch eingereihtes „Laden 500 W" lag 95 s in der Warteschlange und ging
+danach als zwei Schreibbefehle hinaus. Ebenso ein Nachholauftrag der Schreibbremse (Fall H3).
+
+Jetzt wird jeder Befehl **unmittelbar vor seiner Ausführung** auf sein Alter geprüft, auch ein
+Nachholauftrag. Über 60 Sekunden wird er verworfen und protokolliert, etwa
+`Warteschlange im Lauf: Befehl laden (Speicher 2, 500 W, Quelle Loxone) ist 89 s alt, aelter als
+60 s - VERWORFEN, nicht an den Speicher geschickt.` Ein Nachholauftrag zählt ab dem Ablauf der
+Schreibbremse, nicht ab dem Einreihen: er wartet dort absichtlich, und bei einer Bremse über
+60 Sekunden fiele sonst jeder abgefangene Befehl weg (Fall H5: Bremse 120 s, der zweite Befehl
+geht nach Ablauf der Bremse hinaus).
+
+**MQTT: was der Dienst über seinen eigenen Abruf sagt, geht nicht mehr zurückbehalten hinaus.**
+`geraetN/fehlertext` (der Text der eigenen Abrufstörung, mit „noch N s"), `geraetN/alarm` und
+`geraetN/alarmtext` gingen seit 0.9.17 retained hinaus. Der Sammelmerker `alarm` trug bei einem
+gestörten Abruf den eigenen Fehler („antwortet nicht") — stirbt der Dienst, bliebe das stehen.
+Alle drei gehen jetzt flüchtig hinaus; ihre Bedeutung bleibt, wer sie in Loxone benutzt, muss
+nichts ändern. Nach einem Neustart von Broker oder Gateway fehlen sie bis zum nächsten Durchlauf.
+**Neu daneben, zurückbehalten:** `geraetN/bmsalarm` und `geraetN/bmsalarmtext` — nur das, was
+das BMS selbst meldet oder seine Messwerte zeigen (Fehler- und Warnbits, Zelldrift,
+Temperatur), ohne den eigenen Abruffehler. Ist ein Abruf gestört, gehen `fehler`, `warnung`,
+`modus` und der Gerätealarm gar nicht hinaus; im Broker bleibt der zuletzt gemessene Stand, statt
+von einem `-` überschrieben zu werden.
+
+Alte zurückbehaltene Werte werden abgeräumt: vor dem Senden fragt das Plugin den Broker
+(Anmeldung mit Brokeruser/Brokerpass aus der `general.json`, das Kennwort steht nur im
+Anmeldepaket), ob unter `ok`, `geraetN/ok`, `fehlertext`, `alarm` oder `alarmtext` noch ein
+Altwert steht; wenn ja, geht die leere Nutzlast unmittelbar vor dem gültigen Wert hinaus, und
+gefragt wird wieder, bis der Broker „leer" meldet. Erst dann steht der Merker
+`data/plugins/<ordner>/.mqtt_altlast_geraeumt`. Bis 0.9.27 wurde nur `ok` abgeräumt, einmal,
+und der Merker stand schon nach dem Senden — der UDP-Eingang des Gateways verwirft unter Last
+aber Datagramme. **Die Deinstallation leert jetzt alle zurückbehaltenen Themen der Linie**
+(höchstens drei Runden, jede vom Broker nachgelesen). Lässt sich der Broker nicht befragen, sagt
+das Protokoll „nicht nachgelesen"; was dann stehen bleibt, löscht
+`mosquitto_pub -r -n -t <thema>`.
+
+**Ein ausgepacktes Archiv fasst die Anlage nicht mehr an.** Die LoxBerry-Wurzel wird nur noch
+anerkannt, wenn darunter `config/system/general.json` liegt; einen festen Standardort dahinter
+gibt es nicht mehr. Die Pfade der Anlage gelten nur, wenn die Bibliothek dort installiert liegt
+oder `LBHOMEDIR` **und** `LBPPLUGINDIR` ausdrücklich gesetzt sind. Aus einem Archiv heraus
+starten, stoppen und bewachen weder `bin/dienst.sh` noch die Knöpfe der Oberfläche einen
+Dienst; der Dienst selbst steigt ohne Wurzel aus, bevor er etwas schreibt. Gemessen vorher: der
+Knopf „Dienst anhalten" eines ausgepackten Archivs hielt mit bloßem `LBHOMEDIR` (wie es am Gerät
+in `/etc/environment` steht) den Dienst der Anlage an. Sprachdateien, Bibliothek und
+Hakenskripte greifen ohne Wurzel nicht mehr auf Pfade ab `/` zurück; `postinstall.sh`,
+`preupgrade.sh`, `postupgrade.sh` und `uninstall` suchen die Wurzel nach derselben Regel und
+tun ohne sie nichts.
+
+**Kleineres.** Die Upgrade-Marke gilt auch bis 300 Sekunden „aus der Zukunft" (die Uhr kann nach
+dem Setzen zurückspringen); vorher genügte eine Sekunde, und der Dienst startete mitten in der
+Aktualisierung. `postinstall.sh` spielt die Zweitschrift nur zurück, wenn sie Inhalt trägt
+(lesbares JSON mit Aktionstoken) — `{}` oder ein abgebrochenes JSON wurden bisher kopiert und
+als „wiederhergestellt" gemeldet. `preupgrade.sh` vergleicht die Sicherung nach Inhalt statt
+nach Größe.
+
+Alles in WSL nachgestellt (`Pruefung-BatterieBMS-0.9.28/`: 60 + 27 Fälle, vorher 42 bzw. 6 rot,
+nachher grün, jede Behebung einzeln zurückgebaut). **Nicht am Gerät gemessen**; es ist nach wie
+vor kein Speicher angeschlossen, und über das UDP-Gateway lässt sich ein Abräumen nur über die
+Rückfrage beim Broker belegen, nicht am Datagramm selbst.
+
 ## Neu in 0.9.27
 
 **Das Schlusswort der Installation richtet sich nach dem Inhalt der Konfiguration.**
@@ -49,7 +116,8 @@ Warum 60 Sekunden: gemessen lagen zwischen Einreihen und Abholen im Normalbetrie
 nach dem Einreihen höchstens 1,2 s. Wer einreiht, wartet höchstens die eingestellte Wartezeit auf
 die Antwort, und die ist auf 30 s begrenzt. Ein älterer Eintrag hat niemanden mehr, der auf ihn
 wartet. Im laufenden Betrieb gilt die Grenze nicht — dort holt der Dienst jeden Eintrag nach
-höchstens einem Durchlauf ab.
+höchstens einem Durchlauf ab. (Überholt in 0.9.28: ein Durchlauf ist keine Zeitgrenze, die
+Grenze gilt jetzt auch im Lauf — siehe oben.)
 
 ## Neu in 0.9.24
 

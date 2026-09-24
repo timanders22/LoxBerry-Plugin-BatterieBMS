@@ -5,7 +5,32 @@ SELF=$(cd "$(dirname "$0")" && pwd)
 # Das letzte Hakenskript entfernt die Upgrade-Marke (preupgrade.sh) - auch
 # dann, wenn postinstall.sh fehlt oder scheitert (Fall C14). Im Regelfall hat
 # postinstall.sh sie schon entfernt; "rm -f" ist dann ein Leerlauf.
-BM_BASE="${5:-$LBHOMEDIR}"
+# Die Wurzel nach derselben Regel wie postinstall.sh (dort ausfuehrlich):
+# fuenftes Argument, $LBHOMEDIR mit config/plugins und data/plugins, sonst
+# aufwaerts mit general.json. Ohne Wurzel wird nichts entfernt.
+bm_wurzel_suchen() {
+    bm_v=$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd -P)
+    bm_i=0
+    while [ -n "$bm_v" ] && [ "$bm_v" != "/" ] && [ "$bm_i" -lt 8 ]; do
+        if [ -d "$bm_v/config/plugins" ] && [ -d "$bm_v/data/plugins" ] \
+           && [ -f "$bm_v/config/system/general.json" ]; then
+            echo "$bm_v"
+            return 0
+        fi
+        bm_v=$(dirname "$bm_v")
+        bm_i=$((bm_i + 1))
+    done
+    return 1
+}
+BM_BASE="${5:-}"
+if [ -z "$BM_BASE" ] || [ ! -d "$BM_BASE" ]; then
+    if [ -n "${LBHOMEDIR:-}" ] && [ -d "$LBHOMEDIR/config/plugins" ] \
+       && [ -d "$LBHOMEDIR/data/plugins" ]; then
+        BM_BASE="$LBHOMEDIR"
+    else
+        BM_BASE=$(bm_wurzel_suchen) || BM_BASE=""
+    fi
+fi
 BM_MARKE="$BM_BASE/data/plugins/${3:-batteriebms}.upgrade_laeuft"
 trap '[ -n "$BM_BASE" ] && rm -f "$BM_MARKE"' EXIT
 # B32: bis 0.9.15 stand hier eine -x-Pruefung, gemeldet wurde aber "nicht

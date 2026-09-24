@@ -17,13 +17,24 @@ error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE);
 
 /* Bibliothek einbinden. Sie liegt unter webfrontend/html/, weil Endpunkt und
  * Dienst sie ebenfalls brauchen - installiert unter
- * <home>/webfrontend/html/plugins/<ordner>/, im Archiv unter ../html/. */
+ * <home>/webfrontend/html/plugins/<ordner>/, im Archiv unter ../html/.
+ *
+ * Welche Lage gilt, entscheidet der eigene Ablageort, nicht die Reihenfolge
+ * der Versuche: liegt diese Datei unter .../plugins/<ordner>, ist sie
+ * installiert, sonst liegt sie in einem ausgepackten Archiv. Bis 0.9.27
+ * wurden drei Kandidaten der Reihe nach probiert, der zweite VOR der eigenen
+ * Bibliothek - aus einem Archiv unter / war das
+ * /html/plugins/htmlauth/bm_lib.php ab der Laufwerkswurzel, und was dort lag,
+ * lief als Bibliothek (in WSL gemessen, Pruefung-BatterieBMS-0.9.28, Fall T4).
+ * Bauart ZendureSolarFlow 0.9.26. */
 $bm_gefunden = false;
-foreach (array(
-    dirname(dirname(__DIR__)) . '/html/plugins/' . basename(__DIR__) . '/bm_lib.php',
-    dirname(dirname(dirname(__DIR__))) . '/html/plugins/' . basename(__DIR__) . '/bm_lib.php',
-    dirname(__DIR__) . '/html/bm_lib.php',
-) as $bm_kandidat) {
+if (basename(dirname(__DIR__)) === 'plugins') {
+    $bm_kandidaten = array(dirname(dirname(dirname(__DIR__))) . '/html/plugins/'
+        . basename(__DIR__) . '/bm_lib.php');
+} else {
+    $bm_kandidaten = array(dirname(__DIR__) . '/html/bm_lib.php');
+}
+foreach ($bm_kandidaten as $bm_kandidat) {
     if (is_file($bm_kandidat)) {
         require_once $bm_kandidat;
         $bm_gefunden = true;

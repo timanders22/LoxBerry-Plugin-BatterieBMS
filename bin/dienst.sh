@@ -121,6 +121,22 @@ if [ "$SELF" != "$LBH_R/bin/plugins/$PNAME" ] \
     echo "        setzen oder dienst.sh aus <Wurzel>/bin/plugins/<ordner> rufen."
     exit 1
 fi
+# Laeuft dieses Skript wirklich AUS der Installation? Was startet, anhaelt
+# oder bewacht (start, stop, restart, waechter), faellt sonst geschlossen aus;
+# "status" liest nur und bleibt erlaubt. Bis 0.9.27 wirkten alle vier aus
+# einem ausgepackten Archiv mit LBHOMEDIR und LBPPLUGINDIR - und aus einem
+# Pruefarchiv unterhalb der Anlage schon mit LBPPLUGINDIR allein - auf den
+# Dienst der Anlage (in WSL gemessen, Pruefung-BatterieBMS-0.9.28, Faelle
+# S1-S6: "stop" hielt ihn an und loeschte soll_laufen, "start" und
+# "waechter" starteten ihn). Bauart ZendureSolarFlow 0.9.26.
+INSTALLIERT=0
+[ "$SELF" = "$LBH_R/bin/plugins/$PNAME" ] && INSTALLIERT=1
+nicht_installiert() {
+    echo "FEHLER: dieses Skript liegt nicht unter $LBHOMEDIR/bin/plugins/$PNAME -"
+    echo "        aus einem ausgepackten Archiv oder Pruefordner wird kein Dienst"
+    echo "        gestartet, angehalten oder bewacht. Abhilfe: dienst.sh aus"
+    echo "        <Wurzel>/bin/plugins/<ordner> rufen."
+}
 PDATA="$LBHOMEDIR/data/plugins/$PNAME"
 PLOG="$LBHOMEDIR/log/plugins/$PNAME"
 PCONFIG="$LBHOMEDIR/config/plugins/$PNAME"
@@ -361,9 +377,11 @@ laeuft() {
 #
 # Ausgaenge, alle gemessen (Faelle C1 bis C9):
 #   Marke juenger als 3600 s -> sie gilt, es wird nicht gestartet
-#   aelter, aus der Zukunft, ohne Zeitpunkt -> sie gilt NICHT; eine
-#                                 abgebrochene Installation darf den Dienst
-#                                 nicht fuer immer stilllegen
+#   bis 300 s aus der Zukunft     -> sie gilt ebenso (siehe unten)
+#   aelter, weiter in der Zukunft, ohne Zeitpunkt, mehr als zwoelf Ziffern
+#                                 -> sie gilt NICHT; eine abgebrochene
+#                                 Installation darf den Dienst nicht fuer
+#                                 immer stilllegen
 #   keine lesbare Uhr             -> sie gilt (geschlossen, CLAUDE.md 4)
 #   BM_START_TROTZ_MARKE=1        -> Ausnahme fuer postinstall.sh selbst
 #
@@ -383,8 +401,16 @@ marke_gilt() {
     case "$MI" in
         ''|*[!0-9]*) return 1 ;;   # kein Zeitpunkt - die Marke gilt nicht
     esac
-    [ "$MI" -gt "$MJ" ] && return 1              # aus der Zukunft
-    [ $((MJ - MI)) -lt 3600 ]
+    [ "${#MI}" -le 12 ] || return 1              # keine Unixzeit
+    # 300 s Vorlauf: die Uhr kann nach dem Setzen der Marke ein Stueck
+    # zurueckspringen (in WSL bis 0,64 s, Pruefung-Govee-0.9.20). Bis 0.9.27
+    # galt eine Marke schon eine Sekunde "aus der Zukunft" nicht mehr, und der
+    # Dienst startete mitten in der Aktualisierung (in WSL gemessen,
+    # Pruefung-BatterieBMS-0.9.28, Fall M1: Marke +2 s). 10# rechnet die
+    # Ziffern dezimal, auch mit fuehrender Null. Bauart Sprachsteuerung
+    # 0.11.9, sperre_gilt(); dieselben Grenzen in bm_upgrade_marke().
+    MA=$((MJ - 10#$MI))
+    [ "$MA" -ge -300 ] && [ "$MA" -lt 3600 ]
 }
 MARKE_TEXT="Eine Aktualisierung dieses Plugins laeuft - es wird jetzt kein Dienst gestartet. postinstall.sh startet ihn am Ende selbst, falls er vorher lief."
 
@@ -484,6 +510,14 @@ anhalten() {
     return 0
 }
 
+case "$1" in
+    start|stop|restart|waechter)
+        if [ "$INSTALLIERT" != "1" ]; then
+            nicht_installiert
+            exit 1
+        fi
+        ;;
+esac
 case "$1" in
     start)   starten ;;
     stop)    anhalten ;;

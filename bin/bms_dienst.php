@@ -6,6 +6,8 @@
  *   bms_dienst.php                Daemon, laeuft bis SIGTERM
  *   bms_dienst.php --einmal       ein Durchlauf, dann Ende
  *   bms_dienst.php --selbsttest   Pruefungen ohne Geraet, Klartextausgabe
+ *   bms_dienst.php --mqtt-leeren  zurueckbehaltene MQTT-Themen der Linie leeren
+ *                                 (aus uninstall/uninstall)
  *
  * Der Dienst ist die EINZIGE Stelle, die mit einem Speicher spricht. Weder die
  * Oberflaeche noch der Miniserver-Endpunkt oeffnen selbst eine Verbindung.
@@ -19,13 +21,24 @@
 error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE);
 
 /* Bibliothek einbinden - installiert unter <home>/webfrontend/html/plugins/…,
- * im Archiv unter ../webfrontend/html/. */
+ * im Archiv unter ../webfrontend/html/.
+ *
+ * Welche Lage gilt, entscheidet der eigene Ablageort, nicht die Reihenfolge
+ * der Versuche: liegt diese Datei unter .../plugins/<ordner>, ist sie
+ * installiert, sonst liegt sie in einem ausgepackten Archiv. Bis 0.9.27
+ * wurden drei Kandidaten der Reihe nach probiert; installiert war der erste
+ * <home>/bin/plugins/webfrontend/html/bm_lib.php - der bin-Ordner eines
+ * fremden Plugins namens "webfrontend" -, und was dort lag, lief als
+ * Bibliothek (in WSL gemessen, Pruefung-BatterieBMS-0.9.28, Fall T6).
+ * Bauart ZendureSolarFlow 0.9.26. */
 $bm_gefunden = false;
-foreach (array(
-    dirname(__DIR__) . '/webfrontend/html/bm_lib.php',
-    dirname(dirname(dirname(__DIR__))) . '/webfrontend/html/plugins/' . basename(__DIR__) . '/bm_lib.php',
-    dirname(dirname(__DIR__)) . '/webfrontend/html/plugins/' . basename(__DIR__) . '/bm_lib.php',
-) as $bm_kandidat) {
+if (basename(dirname(__DIR__)) === 'plugins') {
+    $bm_kandidaten = array(dirname(dirname(dirname(__DIR__))) . '/webfrontend/html/plugins/'
+        . basename(__DIR__) . '/bm_lib.php');
+} else {
+    $bm_kandidaten = array(dirname(__DIR__) . '/webfrontend/html/bm_lib.php');
+}
+foreach ($bm_kandidaten as $bm_kandidat) {
     if (is_file($bm_kandidat)) {
         require_once $bm_kandidat;
         $bm_gefunden = true;
@@ -1108,10 +1121,12 @@ function bm_veroeffentlichen(array $abbild, $topic)
 }
 
 /* ==================================================================
- * Alte Befehle beim Dienststart verwerfen
+ * Alte Befehle verwerfen - beim Dienststart und im Lauf
  * ================================================================== */
 
-/* Hoechstalter eines Befehls, den der Dienst beim Start noch ausfuehrt.
+/* Hoechstalter eines Befehls, den der Dienst noch ausfuehrt - beim Start
+ * (bm_alte_befehle_verwerfen()) und seit 0.9.28 auch im Lauf, unmittelbar vor
+ * jeder Ausfuehrung (bm_warteschlange()).
  *
  * Bis 0.9.24 fuehrte der Dienst beim Start jeden Eintrag der Warteschlange
  * aus, gleich wie alt. Gemessen (Pruefung-BatterieBMS-0.9.24, Fall U3): ein
@@ -1156,8 +1171,10 @@ function bm_befehl_beschreiben($art, $befehl, $nr = null)
     return $art . ' ' . $aktion . ($teile ? ' (' . implode(', ', $teile) . ')' : '');
 }
 
-/** Gilt ein Eintrag dieses Alters beim Start noch? null = Alter unbekannt. */
-function bm_befehl_alter_text($alter)
+/** Warum ein Eintrag dieses Alters nicht mehr gilt. null = Alter unbekannt.
+ *  $seit_faellig: das Alter zaehlt ab der Faelligkeit (Nachholauftrag im Lauf,
+ *  bm_nachhol_faellig()), nicht ab dem Einreihen. */
+function bm_befehl_alter_text($alter, $seit_faellig = false)
 {
     if ($alter === null) {
         return 'hat kein lesbares Alter';
@@ -1165,7 +1182,34 @@ function bm_befehl_alter_text($alter)
     if ($alter < -BM_BEFEHL_UHRSPIEL) {
         return 'liegt ' . (-$alter) . ' s in der Zukunft (Uhr zurueckgestellt?)';
     }
-    return 'ist ' . $alter . ' s alt, aelter als ' . BM_BEFEHL_HOECHSTALTER . ' s';
+    return 'ist ' . $alter . ' s alt' . ($seit_faellig ? ' (seit Ablauf der Schreibbremse)' : '')
+        . ', aelter als ' . BM_BEFEHL_HOECHSTALTER . ' s';
+}
+
+/**
+ * Seit wann ist ein Nachholauftrag faellig? Unixzeit, oder null ohne lesbares
+ * ts.
+ *
+ * Ein Nachholauftrag wartet ABSICHTLICH bis zum Ende der Schreibbremse
+ * (0 bis 600 s, bm_wert_grenzen()); Loxone hat dafuer die Antwort
+ * "eingereiht" (2) bekommen. Sein Alter ab ts laege bei einer Bremse ueber
+ * 60 s immer ueber der Grenze - jeder Befehl, den die Bremse abfaengt, fiele
+ * weg. Gezaehlt wird deshalb der Verzug seit der Faelligkeit:
+ * max(ts, letzte Schreibzeit + Bremse). Beim Start ist die letzte Schreibzeit
+ * unbekannt (0) - faellig ist dann ts, die Regel von 0.9.25. In WSL gemessen
+ * (Pruefung-BatterieBMS-0.9.28, Fall H5): Bremse 120 s, der zweite Befehl geht
+ * nach Ablauf der Bremse hinaus.
+ */
+function bm_nachhol_faellig($vor, $zuletzt, $bremse)
+{
+    if (!is_array($vor) || !isset($vor['ts']) || !preg_match('/^[0-9]{1,12}$/', (string) $vor['ts'])) {
+        return null;
+    }
+    $f = (int) $vor['ts'];
+    if ((int) $bremse > 0) {
+        $f = max($f, (int) $zuletzt + (int) $bremse);
+    }
+    return $f;
 }
 
 function bm_befehl_alter_gilt($alter)
@@ -1186,8 +1230,13 @@ function bm_befehl_alter_gilt($alter)
  * Nachholauftrag ging beim Start als 2 Schreibbefehle an den Speicher
  * (Pruefung-BatterieBMS-0.9.25, Fall W10).
  *
- * Nur beim Start, wie entschieden (Hausherr, 18.09.2026): im laufenden
- * Betrieb holt der Dienst jeden Eintrag nach hoechstens einem Durchlauf ab.
+ * Beim Start entschieden am 18.09.2026 (Hausherr). Seit 0.9.28 prueft
+ * bm_warteschlange() dasselbe Alter auch im Lauf, unmittelbar vor jeder
+ * Ausfuehrung: "nach hoechstens einem Durchlauf" ist keine Zeitgrenze - ein
+ * stummer Speicher haelt den Durchlauf auf, zwei stumme bei 25 s
+ * Zeitueberschreitung etwa 100 s (in WSL gemessen,
+ * Pruefung-BatterieBMS-0.9.28, Fall H1: ein frisch eingereihter Befehl lag
+ * 95 s und ging dann als 2 Schreibbefehle an den Speicher).
  */
 function bm_alte_befehle_verwerfen()
 {
@@ -1268,6 +1317,21 @@ function bm_warteschlange(&$letzteSchreibzeit)
         if ($bremse > 0 && (time() - $zul) < $bremse) {
             continue;   // Bremse laeuft noch, beim naechsten Durchlauf erneut
         }
+        /* Unmittelbar vor der Ausfuehrung: wie lange ist der Auftrag schon
+         * faellig? Bis 0.9.27 verfiel er erst nach der Totmannzeit (Vorgabe
+         * 300 s). In WSL gemessen (Pruefung-BatterieBMS-0.9.28, Fall H3):
+         * Bremse 5 s, danach hing der Durchlauf an zwei stummen Speichern
+         * 99 s - der Nachholauftrag ging trotzdem als 2 Schreibbefehle
+         * hinaus. */
+        $alterN = bm_nachhol_faellig($vor, $zul, $bremse);
+        $alterN = ($alterN === null) ? null : time() - $alterN;
+        if (!bm_befehl_alter_gilt($alterN)) {
+            bm_nachhol_loeschen($nrNach);
+            bm_log('Nachholmappe im Lauf: ' . bm_befehl_beschreiben('Nachholauftrag', $vor, $nrNach)
+                . ' ' . bm_befehl_alter_text($alterN, true)
+                . ' - VERWORFEN, nicht an den Speicher geschickt.');
+            continue;
+        }
         bm_nachhol_loeschen($nrNach);
         list($okN, $meldN) = bm_befehl_ausfuehren(
             array('aktion' => $vor['aktion'], 'geraet' => $nrNach,
@@ -1280,9 +1344,25 @@ function bm_warteschlange(&$letzteSchreibzeit)
 
     foreach ((array) glob($ordner . '/*.json') as $datei) {
         $kennung = basename($datei, '.json');
+        clearstatcache(true, $datei);
+        $mt = @filemtime($datei);
         $befehl = bm_json_lesen($datei);
         @unlink($datei);
         if (!$befehl || !isset($befehl['aktion'])) {
+            continue;
+        }
+        /* Unmittelbar vor der Ausfuehrung, fuer JEDEN Eintrag einzeln: ein
+         * Befehl davor kann an einem stummen Speicher haengen. Bis 0.9.27 galt
+         * die Grenze nur beim Start (Fall H1 oben). Die Antwort geht trotzdem
+         * hinaus - bei einer zurueckgestellten Uhr wartet womoeglich noch
+         * jemand. */
+        $alter = ($mt === false) ? null : time() - (int) $mt;
+        if (!bm_befehl_alter_gilt($alter)) {
+            $grund = bm_befehl_beschreiben('Befehl', $befehl) . ' ' . bm_befehl_alter_text($alter)
+                . ' - VERWORFEN, nicht an den Speicher geschickt.';
+            bm_json_schreiben($antworten . '/' . $kennung . '.json',
+                              array('ok' => 0, 'meldung' => $grund));
+            bm_log('Warteschlange im Lauf: ' . $grund);
             continue;
         }
         list($ok, $meldung) = bm_befehl_ausfuehren($befehl, $letzteSchreibzeit, $sofortAbruf);
@@ -1811,12 +1891,15 @@ function bm_selbsttest()
     }
 
     // 1c. Zustaende gehen retained hinaus, Messwerte und Lebenszeichen nicht.
-    $zust = array('geraete', 'geraet1/alarm', 'geraet1/sollart',
-                  'geraet1/fehlertext', 'evcc/mode');
-    // ok ist seit 0.9.22 Lebenszeichen (Hausherr 17.09.2026) - nie retained.
+    $zust = array('geraete', 'geraet1/bmsalarm', 'geraet1/bmsalarmtext', 'geraet1/sollart',
+                  'geraet1/fehler', 'evcc/mode');
+    // ok ist seit 0.9.22 Lebenszeichen (Hausherr 17.09.2026) - nie retained;
+    // fehlertext, alarm, alarmtext tragen den eigenen Abruffehler und sind
+    // seit 0.9.28 fluechtig (Hausherr 19.09.2026, Regeln/07 Abschnitt 3).
     $mess = array('ok', 'geraet1/ok', 'ts', 'geraet1/ts', 'geraet1/soc', 'geraet1/pbat',
                   'geraet1/sollwert_alter', 'geraet1/modul/1/tmax',
-                  'geraet1/modul/1/zelle/3');
+                  'geraet1/modul/1/zelle/3', 'geraet1/fehlertext', 'geraet1/alarm',
+                  'geraet1/alarmtext');
     $retFalsch = array();
     foreach ($zust as $t) {
         if (!bm_mqtt_retained($t)) { $retFalsch[] = $t . ' muesste retained sein'; }
@@ -1844,6 +1927,7 @@ function bm_selbsttest()
         array('geraet1/fehlertext', '', '-'),
         array('geraet1/fehlertext', " \r\n\t ", '-'),
         array('geraet1/alarmtext', null, '-'),
+        array('geraet1/bmsalarmtext', '', '-'),
         array('geraet1/sollquelle', '', '-'),
         array('geraet1/modus', null, '-'),
         array('geraet1/fehlertext', 'Zeitueberschreitung', 'Zeitueberschreitung'),
@@ -2162,6 +2246,35 @@ if (!$bm_direkt) {
 $bm_argv = isset($argv) ? $argv : array();
 if (in_array('--selbsttest', $bm_argv, true)) {
     exit(bm_selbsttest());
+}
+/* Aus uninstall/uninstall: die zurueckbehaltenen Themen der Linie leeren.
+ * Schreibt nichts an - weder Konfiguration noch Protokoll. */
+if (in_array('--mqtt-leeren', $bm_argv, true)) {
+    bm_nur_lesen(true);
+    exit(bm_mqtt_leeren());
+}
+
+/* Ohne Wurzel oder aus einem ausgepackten Archiv heraus arbeitet der Dienst
+ * nicht - VOR allem, was schreibt (Regeln/06: ohne brauchbare Wurzel warnen
+ * statt vollziehen). Bis 0.9.27 lief "--einmal" aus einem Archiv in einem
+ * fremden Baum los und legte dort Daten- und Protokollordner an (in WSL
+ * gemessen, Pruefung-BatterieBMS-0.9.28, Fall T8). Bauart Spotpreis-Tibber
+ * 0.9.19, tb_keine_wurzel_abbruch(). */
+$bm_p0 = bm_paths();
+if ($bm_p0['home'] === '') {
+    if ($bm_p0['archiv'] !== '') {
+        fwrite(STDERR, 'bms_dienst.php: Diese Datei liegt nicht in der Installation unter '
+            . $bm_p0['archiv'] . " (ausgepacktes Archiv oder Pruefordner).\n"
+            . "Damit nichts in die Anlage kommt, wurde nichts abgerufen und nichts geschrieben.\n"
+            . 'Abhilfe: den Dienst aus ' . $bm_p0['archiv'] . "/bin/plugins/<ordner> rufen\n"
+            . "oder LBHOMEDIR und LBPPLUGINDIR ausdruecklich setzen.\n");
+    } else {
+        fwrite(STDERR, "bms_dienst.php: Es wurde kein LoxBerry-Wurzelverzeichnis gefunden.\n"
+            . '$LBHOMEDIR ist nicht gesetzt, und oberhalb von ' . __DIR__ . " traegt kein\n"
+            . "Verzeichnis config/plugins, data/plugins und config/system/general.json.\n"
+            . "Es wurde nichts abgerufen und nichts geschrieben.\n");
+    }
+    exit(1);
 }
 
 /* PHP-Fehler des laufenden Dienstes gehoeren ins Protokoll (B48, 17.09.2026).

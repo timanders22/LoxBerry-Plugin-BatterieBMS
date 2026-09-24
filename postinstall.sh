@@ -7,16 +7,50 @@
 # virtuelle Python-Umgebung gebraucht und damit auch kein Umweg um PEP 668.
 
 ARGV3=$3
-ARGV5=$5
 PFOLDER="${ARGV3:-batteriebms}"
-BASE="${ARGV5:-$LBHOMEDIR}"
+# LoxBerry::System taugt hier nicht: es leitet den Pluginordner aus dem
+# Aufrufort ab und liefert aus postinstall.sh heraus ueberall Leerstring
+# (belegt in der LoxoneIcons-Sitzung am 02.08.2026).
+# Wurzel, in dieser Reihenfolge (Regeln/06: ohne brauchbare Wurzel warnen
+# statt vollziehen; dieselbe Regel wie bin/dienst.sh):
+#   1. das fuenfte Argument - der Installer uebergibt dort die LoxBerry-Wurzel
+#      (plugininstall.pl:1158 und :1577, am Geraet nachgesehen 17.09.2026),
+#   2. $LBHOMEDIR, wenn darunter config/plugins und data/plugins liegen,
+#   3. vom eigenen Ablageort aufwaerts das erste Verzeichnis mit
+#      config/plugins, data/plugins UND config/system/general.json.
+# Bauart ZendureSolarFlow 0.9.25/0.9.26.
+bm_wurzel_suchen() {
+    bm_v=$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd -P)
+    bm_i=0
+    while [ -n "$bm_v" ] && [ "$bm_v" != "/" ] && [ "$bm_i" -lt 8 ]; do
+        if [ -d "$bm_v/config/plugins" ] && [ -d "$bm_v/data/plugins" ] \
+           && [ -f "$bm_v/config/system/general.json" ]; then
+            echo "$bm_v"
+            return 0
+        fi
+        bm_v=$(dirname "$bm_v")
+        bm_i=$((bm_i + 1))
+    done
+    return 1
+}
+BASE="${5:-}"
 if [ -z "$BASE" ] || [ ! -d "$BASE" ]; then
-    # Ableitung aus dem eigenen Ablageort - LoxBerry::System taugt hier nicht,
-    # weil es den Pluginordner aus dem Aufrufort ableitet und aus
-    # postinstall.sh heraus ueberall Leerstring liefert (belegt in der
-    # LoxoneIcons-Sitzung am 02.08.2026).
-    SELF=$(cd "$(dirname "$0")" && pwd)
-    BASE=$(cd "$SELF/../.." 2>/dev/null && pwd)
+    if [ -n "${LBHOMEDIR:-}" ] && [ -d "$LBHOMEDIR/config/plugins" ] \
+       && [ -d "$LBHOMEDIR/data/plugins" ]; then
+        BASE="$LBHOMEDIR"
+    else
+        BASE=$(bm_wurzel_suchen) || BASE=""
+    fi
+fi
+# Bis 0.9.27 stand hier ohne fuenftes Argument und ohne $LBHOMEDIR der
+# Rueckfall "zwei Ebenen ueber dem eigenen Ablageort" - aus einem Archiv
+# unter / war das die Laufwerkswurzel, und /data/plugins/batteriebms/ samt
+# Unterordnern entstand dort (in WSL gemessen, Pruefung-BatterieBMS-0.9.28,
+# Fall K1). Ohne Wurzel wird jetzt nichts angelegt.
+if [ -z "$BASE" ]; then
+    echo "<FAIL> Es wurde kein LoxBerry-Wurzelverzeichnis gefunden - es wurde nichts angelegt"
+    echo "<FAIL> und keine Konfiguration zurueckgespielt."
+    exit 1
 fi
 
 PBIN="$BASE/bin/plugins/$PFOLDER"
@@ -80,14 +114,31 @@ printf '%s' "$KENNUNG" > "$MARKE"
 chmod 600 "$PCONFIG/batteriebms.json" 2>/dev/null
 
 # Sicherung zurueckspielen (uebersteht Update UND Neuinstallation)
+#
+# Nach INHALT, wie die Selbstheilung der Oberflaeche (bm_konfig_taugt() in
+# bm_lib.php): lesbares JSON mit Aktionstoken. Bis 0.9.27 wurde jede
+# Zweitschrift kopiert und "wiederhergestellt" gemeldet - auch "{}" und ein
+# abgebrochenes JSON, das danach als Konfiguration dalag (in WSL gemessen,
+# Pruefung-BatterieBMS-0.9.28, Faelle Z1 und Z2). Bauart aWATTar 1.2.28.
 BK="$BASE/config/plugins/$PFOLDER.backup.json"
 CF="$PCONFIG/batteriebms.json"
+bm_hat_inhalt() {
+    command -v php >/dev/null 2>&1 || return 1
+    php -r '$d = json_decode((string) @file_get_contents($argv[1]), true);
+            exit(is_array($d) && isset($d["aktionstoken"])
+                 && trim((string) $d["aktionstoken"]) !== "" ? 0 : 1);' "$1" 2>/dev/null
+}
 if [ -f "$BK" ]; then
     INHALT=$(cat "$CF" 2>/dev/null)
     if [ ! -s "$CF" ] || [ "$INHALT" = "{}" ]; then
-        if cp -p "$BK" "$CF" && chmod 600 "$CF"; then
+        if ! bm_hat_inhalt "$BK"; then
+            echo "<INFO> Die Zweitschrift $BK traegt keinen Inhalt (kein lesbares JSON"
+            echo "<INFO> mit Aktionstoken) - sie wurde NICHT zurueckgespielt und bleibt liegen."
+        elif cp -p "$BK" "$CF" && chmod 600 "$CF"; then
             UEBERNOMMEN=1
             echo "<OK> Konfiguration aus Sicherung wiederhergestellt."
+        else
+            echo "<FAIL> Die Zweitschrift liess sich nicht zurueckspielen ($BK)."
         fi
     fi
 fi
@@ -161,7 +212,9 @@ if [ -f "$LIEF" ]; then
     rm -f "$LIEF"
     if [ -x "$PBIN/dienst.sh" ]; then
         # Die Ausnahme von der Upgrade-Marke gilt nur fuer DIESEN Start.
-        AUSGABE=$(BM_START_TROTZ_MARKE=1 "$PBIN/dienst.sh" start 2>&1)
+        # LBHOMEDIR ausdruecklich: dienst.sh startet nur, was unter DIESER
+        # Wurzel installiert ist (INSTALLIERT in bin/dienst.sh).
+        AUSGABE=$(LBHOMEDIR="$BASE" BM_START_TROTZ_MARKE=1 "$PBIN/dienst.sh" start 2>&1)
         RC=$?
         if [ $RC -eq 0 ]; then
             UEBERNOMMEN=1

@@ -23,20 +23,84 @@
 # dieses Skript.
 
 ARGV3=$3
-ARGV5=$5
 PFOLDER="${ARGV3:-batteriebms}"
-BASE="${ARGV5:-$LBHOMEDIR}"
+# Wurzel, in dieser Reihenfolge (Regeln/06: ohne brauchbare Wurzel warnen
+# statt vollziehen; dieselbe Regel wie bin/dienst.sh):
+#   1. das fuenfte Argument - der Installer uebergibt dort die LoxBerry-Wurzel
+#      (plugininstall.pl:1158 und :1577, am Geraet nachgesehen 17.09.2026),
+#   2. $LBHOMEDIR, wenn darunter config/plugins und data/plugins liegen,
+#   3. vom eigenen Ablageort aufwaerts das erste Verzeichnis mit
+#      config/plugins, data/plugins UND config/system/general.json.
+# Bauart ZendureSolarFlow 0.9.25/0.9.26.
+bm_wurzel_suchen() {
+    bm_v=$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd -P)
+    bm_i=0
+    while [ -n "$bm_v" ] && [ "$bm_v" != "/" ] && [ "$bm_i" -lt 8 ]; do
+        if [ -d "$bm_v/config/plugins" ] && [ -d "$bm_v/data/plugins" ] \
+           && [ -f "$bm_v/config/system/general.json" ]; then
+            echo "$bm_v"
+            return 0
+        fi
+        bm_v=$(dirname "$bm_v")
+        bm_i=$((bm_i + 1))
+    done
+    return 1
+}
+BASE="${5:-}"
 if [ -z "$BASE" ] || [ ! -d "$BASE" ]; then
-    SELF=$(cd "$(dirname "$0")" && pwd)
-    BASE=$(cd "$SELF/../.." 2>/dev/null && pwd)
+    if [ -n "${LBHOMEDIR:-}" ] && [ -d "$LBHOMEDIR/config/plugins" ] \
+       && [ -d "$LBHOMEDIR/data/plugins" ]; then
+        BASE="$LBHOMEDIR"
+    else
+        BASE=$(bm_wurzel_suchen) || BASE=""
+    fi
+fi
+# Der Installer legt dieses Skript als <home>/data/system/uninstall/<ordner>
+# ab; Stufe 3 findet von dort <home>. Bis 0.9.27 wurden ohne fuenftes
+# Argument zwei Ebenen hinauf gerechnet - von dort ist das <home>/data, keine
+# Wurzel, und die Zweitschrift mit dem Aktionstoken blieb liegen (Fall K4);
+# aus einem Archiv unter / war es die Laufwerkswurzel, und
+# /config/plugins/<ordner>.backup.json wurde dort geloescht (Fall K2; beides
+# in WSL gemessen, Pruefung-BatterieBMS-0.9.28).
+if [ -z "$BASE" ]; then
+    echo "<WARNING> Es wurde kein LoxBerry-Wurzelverzeichnis gefunden - nichts beendet, nichts entfernt."
+    echo "<WARNING> Liegen bleiben koennen config/plugins/$PFOLDER.backup.json (mit dem"
+    echo "<WARNING> Aktionstoken) und zurueckbehaltene MQTT-Themen der Linie."
+    exit 1
 fi
 
 # 1. Den Dienst anhalten, bevor etwas verschwindet. Er haelt eine
 #    Modbus-Verbindung offen, und manche Speicher lassen nur eine zu.
 DIENST="$BASE/bin/plugins/$PFOLDER/dienst.sh"
 if [ -f "$DIENST" ]; then
-    AUSGABE=$(bash "$DIENST" stop 2>&1)
+    AUSGABE=$(LBHOMEDIR="$BASE" bash "$DIENST" stop 2>&1)
     echo "<INFO> dienst.sh stop: $AUSGABE"
+fi
+
+# 1b. Zurueckbehaltene MQTT-Themen der Linie leeren.
+#
+#    Seit 0.9.17 gehen Zustaende retained hinaus. Bis 0.9.27 blieben sie nach
+#    dem Deinstallieren im Broker stehen, und nach jedem Neustart von Broker
+#    oder Gateway bekam der Miniserver sie wieder (in WSL gemessen,
+#    Pruefung-BatterieBMS-0.9.28, Faelle U1-U6). NACH dem Anhalten des
+#    Dienstes - sonst schriebe er die Werte gleich wieder hinein - und VOR dem
+#    Loeschen der Ordner durch den Installer (Praefix, Speichernummern und
+#    bin/ sind hier noch da). Geleert wird ueber den Weg der Linie, den
+#    UDP-Eingang des Gateways, und beim Broker nachgelesen, wo er sich fragen
+#    laesst (bm_mqtt_leeren() in webfrontend/html/bm_lib.php). Als loxberry,
+#    nicht als root; stdin geschlossen, damit su nie auf eine Eingabe wartet.
+#    Bauart ZendureSolarFlow 0.9.26.
+BM_DIENST_PHP="$BASE/bin/plugins/$PFOLDER/bms_dienst.php"
+if command -v php >/dev/null 2>&1 && [ -f "$BM_DIENST_PHP" ]; then
+    if [ "$(id -u)" = "0" ] && id loxberry >/dev/null 2>&1; then
+        su -s /bin/bash loxberry -c "$(printf '%q ' env "LBHOMEDIR=$BASE" "LBPPLUGINDIR=$PFOLDER" \
+            timeout 60 php "$BM_DIENST_PHP" --mqtt-leeren)" < /dev/null 2>&1 || true
+    else
+        env "LBHOMEDIR=$BASE" "LBPPLUGINDIR=$PFOLDER" timeout 60 php "$BM_DIENST_PHP" --mqtt-leeren \
+            < /dev/null 2>&1 || true
+    fi
+else
+    echo "<INFO> PHP oder bms_dienst.php fehlt - zurueckbehaltene MQTT-Themen wurden nicht geleert."
 fi
 
 # 2. Alles entfernen, was NEBEN den Ordnern liegt und deshalb von

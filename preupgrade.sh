@@ -6,9 +6,48 @@
 # lassen nur EINE Verbindung gleichzeitig zu (belegt fuer die BYD-BCU). Bleibt
 # ein alter Prozess stehen, kommt der neue nicht mehr an das Geraet heran.
 ARGV3=$3
-ARGV5=$5
 PFOLDER="${ARGV3:-batteriebms}"
-BASE="${ARGV5:-$LBHOMEDIR}"
+# Wurzel, in dieser Reihenfolge (Regeln/06: ohne brauchbare Wurzel warnen
+# statt vollziehen; dieselbe Regel wie bin/dienst.sh):
+#   1. das fuenfte Argument - der Installer uebergibt dort die LoxBerry-Wurzel
+#      (plugininstall.pl:1158 und :1577, am Geraet nachgesehen 17.09.2026),
+#   2. $LBHOMEDIR, wenn darunter config/plugins und data/plugins liegen,
+#   3. vom eigenen Ablageort aufwaerts das erste Verzeichnis mit
+#      config/plugins, data/plugins UND config/system/general.json.
+# Bauart ZendureSolarFlow 0.9.25/0.9.26.
+bm_wurzel_suchen() {
+    bm_v=$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd -P)
+    bm_i=0
+    while [ -n "$bm_v" ] && [ "$bm_v" != "/" ] && [ "$bm_i" -lt 8 ]; do
+        if [ -d "$bm_v/config/plugins" ] && [ -d "$bm_v/data/plugins" ] \
+           && [ -f "$bm_v/config/system/general.json" ]; then
+            echo "$bm_v"
+            return 0
+        fi
+        bm_v=$(dirname "$bm_v")
+        bm_i=$((bm_i + 1))
+    done
+    return 1
+}
+BASE="${5:-}"
+if [ -z "$BASE" ] || [ ! -d "$BASE" ]; then
+    if [ -n "${LBHOMEDIR:-}" ] && [ -d "$LBHOMEDIR/config/plugins" ] \
+       && [ -d "$LBHOMEDIR/data/plugins" ]; then
+        BASE="$LBHOMEDIR"
+    else
+        BASE=$(bm_wurzel_suchen) || BASE=""
+    fi
+fi
+# Bis 0.9.27 stand hier BASE="${5:-$LBHOMEDIR}" ohne Pruefung: ohne beides
+# begannen alle Pfade mit /config/ und /data/, und "rm -f" traf
+# /config/plugins/<ordner>.laeuft an der Laufwerkswurzel (in WSL gemessen,
+# Pruefung-BatterieBMS-0.9.28, Fall K3). Ohne Wurzel wird jetzt nichts
+# angelegt, nichts angehalten und nichts geloescht.
+if [ -z "$BASE" ]; then
+    echo "<WARNING> Es wurde kein LoxBerry-Wurzelverzeichnis gefunden - keine Upgrade-Marke,"
+    echo "<WARNING> kein Dienst angehalten, keine Sicherung angelegt."
+    exit 1
+fi
 
 # ---------- Die Marke "Aktualisierung laeuft" - als Erstes ----------
 # Zwischen diesem Skript und postinstall.sh liegt am Geraet fast eine Minute
@@ -131,7 +170,9 @@ if [ -x "$DIENST" ]; then
     # verworfen und trotzdem "angehalten" gemeldet - auch dann, wenn gar kein
     # Dienst lief oder das kill scheiterte. Wer danach das Protokoll las,
     # schloss einen noch offenen Modbus-Prozess als Ursache aus.
-    AUSGABE=$("$DIENST" stop 2>&1)
+    # LBHOMEDIR ausdruecklich: dienst.sh haelt nur an, was unter DIESER
+    # Wurzel installiert ist (INSTALLIERT in bin/dienst.sh).
+    AUSGABE=$(LBHOMEDIR="$BASE" "$DIENST" stop 2>&1)
     RC=$?
     if [ $RC -eq 0 ]; then
         echo "<INFO> dienst.sh stop: $AUSGABE"
@@ -198,7 +239,10 @@ if [ -f "$CF" ]; then
         chmod 600 "$BK" 2>/dev/null
         A=$(wc -c < "$CF" 2>/dev/null)
         B=$(wc -c < "$BK" 2>/dev/null)
-        if [ -n "$A" ] && [ "$A" = "$B" ]; then
+        # Nach INHALT verglichen, nicht nach Groesse (Muster 9 der Nachlese
+        # vom 24.09.2026). Bis 0.9.27 genuegte gleiche Laenge - gelesen,
+        # nicht gemessen.
+        if cmp -s "$CF" "$BK"; then
             echo "<OK> Konfiguration gesichert ($A Byte)."
         else
             echo "<FAIL> Die Sicherung der Konfiguration ist unvollstaendig"
