@@ -700,6 +700,12 @@ function bm_wert_grenzen()
  * der Grund im Klartext.
  *
  * Benutzt vom Speichern-Zweig UND vom Zurueckspielen - das ist der Sinn.
+ *
+ * Die Muster enden auf \z, nicht auf $: in PCRE passt $ auch vor einem
+ * Zeilenumbruch am Ende. Bis 0.9.25 nahm das Zurueckspielen deshalb
+ * "aktionstoken": "abc123\n" an, und jede in Loxone eingetragene Adresse
+ * war danach stumm ungueltig (gemessen 24.09.2026 unter PHP 7.4 und 8.4;
+ * zuerst an AWM-Abfuhr 1.4.10). Die Zahlengrenzen oben trimmen mit Absicht.
  */
 function bm_wert_pruefen($schluessel, $wert)
 {
@@ -725,11 +731,11 @@ function bm_wert_pruefen($schluessel, $wert)
             return in_array((string) $wert, array('0', '1'), true)
                 ? '' : sprintf(bm_t('EINST.FEHLER_ZAHL'), $schluessel);
         case 'mitschnitt_bis':
-            return (is_int($wert) || preg_match('/^[0-9]{1,12}$/', (string) $wert) === 1)
+            return (is_int($wert) || preg_match('/^[0-9]{1,12}\z/', (string) $wert) === 1)
                 ? '' : sprintf(bm_t('EINST.FEHLER_ZAHL'), $schluessel);
         case 'mqtt_topic':
             return (is_string($wert)
-                    && preg_match('#^[A-Za-z0-9_/\-]{1,64}$#', $wert) === 1)
+                    && preg_match('#^[A-Za-z0-9_/\-]{1,64}\z#', $wert) === 1)
                 ? '' : bm_t('EINST.FEHLER_TOPIC');
         case 'aktionstoken':
             /* Weit gefasst, wie der Hausstandard es seit VolkswagenID 0.9.12
@@ -737,7 +743,7 @@ function bm_wert_pruefen($schluessel, $wert)
              * passt. Die LEERE Zeichenkette ist zulaessig - 'kein Token
              * gesichert' ist kein unzulaessiger Wert, sondern eine Lage. */
             return (is_string($wert)
-                    && preg_match('/^[A-Za-z0-9_.\-]{0,64}$/', $wert) === 1)
+                    && preg_match('/^[A-Za-z0-9_.\-]{0,64}\z/', $wert) === 1)
                 ? '' : sprintf(bm_t('EINST.FEHLER_ZAHL'), $schluessel);
         case 'geraete':
             return is_array($wert) ? '' : sprintf(bm_t('EINST.FEHLER_ZAHL'), $schluessel);
@@ -757,7 +763,7 @@ function bm_wert_pruefen($schluessel, $wert)
 function bm_geraetedatei_taugt($dev)
 {
     $dev = (string) $dev;
-    return preg_match('#^/dev/[A-Za-z0-9_/\-\.]{1,60}$#', $dev) === 1
+    return preg_match('#^/dev/[A-Za-z0-9_/\-\.]{1,60}\z#', $dev) === 1
         && strpos($dev, '..') === false;
 }
 
@@ -1027,14 +1033,19 @@ function bm_geraetezeilen_pruefen($liste)
             $bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL'), $nr);
             continue;
         }
-        $dev = trim((string) (isset($g['geraetedatei']) ? $g['geraetedatei'] : ''));
-        if ($dev !== '' && !bm_geraetedatei_taugt($dev)) {
+        /* Geprueft wird der Wert, der gespeichert wird - nicht eine
+         * getrimmte Kopie. Bis 0.9.25 ging "192.168.1.5\n" aus einer
+         * Sicherung hier durch und stand danach roh in der Konfiguration
+         * (gemessen 24.09.2026). Das Formular speichert ueber bm_saeubern()
+         * ohnehin ohne Rand; eine eigene Sicherung trifft das also nicht. */
+        $dev = (string) (isset($g['geraetedatei']) ? $g['geraetedatei'] : '');
+        if ($dev !== '' && ($dev !== trim($dev) || !bm_geraetedatei_taugt($dev))) {
             $bean[] = sprintf(bm_t('EINST.FEHLER_DEV'), $nr);
         }
-        $ip = trim((string) (isset($g['ip']) ? $g['ip'] : ''));
+        $ip = (string) (isset($g['ip']) ? $g['ip'] : '');
         if ($ip !== ''
-            && preg_match('/^\d{1,3}(\.\d{1,3}){3}$/', $ip) !== 1
-            && preg_match('/^[A-Za-z0-9][A-Za-z0-9\.\-]{1,80}$/', $ip) !== 1) {
+            && preg_match('/^\d{1,3}(\.\d{1,3}){3}\z/', $ip) !== 1
+            && preg_match('/^[A-Za-z0-9][A-Za-z0-9\.\-]{1,80}\z/', $ip) !== 1) {
             $bean[] = sprintf(bm_t('EINST.FEHLER_IP'), $nr);
         }
         foreach (array('port' => array(1, 65535), 'unit' => array(0, 247),
@@ -1044,7 +1055,7 @@ function bm_geraetezeilen_pruefen($liste)
             if (!isset($g[$f]) || $g[$f] === '') {
                 continue;
             }
-            if (preg_match('/^[0-9]{1,6}$/', (string) $g[$f]) !== 1
+            if (preg_match('/^[0-9]{1,6}\z/', (string) $g[$f]) !== 1
                 || (int) $g[$f] < $gr[0] || (int) $g[$f] > $gr[1]) {
                 $bean[] = sprintf(bm_t('EINST.FEHLER_ZAHL_ZEILE'), $nr,
                     bm_t('EINST.T_' . strtoupper($f)), $gr[0], $gr[1]);
