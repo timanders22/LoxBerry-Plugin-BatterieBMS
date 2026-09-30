@@ -159,14 +159,21 @@ function bm_modbus_auswerten(array $regs, array $pr)
     foreach (bm_status_felder() as $feld => $unbenutzt) {
         $werte[$feld] = null;
     }
+    /* C1 (Durchgang 29.09.2026): array_key_exists, nicht isset. Die Felder
+     * stehen oben alle auf null, und isset() ist fuer null falsch - bis 0.9.29
+     * wurde deshalb JEDES Profilfeld uebersprungen: kein Modbus-Speicher
+     * lieferte je einen Messwert, der Endpunkt meldete OK=1 mit lauter
+     * Strichen, und weil SOC immer null war, griff das Ladezustandsfenster nie
+     * (gemessen, Befund C1/M1; dieselbe Zeile steht schon in 0.9.14). Die
+     * Selbstpruefung rechnet seither ein festes Registerabbild durch. */
     foreach ((array) $pr['felder'] as $feld => $beschreibung) {
-        if (!isset($werte[$feld])) {
+        if (!array_key_exists($feld, $werte)) {
             continue;   // ein Profil darf keine eigenen Messgroessen erfinden
         }
         $werte[$feld] = bm_wert_aus($regs, $beschreibung);
     }
     foreach ((array) $pr['rechnung'] as $feld => $r) {
-        if (!isset($werte[$feld]) || !isset($r['art']) || $r['art'] !== 'produkt') {
+        if (!array_key_exists($feld, $werte) || !isset($r['art']) || $r['art'] !== 'produkt') {
             continue;
         }
         $a = bm_wert_aus($regs, array('reg' => $r['a'], 'typ' => $r['a_typ'],
@@ -552,11 +559,19 @@ function bm_abruf_pylontech(array $g, array $pr)
 function bm_steuern(array $g, array $pr, $aktion, $watt)
 {
     $cfg = bm_config();
-    if (empty($cfg['steuerung_ein'])) {
-        return array(0, bm_t('DIENST.STEUERUNG_GLOBAL_AUS'));
-    }
-    if (empty($g['schreiben'])) {
-        return array(0, sprintf(bm_t('DIENST.STEUERUNG_GERAET_AUS'), $g['name']));
+    /* C3 (Durchgang 29.09.2026): die beiden Freigaben sperren nur das SETZEN
+     * eines Zwangs, nie die Ruecknahme in die Automatik. Bis 0.9.29 standen
+     * beide Pruefungen vor jeder Aktion - wer bei laufendem Zwang die
+     * Freigabe abschaltete (die naheliegende Notbremse), sperrte damit auch
+     * Totmannschaltung, Ruecknahme beim Anhalten und den Befehl automatik;
+     * der Speicher blieb im Zwang (gemessen, Faelle B2 und B3). */
+    if ($aktion !== 'automatik') {
+        if (empty($cfg['steuerung_ein'])) {
+            return array(0, bm_t('DIENST.STEUERUNG_GLOBAL_AUS'));
+        }
+        if (empty($g['schreiben'])) {
+            return array(0, sprintf(bm_t('DIENST.STEUERUNG_GERAET_AUS'), $g['name']));
+        }
     }
     $st = isset($pr['steuerung']) && is_array($pr['steuerung']) ? $pr['steuerung'] : array();
 
@@ -603,10 +618,10 @@ function bm_steuern(array $g, array $pr, $aktion, $watt)
              * Wahl ('wort' => 'nieder' in bm_wert_aus). Geschrieben wurde
              * immer hohes Wort zuerst - ein Geraet, das es andersherum
              * fuehrt, bekam den Sollwert mit vertauschten Worten, und ein
-             * eigenes Profil konnte das nicht richtigstellen. */
-            $worte = (isset($schritt['wort']) && $schritt['wort'] === 'nieder')
-                ? array($wert & 0xFFFF, ($wert >> 16) & 0xFFFF)
-                : array(($wert >> 16) & 0xFFFF, $wert & 0xFFFF);
+             * eigenes Profil konnte das nicht richtigstellen. Seit 0.9.30
+             * steht die Rechnung in bm_worte() - dieselbe fuer die
+             * Notruecknahme weiter unten (C11). */
+            $worte = bm_worte($wert, $schritt);
             $erg = bm_register_schreiben_mehrere($s, $g, (int) $schritt['reg'], $worte);
         } else {
             $erg = bm_register_schreiben($s, $g, (int) $schritt['reg'], $wert);
@@ -632,9 +647,10 @@ function bm_steuern(array $g, array $pr, $aktion, $watt)
                         foreach ($st['automatik']['schritte'] as $sch) {
                             $w2 = (int) $sch['wert'];
                             $t2 = isset($sch['typ']) ? $sch['typ'] : 'u16';
+                            // C11: Wortfolge des Profils, wie im Normalweg.
                             $e2 = ($t2 === 'u32' || $t2 === 's32')
                                 ? bm_register_schreiben_mehrere($s2, $g, (int) $sch['reg'],
-                                    array(($w2 >> 16) & 0xFFFF, $w2 & 0xFFFF))
+                                    bm_worte($w2, $sch))
                                 : bm_register_schreiben($s2, $g, (int) $sch['reg'], $w2);
                             if (is_array($e2)) {
                                 $zurueck = array(0, $e2['_fehler']);
@@ -646,7 +662,8 @@ function bm_steuern(array $g, array $pr, $aktion, $watt)
                     bm_verbindung_verwerfen($g);
                 }
                 if (empty($zurueck[0])) {
-                    bm_soll_schreiben((int) $g['nr'], 'unvollstaendig', (int) $watt, 'Abbruch');
+                    bm_soll_schreiben((int) $g['nr'], 'unvollstaendig', (int) $watt, 'Abbruch',
+                        bm_soll_zusatz($g, $pr));
                     bm_log($g['name'] . ': Schrittfolge nach Schritt ' . ($nr - 1)
                         . ' abgebrochen, und die Ruecknahme in die Automatik ist '
                         . 'ebenfalls gescheitert. Das Geraet steht moeglicherweise im '
@@ -678,9 +695,15 @@ function bm_soll_lesen($nr)
     return bm_json_lesen(bm_soll_datei($nr));
 }
 
-function bm_soll_schreiben($nr, $aktion, $watt, $quelle = '')
+/**
+ * $zusatz: array('anschrift' => …, 'ruecknahme' => …) - wohin die Ruecknahme
+ * geht, auch wenn der Speicher aus der Liste verschwindet (C4). Beim
+ * Auffrischen eines bestehenden Sollwerts wird der Zusatz der alten Datei
+ * weitergereicht (bm_soll_zusatz_alt()).
+ */
+function bm_soll_schreiben($nr, $aktion, $watt, $quelle = '', array $zusatz = array())
 {
-    return bm_json_schreiben(bm_soll_datei($nr), array(
+    $d = array(
         'aktion' => $aktion,
         'watt'   => (int) $watt,
         'ts'     => time(),
@@ -688,13 +711,176 @@ function bm_soll_schreiben($nr, $aktion, $watt, $quelle = '')
         // ebenso. Ohne diese Angabe ist bei drei moeglichen Absendern nicht
         // zu klaeren, warum der Speicher gerade laedt.
         'quelle' => bm_text_sauber((string) $quelle, 40),
-    ));
+    );
+    if (isset($zusatz['anschrift']) && is_array($zusatz['anschrift'])) {
+        $d['anschrift'] = $zusatz['anschrift'];
+    }
+    if (isset($zusatz['ruecknahme']) && is_array($zusatz['ruecknahme'])) {
+        $d['ruecknahme'] = $zusatz['ruecknahme'];
+    }
+    return bm_json_schreiben(bm_soll_datei($nr), $d);
+}
+
+/** C4: Anschrift und Automatik-Schrittfolge eines Speichers fuer die
+ *  Sollwertdatei. */
+function bm_soll_zusatz(array $g, array $pr)
+{
+    $st = (isset($pr['steuerung']['automatik']['schritte'])
+           && is_array($pr['steuerung']['automatik']['schritte']))
+        ? $pr['steuerung']['automatik']['schritte'] : array();
+    return array('anschrift' => bm_geraet_anschrift($g), 'ruecknahme' => $st);
+}
+
+/** C4: beim Auffrischen den Zusatz der bestehenden Datei behalten. Traegt sie
+ *  keinen (Datei aus 0.9.29 oder frueher), gilt der Speicher dieser Nummer. */
+function bm_soll_zusatz_alt($soll, array $g, array $pr)
+{
+    if (is_array($soll) && isset($soll['anschrift']) && is_array($soll['anschrift'])) {
+        return array('anschrift' => $soll['anschrift'],
+                     'ruecknahme' => isset($soll['ruecknahme']) && is_array($soll['ruecknahme'])
+                                     ? $soll['ruecknahme'] : array());
+    }
+    return bm_soll_zusatz($g, $pr);
+}
+
+/**
+ * C4: gehoert der offene Zwang Nummer $nr zu dem Speicher, der heute unter
+ * dieser Nummer eingerichtet ist?
+ *
+ *   true   ja (gleiche Anschrift), oder die Datei traegt keine Anschrift
+ *          (Datei aus 0.9.29 oder frueher) und es gibt die Nummer noch -
+ *          dann gilt wie bisher der Speicher dieser Nummer
+ *   false  die Nummer gibt es nicht mehr, oder dort steht heute ein anderer
+ *          Speicher: ein VERWAISTER Zwang (bm_zwang_verwaist())
+ */
+function bm_soll_gehoert($soll, $g)
+{
+    if (!is_array($g)) {
+        return false;
+    }
+    if (!is_array($soll) || !isset($soll['anschrift']) || !is_array($soll['anschrift'])) {
+        return true;
+    }
+    return bm_anschrift_gleich($soll['anschrift'], bm_geraet_anschrift($g));
+}
+
+/**
+ * C4: einen Zwang ueber die GEMERKTE Anschrift zuruecknehmen - fuer einen
+ * Speicher, der in der Liste nicht mehr unter dieser Nummer steht (entfernt,
+ * aufgerueckt, Konfiguration kaputt).
+ *
+ * Rueckgabe array(ok, Meldung). ok = 1 zurueckgenommen, 0 gescheitert oder
+ * nicht moeglich (dann sagt die Meldung, warum).
+ */
+function bm_zwang_verwaist_zuruecknehmen($nr, array $soll)
+{
+    $cfg = bm_config();
+    $a = isset($soll['anschrift']) && is_array($soll['anschrift']) ? $soll['anschrift'] : null;
+    $schritte = isset($soll['ruecknahme']) && is_array($soll['ruecknahme']) ? $soll['ruecknahme'] : array();
+    if ($a === null) {
+        return array(0, sprintf(bm_t('DIENST.ZWANG_OHNE_ANSCHRIFT'), (int) $nr));
+    }
+    if (!$schritte) {
+        return array(0, sprintf(bm_t('DIENST.ZWANG_OHNE_SCHRITTE'), (int) $nr));
+    }
+    if ((string) $a['transport'] === 'pylontech_rs485') {
+        return array(0, bm_t('DIENST.STEUERUNG_SERIELL'));
+    }
+    $g = array('nr' => (int) $nr, 'name' => (string) $a['name'], 'transport' => (string) $a['transport'],
+               'ip' => (string) $a['ip'], 'port' => (int) $a['port'], 'unit' => (int) $a['unit'],
+               'geraetedatei' => (string) $a['geraetedatei'], 'baud' => (int) $a['baud'],
+               'profil' => (string) $a['profil']);
+    // Die vorgehaltene Verbindung derselben Anschrift, falls es sie gibt:
+    // steht der Speicher unter einer anderen Nummer noch in der Liste, darf
+    // keine zweite entstehen (die BYD-BCU laesst nur eine zu).
+    $s = bm_verbindung_holen($g, (int) $cfg['zeitueberschreitung'], true);
+    if (is_array($s)) {
+        bm_verbindung_verwerfen($g);
+        return array(0, $s['_fehler']);
+    }
+    foreach ($schritte as $sch) {
+        if (!is_array($sch) || !isset($sch['reg'])) {
+            continue;
+        }
+        $w = (int) (isset($sch['wert']) ? $sch['wert'] : 0);
+        $t = isset($sch['typ']) ? $sch['typ'] : 'u16';
+        $e = ($t === 'u32' || $t === 's32')
+            ? bm_register_schreiben_mehrere($s, $g, (int) $sch['reg'], bm_worte($w, $sch))
+            : bm_register_schreiben($s, $g, (int) $sch['reg'], $w);
+        if (is_array($e)) {
+            bm_verbindung_verwerfen($g);
+            return array(0, $e['_fehler']);
+        }
+        usleep(150000);
+    }
+    return array(1, '');
+}
+
+/**
+ * C4: alle verwaisten Zwaenge zuruecknehmen oder laut melden.
+ *
+ * $geraete: bm_geraete() dieses Durchlaufs. $immer: beim Anhalten ohne die
+ * Wartezeit zwischen zwei Versuchen. Rueckgabe: '' oder der Klartext der
+ * Zwaenge, die sich NICHT zuruecknehmen liessen (fuer zustand.json).
+ */
+function bm_zwang_verwaist(array $geraete, $immer = false)
+{
+    static $letzter = array();
+    $offen = array();
+    foreach (bm_zwang_offen() as $nr => $soll) {
+        if (!isset($soll['aktion'])) {
+            continue;
+        }
+        if (isset($geraete[$nr]) && bm_soll_gehoert($soll, $geraete[$nr])) {
+            continue;       // gehoert zum Eintrag dieser Nummer - dort behandelt
+        }
+        $name = (isset($soll['anschrift']['name']) && (string) $soll['anschrift']['name'] !== '')
+            ? (string) $soll['anschrift']['name'] : sprintf(bm_t('ALLG.SPEICHER_NAME'), (int) $nr);
+        // Nicht in jedem Durchlauf an einem stummen Geraet warten: hoechstens
+        // ein Versuch je Minute, beim Anhalten immer.
+        if (!$immer && isset($letzter[$nr]) && time() - $letzter[$nr] < 60) {
+            $offen[] = $name;
+            continue;
+        }
+        $letzter[$nr] = time();
+        list($ok, $meld) = bm_zwang_verwaist_zuruecknehmen($nr, $soll);
+        if ($ok) {
+            bm_soll_loeschen($nr);
+            unset($letzter[$nr]);
+            bm_log($name . ' (Sollwertdatei Nummer ' . (int) $nr . '): der Speicher steht nicht mehr '
+                . 'unter dieser Nummer in der Liste. Der Zwang ' . $soll['aktion'] . ':'
+                . (int) (isset($soll['watt']) ? $soll['watt'] : 0) . ' wurde ueber die gemerkte '
+                . 'Anschrift zurueckgenommen - zurueck in die Automatik.');
+        } else {
+            $offen[] = $name;
+            bm_log_gebremst('verwaist' . (int) $nr, $name . ' (Sollwertdatei Nummer ' . (int) $nr
+                . '): der Speicher steht nicht mehr unter dieser Nummer in der Liste, und der '
+                . 'Zwang liess sich NICHT zuruecknehmen. ' . $meld . ' Die Sollwertdatei bleibt '
+                . 'liegen; es wird erneut versucht. BITTE AM GERAET PRUEFEN.', 900);
+        }
+    }
+    return $offen ? sprintf(bm_t('DIENST.ZWANG_VERWAIST'), implode(', ', $offen)) : '';
 }
 
 function bm_soll_loeschen($nr)
 {
     @unlink(bm_soll_datei($nr));
     bm_nachhol_loeschen($nr);
+}
+
+/** C4: nach einer gelungenen Ruecknahme an Speicher $g die Sollwertdatei
+ *  seiner Nummer loeschen - aber nur, wenn sie IHM gehoert. Eine Datei, die
+ *  einem inzwischen verschobenen Speicher gehoert, bleibt fuer
+ *  bm_zwang_verwaist() liegen; der Nachholauftrag dieser Nummer faellt so
+ *  oder so. */
+function bm_soll_loeschen_fuer($nr, array $g)
+{
+    $sv = bm_soll_lesen($nr);
+    if (!$sv || !isset($sv['aktion']) || bm_soll_gehoert($sv, $g)) {
+        bm_soll_loeschen($nr);
+    } else {
+        bm_nachhol_loeschen($nr);
+    }
 }
 
 /* ------------------------------------------------------------------
@@ -966,6 +1152,47 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
 
         // Sollwert und Totmannschaltung
         $soll = bm_soll_lesen($nr);
+        /* C4: eine Sollwertdatei, deren gemerkte Anschrift nicht zu dem
+         * Speicher passt, der HEUTE unter dieser Nummer steht (die Liste ist
+         * aufgerueckt), gehoert nicht zu diesem Eintrag. Sie wird nach der
+         * Schleife ueber ihre Anschrift behandelt (bm_zwang_verwaist()). */
+        if ($soll && isset($soll['aktion']) && !bm_soll_gehoert($soll, $g)) {
+            $soll = array();
+        }
+        /* C2 (Durchgang 29.09.2026): das Ladezustandsfenster gilt auch
+         * WAEHREND eines laufenden Zwangs. Bis 0.9.29 wurde es nur beim
+         * Eintreffen des Befehls geprueft; ein Entladezwang lief danach unter
+         * soc_min weiter, solange Loxone Lebenszeichen schickte (gemessen,
+         * Befund C2: SOC 5 % bei entladen:800, keine Ruecknahme). Gilt nur fuer
+         * einen FRISCH gemessenen Ladezustand dieses Durchlaufs; "sperren"
+         * entnimmt nichts und bleibt aussen vor. */
+        if ($soll && isset($soll['aktion']) && !empty($eintrag['ok']) && $eintrag['SOC'] !== null) {
+            $fenster = '';
+            if ((string) $soll['aktion'] === 'entladen' && (int) $soll['watt'] > 0
+                && $eintrag['SOC'] <= (int) $cfg['soc_min']) {
+                $fenster = sprintf(bm_t('DIENST.SOC_ZU_NIEDRIG'), $eintrag['SOC'], (int) $cfg['soc_min']);
+            } elseif ((string) $soll['aktion'] === 'laden' && (int) $soll['watt'] > 0
+                && $eintrag['SOC'] >= (int) $cfg['soc_max']) {
+                $fenster = sprintf(bm_t('DIENST.SOC_ZU_HOCH'), $eintrag['SOC'], (int) $cfg['soc_max']);
+            }
+            if ($fenster !== '') {
+                list($okF, $meldF) = bm_steuern($g, $pr, 'automatik', 0);
+                if ($okF) {
+                    bm_soll_loeschen($nr);
+                    bm_log($g['name'] . ': der Ladezustand hat das Fenster verlassen, der Zwang '
+                        . $soll['aktion'] . ':' . (int) $soll['watt'] . ' ist zurueckgenommen - '
+                        . 'zurueck in die Automatik. ' . $fenster . ' ' . $meldF);
+                    $soll = array();
+                } else {
+                    bm_log_gebremst('fenster' . $nr, $g['name'] . ': der Ladezustand hat das Fenster '
+                        . 'verlassen, die Ruecknahme in die Automatik ist FEHLGESCHLAGEN. ' . $fenster
+                        . ' ' . $meldF . ' Es wird im naechsten Durchlauf erneut versucht. '
+                        . 'BITTE AM GERAET PRUEFEN.', 900);
+                    $stoerung = $g['name'] . ': ' . $fenster . ' ' . $meldF;
+                    $eintrag['sollwert_ruecknahme'] = 'gescheitert';
+                }
+            }
+        }
         if ($soll && isset($soll['aktion'])) {
             $alterSoll = time() - (int) $soll['ts'];
             $eintrag['sollwert'] = $soll['aktion'] . ':' . (int) $soll['watt'];
@@ -999,7 +1226,8 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
                      * der naechste Anlauf soll stattfinden. */
                     bm_soll_schreiben($nr, (string) $soll['aktion'],
                         (int) $soll['watt'],
-                        isset($soll['quelle']) ? (string) $soll['quelle'] : '');
+                        isset($soll['quelle']) ? (string) $soll['quelle'] : '',
+                        bm_soll_zusatz_alt($soll, $g, $pr));
                     bm_log_gebremst('totmann' . $nr, $g['name']
                         . ': Totmannschaltung nach ' . $alterSoll . ' s - die '
                         . 'Ruecknahme in die Automatik ist FEHLGESCHLAGEN, der '
@@ -1032,6 +1260,19 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
         }
         $eintrag['ALTER'] = 0;
         $abbild['geraete'][$nr] = $eintrag;
+    }
+
+    /* C4: Zwaenge, die kein Eintrag der Liste mehr traegt - der Speicher
+     * wurde entfernt, die Liste ist aufgerueckt, oder die Konfiguration ist
+     * kaputt und bm_geraete() leer. Niemand fuettert sie mehr mit
+     * Lebenszeichen (die Nummer gibt es nicht mehr oder sie meint einen
+     * anderen Speicher); sie werden deshalb sofort ueber die gemerkte
+     * Anschrift zurueckgenommen, nicht erst nach der Totmannzeit. Geht das
+     * nicht, wird es laut gemeldet - Protokoll und Zustand (Reiter
+     * Einstellungen, "Letzte Stoerung") -, und die Datei bleibt liegen. */
+    $verwaist = bm_zwang_verwaist($geraete);
+    if ($verwaist !== '') {
+        $stoerung = $verwaist;
     }
 
     $abbild['ok'] = ($geraete && $okZahl === count($geraete)) ? 1 : 0;
@@ -1431,7 +1672,7 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
     if ($aktion === 'automatik') {
         list($ok, $meldung) = bm_steuern($g, $pr, 'automatik', 0);
         if ($ok) {
-            bm_soll_loeschen($nr);
+            bm_soll_loeschen_fuer($nr, $g);
             $sofortAbruf = true;
         }
         return array($ok, $meldung);
@@ -1439,11 +1680,26 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
 
     if ($aktion === 'lebenszeichen') {
         $soll = bm_soll_lesen($nr);
-        if (!$soll || !isset($soll['aktion'])) {
+        // C4: ein Sollwert, der einem anderen Speicher gehoert (die Liste ist
+        // aufgerueckt), wird nicht aufgefrischt - er wird ueber seine
+        // Anschrift zurueckgenommen (bm_zwang_verwaist()).
+        if (!$soll || !isset($soll['aktion']) || !bm_soll_gehoert($soll, $g)) {
             return array(0, bm_t('DIENST.LEBENSZEICHEN_OHNE_SOLL'));
         }
+        /* C3: ein Lebenszeichen haelt einen Zwang AM LEBEN - das ist Setzen,
+         * nicht Zuruecknehmen. Ist eine der beiden Freigaben aus, wird es
+         * abgewiesen; dann laeuft die Totmannzeit ab, und die Ruecknahme (die
+         * nie an den Freigaben haengt) stellt den Speicher zurueck. Bis 0.9.29
+         * frischte ein Lebenszeichen den Zwang auch bei abgeschaltetem
+         * Schreiben des Speichers weiter auf. */
+        if (empty($cfg['steuerung_ein'])) {
+            return array(0, bm_t('DIENST.STEUERUNG_GLOBAL_AUS'));
+        }
+        if (empty($g['schreiben'])) {
+            return array(0, sprintf(bm_t('DIENST.STEUERUNG_GERAET_AUS'), $g['name']));
+        }
         bm_soll_schreiben($nr, $soll['aktion'], (int) $soll['watt'],
-            isset($soll['quelle']) ? $soll['quelle'] : '');
+            isset($soll['quelle']) ? $soll['quelle'] : '', bm_soll_zusatz_alt($soll, $g, $pr));
         return array(1, sprintf(bm_t('DIENST.LEBENSZEICHEN_OK'), (int) $cfg['totmann']));
     }
 
@@ -1455,7 +1711,7 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
          * koennte, und das ist genau verkehrt herum. */
         list($ok, $meldung) = bm_steuern($g, $pr, 'sperren', 0);
         if ($ok) {
-            bm_soll_schreiben($nr, 'sperren', 0, $bm_quelle);
+            bm_soll_schreiben($nr, 'sperren', 0, $bm_quelle, bm_soll_zusatz($g, $pr));
             $sofortAbruf = true;
         }
         return array($ok, $meldung);
@@ -1474,7 +1730,7 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
     if ($watt === 0) {
         list($ok, $meldung) = bm_steuern($g, $pr, 'automatik', 0);
         if ($ok) {
-            bm_soll_loeschen($nr);
+            bm_soll_loeschen_fuer($nr, $g);
             $sofortAbruf = true;
         }
         return array($ok, $meldung);
@@ -1515,9 +1771,10 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
          * die Bremse griff), der NEUE Wert kommt in die Nachholmappe, und die
          * Rueckgabe ist 2 - 'eingereiht', nicht 'erledigt'. */
         $alt = bm_soll_lesen($nr);
-        if ($alt && isset($alt['aktion'])) {
+        if ($alt && isset($alt['aktion']) && bm_soll_gehoert($alt, $g)) {
             bm_soll_schreiben($nr, (string) $alt['aktion'], (int) $alt['watt'],
-                isset($alt['quelle']) ? (string) $alt['quelle'] : '');
+                isset($alt['quelle']) ? (string) $alt['quelle'] : '',
+                bm_soll_zusatz_alt($alt, $g, $pr));
         }
         bm_nachhol_schreiben($nr, $aktion, $watt, $bm_quelle);
         return array(2, sprintf(bm_t('DIENST.BREMSE'), $rest));
@@ -1526,7 +1783,8 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
     list($ok, $meldung) = bm_steuern($g, $pr, $aktion, $watt);
     if ($ok) {
         $letzteSchreibzeit[$nr] = time();
-        bm_soll_schreiben($nr, $aktion, $watt, $bm_quelle);
+        // C4: die Anschrift und die Ruecknahmeschritte reisen mit.
+        bm_soll_schreiben($nr, $aktion, $watt, $bm_quelle, bm_soll_zusatz($g, $pr));
         $sofortAbruf = true;
     }
     return array($ok, $meldung);
@@ -1552,6 +1810,15 @@ function bm_dienst_schleife($einmal = false)
         . (int) $cfg['intervall'] . ' s, Zelldaten alle ' . (int) $cfg['zelltakt'] . ' s.');
     if (!$geraete) {
         bm_log('Es ist kein Speicher eingerichtet - der Dienst laeuft, hat aber nichts zu tun.');
+    }
+    /* M4 (Durchgang 29.09.2026): die Abo-Datei des MQTT-Gateways auf das
+     * eingestellte Praefix bringen - nur, wenn sie abweicht (Bauart
+     * Einspeisebremse 0.9.20). Ohne sie kommt unter Gateway V1 am Miniserver
+     * nichts an, bis jemand das Abo von Hand eintraegt. */
+    if (!$einmal) {
+        bm_abo_datei((string) $cfg['mqtt_topic'], true);
+        // M6: nach dem Start geht zuerst der volle Satz hinaus.
+        bm_mqtt_voll_senden();
     }
     // Vor dem ersten Abholen: was beim Start schon zu alt ist, geht nicht
     // mehr an den Speicher (BM_BEFEHL_HOECHSTALTER).
@@ -1583,9 +1850,14 @@ function bm_dienst_schleife($einmal = false)
     // Beim Anhalten jeden Zwang zuruecknehmen. Ein Speicher, der mit einem
     // Sollwert stehen bleibt, waehrend niemand mehr nachfuettert, ist das
     // gefaehrlichste Ergebnis dieses Plugins.
-    foreach (bm_geraete() as $nr => $g) {
+    /* C4: erst die Zwaenge, die zu einem Eintrag der Liste gehoeren - dann
+     * alle uebrigen ueber ihre gemerkte Anschrift (bm_zwang_verwaist()). Bis
+     * 0.9.29 lief dieser Weg nur ueber die Liste; ein entfernter oder
+     * verschobener Speicher blieb beim Anhalten im Zwang (Fall G2). */
+    $bm_ende_geraete = bm_geraete();
+    foreach ($bm_ende_geraete as $nr => $g) {
         $soll = bm_soll_lesen($nr);
-        if ($soll && isset($soll['aktion'])) {
+        if ($soll && isset($soll['aktion']) && bm_soll_gehoert($soll, $g)) {
             $pr = bm_profil($g['profil']);
             $ok = false;
             if ($pr !== null) {
@@ -1612,7 +1884,17 @@ function bm_dienst_schleife($einmal = false)
             }
         }
     }
+    bm_zwang_verwaist($bm_ende_geraete, true);
     bm_verbindungen_schliessen();
+    /* C5: ist danach noch ein Zwang offen, sagt es die letzte Zeile - und
+     * bin/dienst.sh stop meldet es mit Rueckgabewert ungleich 0. */
+    $bm_rest = bm_zwang_offen();
+    if ($bm_rest) {
+        bm_log('Dienst beendet - aber der Zwang an ' . bm_zwang_namen($bm_rest) . ' ist NICHT '
+            . 'zurueckgenommen. Die Sollwertdatei bleibt liegen, damit der naechste Dienststart '
+            . 'es erneut versucht. BITTE AM GERAET PRUEFEN.');
+        return 0;
+    }
     bm_log('Dienst beendet.');
     return 0;
 }
@@ -1819,6 +2101,35 @@ function bm_selbsttest()
               . $t1 . ' (erwartet -0,2), u32 0x0001_86A0 = ' . $t2
               . ' (erwartet 100000), Maske 0x000F von 0xFFFE = ' . $t3 . ' (erwartet 14)';
     if (!$umOk) {
+        $fehler++;
+    }
+
+    /* C1 (Durchgang 29.09.2026): liefert bm_modbus_auswerten() Werte?
+     * Die Zeile darueber prueft nur bm_wert_aus() - sie blieb gruen, waehrend
+     * bm_modbus_auswerten() seit mindestens 0.9.14 jedes Feld uebersprang
+     * (isset() auf null). Gerechnet wird ein festes Registerabbild durch zwei
+     * eingebaute Profile: Huawei (felder) und BYD (felder und rechnung). */
+    $bm_eing = bm_profile_eingebaut();
+    $hw = bm_modbus_auswerten(array(37760 => 500, 37762 => 2, 37763 => 5123,
+                                    37765 => 0xFFFF, 37766 => 0xFC18),
+                              $bm_eing['huawei_luna2000']);
+    $byd = bm_modbus_auswerten(array(0x0500 => 77, 0x0504 => 100, 0x0510 => 5000),
+                               $bm_eing['byd_battery_box']);
+    $gleich = function ($ist, $soll) {
+        return $ist !== null && is_numeric($ist) && abs((float) $ist - $soll) < 0.001;
+    };
+    $auOk = isset($hw['werte'], $byd['werte'])
+        && $gleich($hw['werte']['SOC'], 50.0) && $gleich($hw['werte']['MODUS'], 2)
+        && $gleich($hw['werte']['UBAT'], 512.3) && $gleich($hw['werte']['PBAT'], -1000)
+        && $gleich($byd['werte']['SOC'], 77) && $gleich($byd['werte']['PBAT'], 500);
+    $zeilen[] = ($auOk ? '[OK]   ' : '[FEHL] ') . 'Profil gegen festes Registerabbild: Huawei SOC '
+              . var_export($hw['werte']['SOC'], true) . ' (erwartet 50.0), MODUS '
+              . var_export($hw['werte']['MODUS'], true) . ' (2), UBAT '
+              . var_export($hw['werte']['UBAT'], true) . ' (512.3), PBAT '
+              . var_export($hw['werte']['PBAT'], true) . ' (-1000); BYD SOC '
+              . var_export($byd['werte']['SOC'], true) . ' (77), PBAT aus Rechnung '
+              . var_export($byd['werte']['PBAT'], true) . ' (500)';
+    if (!$auOk) {
         $fehler++;
     }
 
@@ -2251,7 +2562,16 @@ if (in_array('--selbsttest', $bm_argv, true)) {
  * Schreibt nichts an - weder Konfiguration noch Protokoll. */
 if (in_array('--mqtt-leeren', $bm_argv, true)) {
     bm_nur_lesen(true);
-    exit(bm_mqtt_leeren());
+    /* M3: "--praefix=<p>" leert ein anderes Praefix als das eingestellte -
+     * die Deinstallation ruft damit das zuletzt verlassene Praefix
+     * (mqtt_praefix_alt). Ohne Angabe gilt das eingestellte. */
+    $bm_lp = null;
+    foreach ($bm_argv as $bm_a) {
+        if (strncmp((string) $bm_a, '--praefix=', 10) === 0) {
+            $bm_lp = substr((string) $bm_a, 10);
+        }
+    }
+    exit(bm_mqtt_leeren(3, 1.0, $bm_lp));
 }
 
 /* Ohne Wurzel oder aus einem ausgepackten Archiv heraus arbeitet der Dienst
@@ -2300,6 +2620,36 @@ if ($bm_p0['home'] === '') {
 ini_set('log_errors', '1');
 ini_set('display_errors', '0');
 ini_set('error_log', bm_paths()['log']);
+
+/* C7 (Durchgang 29.09.2026): EIN Dienst je Anlage. Bis 0.9.29 nahm der Dienst
+ * keine Sperre; zwei gleichzeitige Starts (Knopf und Waechter) ergaben in
+ * drei von drei Runden zwei Dienste, die beide mit demselben Speicher
+ * sprachen und dieselbe Warteschlange abholten (gemessen, Fall A). Die Sperre
+ * liegt im Datenordner, der Griff bleibt bis zum Prozessende offen; wer sie
+ * nicht bekommt, geht mit einem Satz und Rueckgabewert 3 (Regeln/03, "Ein
+ * Dauerlaeufer nimmt eine Sperrdatei"). Der Einmallauf nimmt dieselbe Sperre -
+ * er fragt dieselben Geraete. Vererbung an Kindprozesse ist hier unbedenklich:
+ * der Dienst startet nur kurzlebige Kinder (stty, command -v), keine
+ * Dauerkinder ueber proc_open. */
+$bm_sperrordner = bm_paths()['datadir'];
+if (!is_dir($bm_sperrordner)) {
+    @mkdir($bm_sperrordner, 0775, true);
+}
+$bm_sperre = @fopen($bm_sperrordner . '/dienst.lock', 'c');
+if ($bm_sperre === false) {
+    fwrite(STDERR, 'bms_dienst.php: die Sperrdatei ' . $bm_sperrordner
+        . "/dienst.lock liess sich nicht anlegen - es wird nichts abgerufen.\n");
+    bm_log('Die Sperrdatei ' . $bm_sperrordner . '/dienst.lock liess sich nicht anlegen - '
+        . 'der Dienst startet nicht (ohne Sperre koennten zwei Dienste denselben Speicher fragen).');
+    exit(1);
+}
+if (!@flock($bm_sperre, LOCK_EX | LOCK_NB)) {
+    fwrite(STDERR, "bms_dienst.php: es laeuft bereits ein Dienst dieser Anlage - dieser Aufruf endet.\n");
+    bm_log_gebremst('zweiter_dienst', 'Ein zweiter Dienst wollte starten, waehrend einer laeuft '
+        . '(Sperre dienst.lock belegt). Er ist wieder beendet; es laeuft weiter genau einer.', 600);
+    exit(3);
+}
+
 if (function_exists('pcntl_signal')) {
     pcntl_signal(SIGTERM, 'bm_signal_behandeln');
     pcntl_signal(SIGINT, 'bm_signal_behandeln');

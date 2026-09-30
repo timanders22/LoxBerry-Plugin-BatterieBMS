@@ -100,15 +100,19 @@ chmod 755 "$PDATA" "$PLOG" "$PCONFIG" 2>/dev/null
 # Der Merker traegt den Ordner UND die Fassung des laufenden Einbaus. Ein
 # spaeterer Einbau traegt eine andere Kennung und wird deshalb nicht
 # faelschlich uebersprungen.
+#
+# Der Name LAUFMERKER (bis 0.9.29 MARKE) ist Absicht (I1, Entscheidung 1):
+# "MARKE" heisst in den Werkzeugen die Upgrade-Marke, und bauart_F hielt
+# diesen Merker dafuer - die Rueckspielung weiter unten sah es deshalb nicht.
 UEBERNOMMEN=0
 KENNUNG="$(basename "${1:-ohne-tempordner}")|${4:-ohne-fassung}"
-MARKE="$PDATA/.postinstall_lauf"
-if [ -f "$MARKE" ] && [ "$(cat "$MARKE" 2>/dev/null)" = "$KENNUNG" ]; then
+LAUFMERKER="$PDATA/.postinstall_lauf"
+if [ -f "$LAUFMERKER" ] && [ "$(cat "$LAUFMERKER" 2>/dev/null)" = "$KENNUNG" ]; then
     echo "<INFO> postinstall lief in diesem Einbau bereits - der zweite Aufruf"
     echo "<INFO> aus postupgrade.sh wird uebersprungen."
     exit 0
 fi
-printf '%s' "$KENNUNG" > "$MARKE"
+printf '%s' "$KENNUNG" > "$LAUFMERKER"
 
 [ -f "$PCONFIG/batteriebms.json" ] || echo '{}' > "$PCONFIG/batteriebms.json"
 chmod 600 "$PCONFIG/batteriebms.json" 2>/dev/null
@@ -122,11 +126,14 @@ chmod 600 "$PCONFIG/batteriebms.json" 2>/dev/null
 # Pruefung-BatterieBMS-0.9.28, Faelle Z1 und Z2). Bauart aWATTar 1.2.28.
 BK="$BASE/config/plugins/$PFOLDER.backup.json"
 CF="$PCONFIG/batteriebms.json"
+# C9 (Durchgang 29.09.2026): dasselbe Muster wie bm_token_gueltig() in der
+# Bibliothek - eine Zeichenkette aus 1 bis 64 Zeichen (Buchstaben, Ziffern, Punkt, Bindestrich, Unterstrich). Bis
+# 0.9.29 galt jedes nicht leere Token, auch eine Liste ("Array").
 bm_hat_inhalt() {
     command -v php >/dev/null 2>&1 || return 1
     php -r '$d = json_decode((string) @file_get_contents($argv[1]), true);
-            exit(is_array($d) && isset($d["aktionstoken"])
-                 && trim((string) $d["aktionstoken"]) !== "" ? 0 : 1);' "$1" 2>/dev/null
+            exit(is_array($d) && isset($d["aktionstoken"]) && is_string($d["aktionstoken"])
+                 && preg_match("/^[A-Za-z0-9_.\-]{1,64}\z/", $d["aktionstoken"]) ? 0 : 1);' "$1" 2>/dev/null
 }
 if [ -f "$BK" ]; then
     INHALT=$(cat "$CF" 2>/dev/null)
@@ -189,12 +196,18 @@ else
 fi
 
 # ---------- Eigene Profile und Verlauf zurueckspielen ----------
+# I5 (Durchgang 29.09.2026): die mitgelieferten Beispieldateien
+# (profile/BEISPIEL_*) kommen aus der NEUEN Fassung und werden nicht mit dem
+# Stand der alten ueberschrieben (gemessen, Fall p1).
+# I4: im Archiv liegen seit 0.9.30 auch offene Sollwerte (soll_geraet*.json)
+# und Nachholauftraege (nachhol_geraet*.json) - der neue Dienst nimmt einen
+# Zwang dann zurueck, statt ihn zu vergessen (Faelle u5, u5b, u6).
 DBK="$BASE/config/plugins/$PFOLDER.backup.daten.tar"
 if [ -f "$DBK" ]; then
-    if ( cd "$PDATA" && tar xf "$DBK" ) 2>/dev/null; then
-        ZAHL=$(tar tf "$DBK" 2>/dev/null | grep -c '[^/]$')
+    if ( cd "$PDATA" && tar xf "$DBK" --exclude='profile/BEISPIEL_*' --exclude='./profile/BEISPIEL_*' ) 2>/dev/null; then
+        ZAHL=$(tar tf "$DBK" 2>/dev/null | grep -v 'profile/BEISPIEL_' | grep -c '[^/]$')
         UEBERNOMMEN=1
-        echo "<OK> Eigene Profile und Verlauf zurueckgespielt ($ZAHL Datei(en))."
+        echo "<OK> Eigene Profile, Verlauf und offene Sollwerte zurueckgespielt ($ZAHL Datei(en))."
         rm -f "$DBK"
     else
         echo "<FAIL> Die gesicherten Profile und der Verlauf liessen sich NICHT"
@@ -208,6 +221,7 @@ chown -R loxberry:loxberry "$PBIN" "$PDATA" "$PLOG" "$PCONFIG" 2>/dev/null
 
 # ---------- Lief der Dienst vor dem Update? Dann wieder starten (B29) ----------
 LIEF="$BASE/config/plugins/$PFOLDER.laeuft"
+DIENST_GESTARTET=0
 if [ -f "$LIEF" ]; then
     rm -f "$LIEF"
     if [ -x "$PBIN/dienst.sh" ]; then
@@ -218,6 +232,7 @@ if [ -f "$LIEF" ]; then
         RC=$?
         if [ $RC -eq 0 ]; then
             UEBERNOMMEN=1
+            DIENST_GESTARTET=1
             echo "<OK> Der Dienst lief vor dem Update und wurde wieder gestartet."
             echo "<INFO> $AUSGABE"
         else
@@ -228,6 +243,21 @@ if [ -f "$LIEF" ]; then
     else
         echo "<FAIL> Der Dienst lief vor dem Update, aber $PBIN/dienst.sh ist"
         echo "<FAIL> nicht ausfuehrbar. Bitte von Hand starten."
+    fi
+fi
+
+# ---------- I4: ein offener Zwang aus der Zeit vor dem Update ----------
+# Liegt nach dem Zurueckspielen eine Sollwertdatei, steht der Speicher
+# moeglicherweise noch im Zwang. Laeuft der Dienst, nimmt er ihn zurueck
+# (Totmannschaltung bzw. Verwaisten-Ruecknahme). Laeuft er nicht, sagt es
+# diese Zeile - gestartet wird er deshalb nicht ungefragt.
+set -- "$PDATA"/soll_geraet*.json
+if [ -e "$1" ]; then
+    if [ "$DIENST_GESTARTET" = "1" ]; then
+        echo "<INFO> Offener Zwang aus der Zeit vor dem Update:$(printf ' %s' "${@##*/}") - der Dienst nimmt ihn zurueck."
+    else
+        echo "<WARNING> Offener Zwang aus der Zeit vor dem Update:$(printf ' %s' "${@##*/}") - der Dienst laeuft nicht."
+        echo "<WARNING> Bitte den Dienst im Reiter Einstellungen starten; er nimmt den Zwang dann zurueck. Am Geraet pruefen."
     fi
 fi
 

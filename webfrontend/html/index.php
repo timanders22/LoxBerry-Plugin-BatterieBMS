@@ -96,7 +96,12 @@ $bm_cfg = bm_config();
  * Vorlage schreiben das Token in jede Adresse. */
 $bm_selftest = isset($_GET['selftest']) && is_string($_GET['selftest'])
             && $_GET['selftest'] === '1';
-$bm_soll = (string) $bm_cfg['aktionstoken'];
+/* C9 (Durchgang 29.09.2026): nur ein Token, das taugt (bm_token_gueltig()),
+ * gilt. Bis 0.9.29 wurde aus einer Liste im Feld aktionstoken per (string) das
+ * Wort "Array" - und ?token=Array oeffnete den Endpunkt (gemessen). Ein
+ * untaugliches Token behandelt der Endpunkt wie keines: 403, eine Zeile im
+ * Protokoll; ersetzt wird es nur in der angemeldeten Oberflaeche. */
+$bm_soll = bm_token_gueltig($bm_cfg['aktionstoken']) ? $bm_cfg['aktionstoken'] : '';
 $bm_ist = (isset($_GET['token']) && is_string($_GET['token']))
         ? (string) $_GET['token'] : '';
 if ($bm_soll === '') {
@@ -105,9 +110,12 @@ if ($bm_soll === '') {
         echo "SELFTEST;OK=0;ERR=KEIN_TOKEN_EINGERICHTET\n";
     } else {
         echo "FEHLER;OK=0;GRUND=KEIN_TOKEN_GESETZT\n";
-        echo "Die Plugin-Oberflaeche wurde noch nie geoeffnet - es gibt noch kein Token.\n";
+        echo ($bm_cfg['aktionstoken'] === '' || $bm_cfg['aktionstoken'] === null)
+            ? "Die Plugin-Oberflaeche wurde noch nie geoeffnet - es gibt noch kein Token.\n"
+            : "Das gespeicherte Token taugt nicht (1 bis 64 Zeichen (Buchstaben, Ziffern, Punkt, Bindestrich, Unterstrich)) - die Oberflaeche erzeugt beim Oeffnen ein neues.\n";
     }
-    bm_ep_log('KEIN_TOKEN_EINGERICHTET');
+    bm_ep_log(($bm_cfg['aktionstoken'] === '' || $bm_cfg['aktionstoken'] === null)
+        ? 'KEIN_TOKEN_EINGERICHTET' : 'TOKEN_UNTAUGLICH');
     exit;
 }
 if (!hash_equals($bm_soll, $bm_ist)) {
@@ -125,7 +133,9 @@ if ($bm_selftest) {
 $bm_lesend = array('status', 'zellen', 'liste', 'roh', 'evcc', 'summe');
 $bm_schaltend = array('laden', 'entladen', 'automatik', 'lebenszeichen', 'abruf',
                       'sperren', 'batteriemodus');
-$bm_aktion = isset($_GET['aktion']) ? (string) $_GET['aktion'] : 'status';
+// C10: nur Text - ?aktion[]=laden ergab bis 0.9.29 "Array" samt Warnung.
+$bm_aktion = !isset($_GET['aktion']) ? 'status'
+           : (is_string($_GET['aktion']) ? $_GET['aktion'] : '');
 if (!in_array($bm_aktion, array_merge($bm_lesend, $bm_schaltend), true)) {
     http_response_code(400);
     echo "FEHLER;OK=0;GRUND=UNBEKANNTE_AKTION\n";
@@ -182,10 +192,36 @@ $bm_alle = bm_werte();
 $bm_alter = bm_alter();
 $bm_g = isset($bm_alle[$bm_nr]) ? $bm_alle[$bm_nr] : null;
 
+/* C8 (Entscheidung Nr. 4 vom 29.09.2026): OK=0, sobald ALTER groesser ist als
+ * das Dreifache des Abruftakts (bm_ok_grenze()) - fuer ALLE Zeilen (status,
+ * liste, zellen, evcc, summe). Bis 0.9.29 blieb OK=1 stehen, waehrend das
+ * Abbild veraltete (gemessen: OK=1 bei ALTER=7200). ALTER selbst bleibt
+ * daneben stehen, damit Loxone sieht, WARUM OK=0 ist. */
+$bm_veraltet = ($bm_alter < 0) || ($bm_alter > bm_ok_grenze($bm_cfg));
+
+/* O3: ALTER wird auf MaxVal der Vorlage (86400, bm_status_felder()) gekappt.
+ * Loxone kappt einen groesseren Wert ohnehin auf MaxVal - dann aber still und
+ * auf eine Zahl, die nicht gesendet wurde. Gekappt steht hier die Grenze,
+ * und OK=0 sagt, dass der Stand nicht mehr gilt. */
+$bm_alter_aus = ($bm_alter < 0) ? $bm_alter : min($bm_alter, 86400);
+
+/** OK einer Zeile: gemeldet UND nicht veraltet. */
+function bm_ok_aus($ok)
+{
+    return (!empty($ok) && empty($GLOBALS['bm_veraltet'])) ? 1 : 0;
+}
+
 /* ================= Lesende Aktionen ================= */
 
 if ($bm_aktion === 'roh') {
     header('Content-Type: application/json; charset=utf-8');
+    /* C8: ohne Daten 503 (Regeln/07, "Faellt die Quelle ganz aus"), wie
+     * status und zellen seit B51. Bis 0.9.29 antwortete roh mit 200 und []. */
+    if (!$bm_lox) {
+        http_response_code(503);
+        echo json_encode(array('ok' => 0, 'grund' => 'KEINE_DATEN'));
+        exit;
+    }
     $bm_json = json_encode($bm_lox, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     if ($bm_json === false) {
         // json_encode gibt bei ungueltigem UTF-8 false zurueck. Ungeprueft
@@ -217,7 +253,14 @@ if ($bm_aktion === 'evcc') {
      * wenn nichts geschaltet werden darf. */
     header('Content-Type: application/json; charset=utf-8');
     $bm_e = bm_evcc_werte($bm_nr === '' ? null : (int) $bm_nr);
-    $bm_e['alter'] = $bm_alter;
+    /* C8: ohne Daten zu diesem Speicher 503 statt 200 mit lauter null. */
+    if (!isset($bm_alle[max(1, (int) $bm_nr)])) {
+        http_response_code(503);
+        echo json_encode(array('ok' => 0, 'grund' => 'GERAET_UNBEKANNT', 'alter' => $bm_alter_aus));
+        exit;
+    }
+    $bm_e['ok'] = bm_ok_aus($bm_e['ok']);
+    $bm_e['alter'] = $bm_alter_aus;
     echo json_encode($bm_e, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 }
@@ -267,25 +310,31 @@ if ($bm_aktion === 'summe') {
         /* Ohne einen einzigen Speicher im Abbild gibt es keine Summe (B51):
          * 503 mit Grund in der Zeile, wie bei status und zellen. */
         http_response_code(503);
-        printf("SUMME;OK=0;GRUND=KEIN_SPEICHER;N=0;ALTER=%d\n", $bm_alter);
+        printf("SUMME;OK=0;GRUND=KEIN_SPEICHER;N=0;ALTER=%d\n", $bm_alter_aus);
         exit;
     }
     printf("SUMME;OK=%d;N=%d;NOK=%d;SOC=%s;KAPAZ=%s;RESTKWH=%s;PBAT=%s;ALARM=%d;ALTER=%d\n",
-        (int) ($bm_n > 0 && $bm_okn === $bm_n), $bm_n, $bm_okn,
+        bm_ok_aus($bm_n > 0 && $bm_okn === $bm_n), $bm_n, $bm_okn,
         ($bm_voll && $bm_kap > 0) ? (string) round($bm_kwh / $bm_kap * 100, 1) : '-',
         ($bm_voll && $bm_kap > 0) ? (string) round($bm_kap, 2) : '-',
         ($bm_voll && $bm_kap > 0) ? (string) round($bm_kwh, 2) : '-',
         $bm_n > 0 ? (string) round($bm_p, 0) : '-',
-        $bm_alarm, $bm_alter);
+        $bm_alarm, $bm_alter_aus);
     exit;
 }
 
 if ($bm_aktion === 'liste') {
-    echo 'LISTE;OK=' . (int) (!empty($bm_lox['ok'])) . ';N=' . count($bm_alle)
-       . ';ALTER=' . $bm_alter . "\n";
+    /* C8: ohne einen einzigen Speicher 503 mit Grund, wie summe. */
+    if (!$bm_alle) {
+        http_response_code(503);
+        echo 'LISTE;OK=0;GRUND=KEIN_SPEICHER;N=0;ALTER=' . $bm_alter_aus . "\n";
+        exit;
+    }
+    echo 'LISTE;OK=' . bm_ok_aus($bm_lox['ok'] ?? 0) . ';N=' . count($bm_alle)
+       . ';ALTER=' . $bm_alter_aus . "\n";
     foreach ($bm_alle as $nr => $g) {
         echo $nr . ';' . $g['name'] . ';' . $g['profil'] . ';' . $g['transport']
-           . ';Stand=' . $g['stand'] . ';OK=' . (int) $g['ok'] . "\n";
+           . ';Stand=' . $g['stand'] . ';OK=' . bm_ok_aus($g['ok']) . "\n";
     }
     exit;
 }
@@ -311,15 +360,15 @@ if ($bm_g === null) {
      * geliefert. */
     http_response_code(503);
     printf("%s;OK=0;GRUND=GERAET_UNBEKANNT;N=%d;ALTER=%d\n",
-        $bm_aktion === 'zellen' ? 'ZELLEN' : 'BMS', count($bm_alle), $bm_alter);
+        $bm_aktion === 'zellen' ? 'ZELLEN' : 'BMS', count($bm_alle), $bm_alter_aus);
     exit;
 }
 
 if ($bm_aktion === 'zellen') {
     $module = isset($bm_g['module']) && is_array($bm_g['module']) ? $bm_g['module'] : array();
     printf("ZELLEN;OK=%d;MODULE=%d;UZMAX=%s;UZMIN=%s;UZDIFF=%s;ALTER=%d\n",
-        (int) $bm_g['ok'], count($module), bm_w($bm_g['UZMAX']), bm_w($bm_g['UZMIN']),
-        bm_w($bm_g['UZDIFF']), $bm_alter);
+        bm_ok_aus($bm_g['ok']), count($module), bm_w($bm_g['UZMAX']), bm_w($bm_g['UZMIN']),
+        bm_w($bm_g['UZDIFF']), $bm_alter_aus);
     foreach ($module as $m => $md) {
         printf("MODUL=%d;UZMAX=%s;UZMIN=%s;UZDIFF=%s;TMAX=%s;TMIN=%s;ZELLEN=%d\n",
             (int) $m, bm_w(isset($md['uzmax']) ? $md['uzmax'] : null),
@@ -351,11 +400,11 @@ if ($bm_aktion === 'status') {
     $teile = array('BMS');
     foreach (bm_status_felder() as $feld => $unbenutzt) {
         if ($feld === 'ALTER') {
-            $teile[] = 'ALTER=' . $bm_alter;
+            $teile[] = 'ALTER=' . $bm_alter_aus;
             continue;
         }
         if ($feld === 'OK') {
-            $teile[] = 'OK=' . (int) $bm_g['ok'];
+            $teile[] = 'OK=' . bm_ok_aus($bm_g['ok']);
             continue;
         }
         $teile[] = $feld . '=' . bm_w($bm_g[$feld]);
@@ -363,7 +412,8 @@ if ($bm_aktion === 'status') {
     // Der Sollwert gehoert dazu: sonst weiss Loxone nicht, ob ein Zwang laeuft.
     //
     // SOLL ist Text und taugt nicht als Analogwert; SOLLART sagt dasselbe als
-    // Zahl (0 kein Zwang, 1 laden, 2 entladen, 3 gesperrt) und laesst sich
+    // Zahl (0 kein Zwang, 1 laden, 2 entladen, 3 gesperrt, 4 unvollstaendig
+    // - O3) und laesst sich
     // deshalb an einen virtuellen Eingang haengen. SOLLART steht ganz hinten,
     // weil neue Felder nach der Regel oben immer hinten angehaengt werden.
     $teile[] = 'SOLL=' . ($bm_g['sollwert'] !== '' ? str_replace(';', '_', $bm_g['sollwert']) : 'automatik');
@@ -375,13 +425,12 @@ if ($bm_aktion === 'status') {
 
 /* ================= Schaltende Aktionen ================= */
 
-if ($bm_aktion !== 'abruf' && empty($bm_cfg['steuerung_ein'])) {
-    http_response_code(403);
-    echo "SET;OK=0;GRUND=STEUERUNG_AUS\n";
-    echo "Schreibende Befehle sind gesperrt. Reiter Einstellungen, Haken "
-       . "'Schreibende Befehle zulassen'.\n";
-    exit;
-}
+/* C3 (Durchgang 29.09.2026): die Pruefung der Freigabe steht jetzt UNTEN,
+ * nach der Uebersetzung von batteriemodus - und sie gilt nie fuer eine
+ * Ruecknahme (automatik, laden/entladen mit watt=0, batteriemodus=normal).
+ * Bis 0.9.29 wies der Endpunkt bei abgeschalteter Freigabe auch "automatik"
+ * mit 403 ab: wer die Freigabe waehrend eines Zwangs abschaltete, konnte ihn
+ * danach nicht mehr beenden. */
 /* Die Pruefung des DIENSTES stand bis 0.9.15 hier - also VOR der Pruefung der
  * Anfrage. Gemessen: 'laden' ohne watt und 'batteriemodus&modus=99' bekamen
  * beide DIENST_LAEUFT_NICHT, obwohl beide auch mit laufendem Dienst
@@ -397,7 +446,7 @@ if ($bm_aktion !== 'abruf' && empty($bm_cfg['steuerung_ein'])) {
  * weiter entlaedt. */
 $bm_war_modus = ($bm_aktion === 'batteriemodus');
 if ($bm_aktion === 'batteriemodus') {
-    $bm_modus = isset($_GET['modus']) ? (string) $_GET['modus'] : '';
+    $bm_modus = (isset($_GET['modus']) && is_string($_GET['modus'])) ? $_GET['modus'] : '';
     $bm_ziel = bm_evcc_modus($bm_modus);
     if ($bm_ziel === '') {
         http_response_code(400);
@@ -433,6 +482,16 @@ if ($bm_aktion === 'laden' || $bm_aktion === 'entladen') {
         exit;
     }
     $bm_befehl['watt'] = (int) $bm_watt;
+}
+
+$bm_ruecknahme = ($bm_aktion === 'automatik')
+    || (($bm_aktion === 'laden' || $bm_aktion === 'entladen') && (int) $bm_watt === 0);
+if ($bm_aktion !== 'abruf' && !$bm_ruecknahme && empty($bm_cfg['steuerung_ein'])) {
+    http_response_code(403);
+    echo "SET;OK=0;GRUND=STEUERUNG_AUS\n";
+    echo "Schreibende Befehle sind gesperrt. Reiter Einstellungen, Haken "
+       . "'Schreibende Befehle zulassen'.\n";
+    exit;
 }
 
 /* Erst jetzt, unmittelbar vor dem Absetzen: laeuft der Dienst ueberhaupt?

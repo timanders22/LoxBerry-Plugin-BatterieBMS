@@ -137,9 +137,23 @@ function bm_saeubern($wert)
 }
 
 /* ---------------- Vorlage herunterladen ---------------- */
+/* O7 (Durchgang 29.09.2026): eine Speichernummer ausserhalb 1-6 wird
+ * abgewiesen, nicht auf 1 gebogen. Bis 0.9.29 lieferte "9" oder "x" still die
+ * Vorlage fuer Speicher 1 bzw. eine Vorlage fuer einen Speicher, den es nie
+ * geben kann. */
+$bm_vorlage_nr = null;
 if ($bm_post && isset($_POST['vorlage'])) {
-    $bm_nr = preg_match('/^[0-9]{1,2}$/', (string) ($_POST['vorlage_geraet'] ?? '1'))
-        ? (int) $_POST['vorlage_geraet'] : 1;
+    $bm_vg = isset($_POST['vorlage_geraet']) && is_string($_POST['vorlage_geraet'])
+        ? trim($_POST['vorlage_geraet']) : '';
+    if (preg_match('/^[1-6]$/', $bm_vg)) {
+        $bm_vorlage_nr = (int) $bm_vg;
+    } else {
+        $bm_fehler[] = bm_t('LOX.FEHLER_VORLAGE_NR');
+        $bm_tab = 'tab-loxone';
+    }
+}
+if ($bm_post && isset($_POST['vorlage']) && $bm_vorlage_nr !== null) {
+    $bm_nr = $bm_vorlage_nr;
     if ((string) $_POST['vorlage'] === 'aus') {
         list($bm_name, $bm_inhalt) = bm_vorlage_ausgang($bm_nr);
     } else {
@@ -176,14 +190,31 @@ if ($bm_post && isset($_POST['profil_export'])) {
  * Miniserver ungueltig wuerden. Der Hinweis steht am Knopf. */
 if ($bm_post && isset($_POST['konfig_export'])) {
     $bm_roh = @file_get_contents($bm_p['config']);
-    if ($bm_roh === false) {
+    $bm_ex = ($bm_roh === false) ? null : json_decode((string) $bm_roh, true);
+    if (!is_array($bm_ex)) {
         $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_SICHERUNG_LESEN'), bm_e($bm_p['config']));
         $bm_tab = 'tab-settings';
     } else {
+        /* O10 (Durchgang 29.09.2026): Kopf mit "_" und die eigenen Profile.
+         * Bis 0.9.29 ging die Konfigurationsdatei roh hinaus. Eigene Profile
+         * liegen im Datenordner und ueberstehen kein Upgrade - eine Sicherung
+         * ohne sie liess sich auf einer frischen Anlage nicht zurueckspielen
+         * (die Zeilen verwiesen auf ein Profil, das es dort nicht gab).
+         * Schluessel mit "_" liest das Zurueckspielen nur als Kopf. */
+        $bm_eigene = array();
+        foreach (bm_profile() as $bm_pk => $bm_pr) {
+            if (!empty($bm_pr['datei'])) {
+                unset($bm_pr['herkunft'], $bm_pr['datei']);
+                $bm_eigene[$bm_pk] = $bm_pr;
+            }
+        }
+        $bm_ex = array('_hinweis' => bm_t('EINST.SICHERUNG_KOPF'),
+                       '_stand' => date('c'),
+                       '_profile' => (object) $bm_eigene) + $bm_ex;
         header('Content-Type: application/json; charset=utf-8');
         header('Content-Disposition: attachment; filename="batteriebms_'
              . date('Ymd_His') . '.json"');
-        echo $bm_roh;
+        echo json_encode($bm_ex, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         exit;
     }
 }
@@ -203,6 +234,16 @@ if ($bm_post && isset($_POST['konfig_import'])) {
         if (!is_array($bm_neu) || !isset($bm_neu['geraete'])) {
             $bm_fehler[] = bm_t('EINST.FEHLER_KONFIG_FORM');
         } else {
+            /* O10 (Durchgang 29.09.2026): Schluessel mit "_" sind der Kopf der
+             * Sicherung (_hinweis, _stand, _profile) und keine Einstellungen.
+             * Sie werden vor der Pruefung abgetrennt und nie gespeichert. */
+            $bm_kopf = array();
+            foreach (array_keys($bm_neu) as $bm_k) {
+                if (is_string($bm_k) && strncmp($bm_k, '_', 1) === 0) {
+                    $bm_kopf[$bm_k] = $bm_neu[$bm_k];
+                    unset($bm_neu[$bm_k]);
+                }
+            }
             /* Fremde Schluessel sind eine BEANSTANDUNG, kein stiller Zusatz.
              * array_merge nahm bisher alles auf, was in der Datei stand -
              * auch Schluessel aus einem anderen Plugin oder einer anderen
@@ -210,6 +251,7 @@ if ($bm_post && isset($_POST['konfig_import'])) {
              * und waren an nichts zu erkennen. */
             $bm_fremd = array_diff(array_keys($bm_neu), array_keys(bm_vorgaben()));
             $bm_zusammen = null;
+            $bm_mitprofile = array();
             if ($bm_fremd) {
                 $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_KONFIG_FREMD'),
                     bm_e(implode(', ', array_slice($bm_fremd, 0, 8))));
@@ -228,10 +270,47 @@ if ($bm_post && isset($_POST['konfig_import'])) {
                         $bm_bean[] = bm_e((string) $bm_k) . ': ' . bm_e($bm_grund);
                     }
                 }
+                /* O10: die mitgesicherten eigenen Profile - dieselbe
+                 * Beurteilung wie beim Hochladen eines Profils. */
+                if (isset($bm_kopf['_profile'])) {
+                    if (!is_array($bm_kopf['_profile'])) {
+                        $bm_bean[] = bm_e('_profile: ' . bm_t('EINST.FEHLER_KONFIG_FORM'));
+                    } else {
+                        foreach ($bm_kopf['_profile'] as $bm_pk => $bm_pr) {
+                            $bm_pk = (string) $bm_pk;
+                            if (!preg_match('/^[a-z0-9_]{1,60}$/', $bm_pk)) {
+                                $bm_bean[] = bm_e('_profile: ' . bm_t('EINST.FEHLER_PROFIL_NAME'));
+                                continue;
+                            }
+                            foreach (bm_profil_pruefen($bm_pr) as $bm_pb) {
+                                $bm_bean[] = bm_e('_profile/' . $bm_pk) . ': ' . $bm_pb;
+                            }
+                            $bm_mitprofile[$bm_pk] = $bm_pr;
+                        }
+                    }
+                }
                 foreach (bm_geraetezeilen_pruefen(
-                             isset($bm_neu['geraete']) ? $bm_neu['geraete'] : array())
+                             isset($bm_neu['geraete']) ? $bm_neu['geraete'] : array(),
+                             $bm_mitprofile)
                          as $bm_grund) {
                     $bm_bean[] = bm_e($bm_grund);
+                }
+                /* C10: das Ladezustandsfenster wie im Formular. Gemessen:
+                 * soc_min 90 / soc_max 10 wurde bis 0.9.29 angenommen, und
+                 * danach war weder Laden noch Entladen je erlaubt. */
+                $bm_smin = array_key_exists('soc_min', $bm_neu) ? $bm_neu['soc_min'] : bm_vorgaben()['soc_min'];
+                $bm_smax = array_key_exists('soc_max', $bm_neu) ? $bm_neu['soc_max'] : bm_vorgaben()['soc_max'];
+                if (is_numeric($bm_smin) && is_numeric($bm_smax) && (int) $bm_smin >= (int) $bm_smax) {
+                    $bm_bean[] = bm_e(bm_t('EINST.FEHLER_SOC_FENSTER'));
+                }
+                /* C4: die Liste darf keinen Speicher mit offenem Zwang von
+                 * seiner Nummer verdraengen. */
+                if (!$bm_bean) {
+                    $bm_versch = bm_zwang_verschoben($bm_neu['geraete'],
+                        array_merge(bm_profile(), $bm_mitprofile));
+                    if ($bm_versch !== '') {
+                        $bm_bean[] = sprintf(bm_t('EINST.FEHLER_ZWANG_OFFEN'), bm_e($bm_versch));
+                    }
                 }
                 if ($bm_bean) {
                     /* Eine halb gueltige Datei aendert GAR NICHTS. */
@@ -247,7 +326,8 @@ if ($bm_post && isset($_POST['konfig_import'])) {
                      * frisches ersetzt, und jede Adresse im Miniserver war
                      * danach ungueltig, ohne eine Zeile im Protokoll. */
                     if (!array_key_exists('aktionstoken', $bm_neu)
-                        || trim((string) $bm_neu['aktionstoken']) === '') {
+                        || !is_string($bm_neu['aktionstoken'])
+                        || trim($bm_neu['aktionstoken']) === '') {
                         /* Den BESTEHENDEN Stand hier eigens lesen: $bm_cfg wird
                          * erst weiter unten zugewiesen (Ladeteil), und eine
                          * nicht zugewiesene Variable wertet PHP lautlos als
@@ -255,7 +335,8 @@ if ($bm_post && isset($_POST['konfig_import'])) {
                          * getan. Beim ersten Anlauf ist mir genau das
                          * passiert; gefunden hat es der Pruefstand. */
                         $bm_bestand = bm_config();
-                        $bm_alt = trim((string) $bm_bestand['aktionstoken']);
+                        $bm_alt = bm_token_gueltig($bm_bestand['aktionstoken'])
+                            ? $bm_bestand['aktionstoken'] : '';
                         $bm_zusammen['aktionstoken'] = $bm_alt;
                         if ($bm_alt !== '') {
                             $bm_meldungen[] = bm_t('EINST.KONFIG_TOKEN_BEHALTEN');
@@ -263,14 +344,46 @@ if ($bm_post && isset($_POST['konfig_import'])) {
                     }
                 }
             }
+            /* O10: erst die Profile ablegen, dann die Konfiguration - eine
+             * Konfiguration, deren Profil fehlt, laesst ihre Zeile aus. */
+            if ($bm_zusammen !== null && $bm_mitprofile) {
+                $bm_pordner = $bm_p['datadir'] . '/profile';
+                if (!is_dir($bm_pordner)) {
+                    @mkdir($bm_pordner, 0775, true);
+                }
+                foreach ($bm_mitprofile as $bm_pk => $bm_pr) {
+                    $bm_pjs = json_encode($bm_pr, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                    if (!is_string($bm_pjs)
+                        || !bm_datei_schreiben($bm_pordner . '/' . $bm_pk . '.json', $bm_pjs . "\n", 0644)) {
+                        $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_PROFIL_SCHREIBEN'),
+                            bm_e($bm_pordner . '/' . $bm_pk . '.json'));
+                        $bm_zusammen = null;
+                        break;
+                    }
+                }
+                if ($bm_zusammen !== null) {
+                    $bm_meldungen[] = sprintf(bm_t('EINST.KONFIG_PROFILE'), count($bm_mitprofile),
+                        bm_e(implode(', ', array_keys($bm_mitprofile))));
+                }
+            }
             if ($bm_zusammen === null) {
                 /* nichts tun - geaendert wird GAR NICHTS */
-            } else
-            if (bm_config_speichern($bm_zusammen)) {
-                $bm_meldungen[] = sprintf(bm_t('EINST.KONFIG_ZURUECK'),
-                    count((array) $bm_zusammen['geraete']));
             } else {
-                $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_SPEICHERN'), $bm_p['config']);
+                $bm_vorher = bm_config();
+                bm_mqtt_praefix_merken($bm_vorher, $bm_zusammen);
+                if (bm_config_speichern($bm_zusammen)) {
+                    $bm_meldungen[] = sprintf(bm_t('EINST.KONFIG_ZURUECK'),
+                        count((array) $bm_zusammen['geraete']));
+                    foreach (bm_mqtt_nachziehen($bm_vorher, $bm_zusammen) as $bm_mz) {
+                        $bm_meldungen[] = $bm_mz;
+                    }
+                    bm_mqtt_voll_senden();
+                    if (!empty($bm_zusammen['mqtt_ein'])) {
+                        bm_abo_datei((string) $bm_zusammen['mqtt_topic'], true);
+                    }
+                } else {
+                    $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_SPEICHERN'), $bm_p['config']);
+                }
             }
         }
     }
@@ -296,50 +409,10 @@ if ($bm_post && isset($_POST['profil_import'])) {
         if ($bm_schl === '') {
             $bm_bean[] = bm_t('EINST.FEHLER_PROFIL_NAME');
         }
-        if (!is_array($bm_pr)) {
-            $bm_bean[] = bm_t('EINST.FEHLER_PROFIL_JSON');
-        } else {
-            if (!isset($bm_pr['transport'])
-                || !in_array((string) $bm_pr['transport'], bm_transporte(), true)) {
-                $bm_bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL_TRANSPORT'),
-                    implode(', ', bm_transporte()));
-            }
-            foreach (array('name', 'quelle', 'stand') as $bm_pflicht) {
-                if (!isset($bm_pr[$bm_pflicht]) || trim((string) $bm_pr[$bm_pflicht]) === '') {
-                    $bm_bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL_PFLICHT'), $bm_pflicht);
-                }
-            }
-            if (isset($bm_pr['stand'])
-                && !in_array((string) $bm_pr['stand'], array('dokumentiert', 'unbestaetigt'), true)) {
-                $bm_bean[] = bm_t('EINST.FEHLER_PROFIL_STAND');
-            }
-            /* Auch den Registertyp beurteilen (B13). Ein Profil mit
-             * "typ": "S16" wurde bis 0.9.15 angenommen und lieferte danach
-             * stumm den Rohwert mal Faktor. */
-            $bm_typen = array('u16', 's16', 'u32', 's32', 'f32', 'u16hi', 'u16lo');
-            foreach (array('felder', 'rechnung') as $bm_ab2) {
-                foreach ((array) (isset($bm_pr[$bm_ab2]) ? $bm_pr[$bm_ab2] : array())
-                         as $bm_fn => $bm_fd) {
-                    if (is_array($bm_fd) && isset($bm_fd['typ'])
-                        && !in_array((string) $bm_fd['typ'], $bm_typen, true)) {
-                        $bm_bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL_TYP'),
-                            bm_e((string) $bm_fn), bm_e((string) $bm_fd['typ']),
-                            implode(', ', $bm_typen));
-                    }
-                }
-            }
-            /* Und kein Register zweimal (B14). */
-            foreach (bm_profil_doppelregister($bm_pr) as $bm_dr) {
-                $bm_bean[] = bm_e($bm_dr);
-            }
-            $bm_erlaubt = bm_status_felder();
-            foreach (array('felder', 'rechnung') as $bm_ab) {
-                foreach ((array) (isset($bm_pr[$bm_ab]) ? $bm_pr[$bm_ab] : array()) as $bm_f => $bm_u) {
-                    if (!isset($bm_erlaubt[$bm_f])) {
-                        $bm_bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL_FELD'), bm_e($bm_f), $bm_ab);
-                    }
-                }
-            }
+        /* Die Beurteilung steht seit 0.9.30 in bm_profil_pruefen() - dieselbe
+         * Quelle fuer die eigenen Profile einer Sicherung (O10). */
+        foreach (bm_profil_pruefen($bm_pr) as $bm_pb) {
+            $bm_bean[] = $bm_pb;
         }
         if ($bm_bean) {
             foreach ($bm_bean as $bm_b) {
@@ -379,14 +452,22 @@ if ($bm_post && isset($_POST['mitschnitt'])) {
  * Spricht mit keinem Geraet und braucht keinen laufenden Dienst - gerade dann
  * will man ja wissen, was ein Befehl taete. */
 if ($bm_post && isset($_POST['trockenlauf'])) {
-    $bm_tnr = preg_match('/^[0-9]{1,2}$/', (string) ($_POST['test_geraet'] ?? '1'))
-        ? (int) $_POST['test_geraet'] : 1;
-    $bm_twatt = preg_match('/^[0-9]{1,5}$/', (string) ($_POST['test_watt'] ?? '0'))
-        ? (int) $_POST['test_watt'] : 0;
-    list($bm_tok, $bm_ttext) = bm_trockenlauf($bm_tnr, (string) $_POST['trockenlauf'], $bm_twatt);
-    $bm_testausgabe = $bm_ttext;
-    if (!$bm_tok) {
-        $bm_fehler[] = bm_t('TROCKEN.NICHT_MOEGLICH');
+    /* O7 (Durchgang 29.09.2026): abweisen statt umbiegen. Bis 0.9.29 wurde
+     * aus Geraet "x" still Speicher 1 und aus 100.4 W oder einem leeren Feld
+     * still 0 W - und 0 W ist die Ruecknahme, ein ganz anderer Befehl. */
+    $bm_tg = isset($_POST['test_geraet']) && is_string($_POST['test_geraet']) ? trim($_POST['test_geraet']) : '';
+    $bm_tw = isset($_POST['test_watt']) && is_string($_POST['test_watt']) ? trim($_POST['test_watt']) : '';
+    $bm_ta = is_string($_POST['trockenlauf']) ? $_POST['trockenlauf'] : '';
+    if (!preg_match('/^[0-9]{1,2}$/', $bm_tg) || (int) $bm_tg < 1) {
+        $bm_fehler[] = bm_t('TROCKEN.FEHLER_GERAET');
+    } elseif (!preg_match('/^[0-9]{1,5}$/', $bm_tw)) {
+        $bm_fehler[] = bm_t('TROCKEN.FEHLER_WATT');
+    } else {
+        list($bm_tok, $bm_ttext) = bm_trockenlauf((int) $bm_tg, $bm_ta, (int) $bm_tw);
+        $bm_testausgabe = $bm_ttext;
+        if (!$bm_tok) {
+            $bm_fehler[] = bm_t('TROCKEN.NICHT_MOEGLICH');
+        }
     }
     $bm_tab = 'tab-test';
 }
@@ -405,7 +486,17 @@ if ($bm_post && isset($_POST['speichern'])) {
             return isset($a[$bm_i]) ? bm_saeubern($a[$bm_i]) : '';
         };
         $profil = $hol('g_profil');
-        $name = $hol('g_name');
+        /* O7 (Durchgang 29.09.2026): Anfuehrungszeichen oder Steuerzeichen im
+         * Namen werden gemeldet und abgewiesen, nicht still entfernt - der
+         * Name steht in den Loxone-Vorlagen und im Protokoll (Klasse 4 geht
+         * Regeln/05 vor). */
+        $bm_nroh = isset($_POST['g_name']) && is_array($_POST['g_name']) && isset($_POST['g_name'][$bm_i])
+            && is_string($_POST['g_name'][$bm_i]) ? trim($_POST['g_name'][$bm_i]) : '';
+        if (!bm_geraetename_taugt($bm_nroh)) {
+            $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_NAME'), $bm_i + 1, BM_NAME_HOECHSTENS);
+            continue;
+        }
+        $name = $bm_nroh;
         $ip = $hol('g_ip');
         $dev = $hol('g_dev');
         if ($profil === '' && $name === '' && $ip === '' && $dev === '') {
@@ -541,9 +632,26 @@ if ($bm_post && isset($_POST['speichern'])) {
     }
 
 
+    /* C4 (Durchgang 29.09.2026): solange ein Zwang offen ist, darf das
+     * Speichern keinen Speicher von seiner Nummer verdraengen (Zeile
+     * entfernt, Liste aufgerueckt, Adresse geaendert). Bis 0.9.29 verdichtete
+     * dieser Handler die Zeilen still, und der Zwang blieb am Speicher
+     * stehen, waehrend Totmann und Ruecknahme den Nachruecker trafen. */
     if (!$bm_fehler) {
+        $bm_versch = bm_zwang_verschoben($bm_cfg['geraete'], $bm_profile);
+        if ($bm_versch !== '') {
+            $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_ZWANG_OFFEN'), bm_e($bm_versch));
+        }
+    }
+    if (!$bm_fehler) {
+        $bm_vorher = bm_config();
         if (bm_config_speichern($bm_cfg)) {
             $bm_meldungen[] = bm_t('EINST.GESPEICHERT');
+            // M3: weggefallene Speicher und abgeschaltetes EVCC abraeumen.
+            foreach (bm_mqtt_nachziehen($bm_vorher, $bm_cfg) as $bm_mz) {
+                $bm_meldungen[] = $bm_mz;
+            }
+            bm_mqtt_voll_senden();
         } else {
             $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_SPEICHERN'), $bm_p['config']);
         }
@@ -573,17 +681,33 @@ if ($bm_post && isset($_POST['speichern'])) {
  * ruehrt ausschliesslich die MQTT-Werte an. */
 if ($bm_post && isset($_POST['save_mqtt'])) {
     $bm_mcfg = bm_config();
+    $bm_mvorher = $bm_mcfg;
     $bm_mcfg['mqtt_ein'] = isset($_POST['mqtt_ein']) ? 1 : 0;
-    $bm_mtopic = trim(preg_replace('/[\x00-\x1F\x7F"\']/', '',
-        (string) (isset($_POST['mqtt_topic']) ? $_POST['mqtt_topic'] : '')));
-    if ($bm_mtopic === '' || !preg_match('#^[A-Za-z0-9_/\-]{1,64}$#', $bm_mtopic)) {
+    /* O7 (Durchgang 29.09.2026): abweisen statt umbiegen. Bis 0.9.29 wurden
+     * Anfuehrungszeichen still entfernt und ein Schraegstrich am Rand still
+     * abgeschnitten - gespeichert war dann ein anderes Praefix als das
+     * eingegebene. Dieselbe Beurteilung wie beim Zurueckspielen. */
+    $bm_mtopic = (isset($_POST['mqtt_topic']) && is_string($_POST['mqtt_topic']))
+        ? trim($_POST['mqtt_topic'], " \t") : '';
+    if ($bm_mtopic === '' || bm_wert_pruefen('mqtt_topic', $bm_mtopic) !== '') {
         $bm_fehler[] = bm_t('EINST.FEHLER_TOPIC');
     } else {
-        $bm_mcfg['mqtt_topic'] = trim($bm_mtopic, '/');
+        $bm_mcfg['mqtt_topic'] = $bm_mtopic;
     }
     if (!$bm_fehler) {
+        // M3: ein verlassenes Praefix merken (fuer die Deinstallation).
+        bm_mqtt_praefix_merken($bm_mvorher, $bm_mcfg);
         if (bm_config_speichern($bm_mcfg)) {
             $bm_meldungen[] = bm_t('EINST.GESPEICHERT');
+            // M3: altes Praefix bzw. bei MQTT aus das eigene abraeumen.
+            foreach (bm_mqtt_nachziehen($bm_mvorher, $bm_mcfg) as $bm_mz) {
+                $bm_meldungen[] = $bm_mz;
+            }
+            bm_mqtt_voll_senden();
+            // M4: die Abo-Datei des Gateways dem Praefix nachfuehren.
+            if (!empty($bm_mcfg['mqtt_ein'])) {
+                bm_abo_datei((string) $bm_mcfg['mqtt_topic'], true);
+            }
         } else {
             // Bis 0.9.15 fehlte dieser Zweig: ein fehlgeschlagenes Speichern
             // blieb voellig stumm, und der Bediener glaubte, Haken und Thema
@@ -620,9 +744,21 @@ if ($bm_post && isset($_POST['token_neu'])) {
 
 /* ---------------- Log leeren ---------------- */
 if ($bm_post && isset($_POST['log_leeren'])) {
-    @mkdir(dirname($bm_p['log']), 0775, true);
-    @file_put_contents($bm_p['log'], '[' . date('Y-m-d H:i:s') . '] ' . bm_t('LOG.GELEERT') . "\n");
-    $bm_meldungen[] = bm_t('LOG.GELEERT');
+    /* O6 (Durchgang 29.09.2026): nur mit Bestaetigungshaken, und der
+     * Rueckgabewert entscheidet ueber die Meldung. Bis 0.9.29 leerte ein
+     * einziger Klick das Protokoll und meldete "geleert" auch dann, wenn das
+     * Schreiben scheiterte. */
+    if (empty($_POST['log_leeren_ok'])) {
+        $bm_fehler[] = bm_t('LOG.FEHLER_HAKEN');
+    } else {
+        @mkdir(dirname($bm_p['log']), 0775, true);
+        $bm_lz = '[' . date('Y-m-d H:i:s') . '] ' . bm_t('LOG.GELEERT') . "\n";
+        if (@file_put_contents($bm_p['log'], $bm_lz) === strlen($bm_lz)) {
+            $bm_meldungen[] = bm_t('LOG.GELEERT');
+        } else {
+            $bm_fehler[] = sprintf(bm_t('LOG.FEHLER_LEEREN'), bm_e($bm_p['log']));
+        }
+    }
     $bm_tab = 'tab-log';
 }
 
@@ -639,6 +775,39 @@ if ($bm_post && isset($_POST['test'])) {
 if ($bm_post && isset($_POST['selbsttest'])) {
     $bm_testausgabe = bm_selbsttest_ausgabe();
     $bm_tab = 'tab-test';
+}
+
+/* ---------------- Post/Redirect/Get (O1, Durchgang 29.09.2026) ----------------
+ *
+ * Jeder POST endet hier mit 303 auf den Reiter, in dem er abgeschickt wurde;
+ * Meldungen, Beanstandungen und die Testausgabe gehen als Einmalmeldung mit
+ * (bm_einmal_schreiben(), 0600, hoechstens 120 s). Bis 0.9.29 zeichnete der
+ * POST die Seite selbst - ein Neuladen schickte ihn erneut (gemessen: "Neues
+ * Token" dreimal = drei Tokens, "Laden erzwingen" zweimal = zwei Befehle).
+ * Die Herunterladeknoepfe enden vorher mit exit und kommen hier nicht an.
+ * Laesst sich die Einmalmeldung nicht ablegen, wird wie bisher direkt
+ * gezeichnet - lieber ein doppelter POST als eine verschluckte Meldung. */
+if ($bm_post) {
+    if (bm_einmal_schreiben(array('meldungen' => array_values($bm_meldungen),
+                                  'fehler' => array_values($bm_fehler),
+                                  'test' => (string) $bm_testausgabe,
+                                  'tab' => $bm_tab))) {
+        $bm_ziel = preg_match('/^tab-([a-z]+)$/', $bm_tab, $bm_tm) ? $bm_tm[1] : 'settings';
+        header('Location: index.php?form=' . $bm_ziel, true, 303);
+        exit;
+    }
+} else {
+    $bm_einmal = bm_einmal_lesen();
+    if (is_array($bm_einmal)) {
+        $bm_meldungen = array_merge($bm_meldungen, $bm_einmal['meldungen']);
+        $bm_fehler = array_merge($bm_fehler, $bm_einmal['fehler']);
+        if ($bm_einmal['test'] !== '') {
+            $bm_testausgabe = $bm_einmal['test'];
+        }
+        if (preg_match($bm_muster, $bm_einmal['tab'])) {
+            $bm_tab = $bm_einmal['tab'];
+        }
+    }
 }
 
 /* ---------------- Laden ---------------- */
@@ -855,13 +1024,15 @@ $bm_vtag = (isset($_GET['vtag']) && preg_match('/^[0-9]{8}$/', (string) $_GET['v
 
 <!-- ================= Reiter: Einstellungen ================= -->
 <div class="sm-seite<?= $bm_tab === 'tab-settings' ? ' sm-active' : '' ?>" id="tab-settings">
+<?php /* O14 (Durchgang 29.09.2026): EINE Legende oben je Reiter - bis 0.9.29 standen bis zu drei verstreut im Reiter. */ ?>
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-lesen"></i> <?= bm_t('LEGENDE.LESEN') ?></span>
+<span><i class="sm-punkt sm-b-technik"></i> <?= bm_t('LEGENDE.TECHNIK') ?></span>
+<span><i class="sm-punkt sm-b-aktion"></i> <?= bm_t('LEGENDE.AKTION') ?></span>
+</div>
 
 <h2><?= bm_e(bm_t('EINST.H_DIENST')) ?></h2>
 <p class="sm-hilfe"><?= bm_t('EINST.DIENST_ERKLAERUNG') ?></p>
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-lesen"></i> <?= bm_t('LEGENDE.LESEN') ?></span>
-<span><i class="sm-punkt sm-b-aktion"></i> <?= bm_t('LEGENDE.AKTION') ?></span>
-</div>
 <div class="sm-knopfreihe">
   <form action="index.php" method="post">
     <?php echo bm_fmt(); ?>
@@ -910,7 +1081,12 @@ $bm_vtag = (isset($_GET['vtag']) && preg_match('/^[0-9]{8}$/', (string) $_GET['v
 $bm_roh = isset($bm_cfg['geraete']) && is_array($bm_cfg['geraete']) ? $bm_cfg['geraete'] : array();
 for ($bm_i = 0; $bm_i < 6; $bm_i++) {
     $bm_z = isset($bm_roh[$bm_i]) && is_array($bm_roh[$bm_i]) ? $bm_roh[$bm_i] : array();
-    $bm_v = function ($k) use ($bm_z) { return isset($bm_z[$k]) ? (string) $bm_z[$k] : ''; };
+    // O2/C10: nur Text und Zahl zeigen - eine Liste oder ein Wahrheitswert
+    // aus einer von Hand bearbeiteten Datei ergab bis 0.9.29 "Array" bzw. "1".
+    $bm_v = function ($k) use ($bm_z) {
+        return (isset($bm_z[$k]) && (is_string($bm_z[$k]) || is_int($bm_z[$k]) || is_float($bm_z[$k])))
+            ? (string) $bm_z[$k] : '';
+    };
 ?>
 <tr>
 <td><?= $bm_i + 1 ?></td>
@@ -930,12 +1106,12 @@ for ($bm_i = 0; $bm_i < 6; $bm_i++) {
 <td><input data-role="none" type="text" name="g_max_laden[]" value="<?= bm_e($bm_v('max_laden')) ?>" size="4"></td>
 <td><input data-role="none" type="text" name="g_max_entladen[]" value="<?= bm_e($bm_v('max_entladen')) ?>" size="4"></td>
 <td><select data-role="none" name="g_vorzeichen[]">
-    <option value="1"<?= $bm_v('vorzeichen') !== '-1' ? ' selected' : '' ?>><?= bm_e(bm_t('EINST.VZ_NORMAL')) ?></option>
-    <option value="-1"<?= $bm_v('vorzeichen') === '-1' ? ' selected' : '' ?>><?= bm_e(bm_t('EINST.VZ_UMGEKEHRT')) ?></option>
+    <option value="1"<?= bm_vorzeichen_wert(isset($bm_z['vorzeichen']) ? $bm_z['vorzeichen'] : 1) !== -1 ? ' selected' : '' ?>><?= bm_e(bm_t('EINST.VZ_NORMAL')) ?></option>
+    <option value="-1"<?= bm_vorzeichen_wert(isset($bm_z['vorzeichen']) ? $bm_z['vorzeichen'] : 1) === -1 ? ' selected' : '' ?>><?= bm_e(bm_t('EINST.VZ_UMGEKEHRT')) ?></option>
 </select></td>
 <td><select data-role="none" name="g_schreiben[]">
-    <option value="0"<?= $bm_v('schreiben') !== '1' ? ' selected' : '' ?>><?= bm_e(bm_t('ALLG.NEIN')) ?></option>
-    <option value="1"<?= $bm_v('schreiben') === '1' ? ' selected' : '' ?>><?= bm_e(bm_t('ALLG.JA')) ?></option>
+    <option value="0"<?= bm_schreiben_an(isset($bm_z['schreiben']) ? $bm_z['schreiben'] : 0) !== 1 ? ' selected' : '' ?>><?= bm_e(bm_t('ALLG.NEIN')) ?></option>
+    <option value="1"<?= bm_schreiben_an(isset($bm_z['schreiben']) ? $bm_z['schreiben'] : 0) === 1 ? ' selected' : '' ?>><?= bm_e(bm_t('ALLG.JA')) ?></option>
 </select></td>
 </tr>
 <?php } ?>
@@ -1084,10 +1260,6 @@ foreach ($bm_hinweise as $bm_h) {
 
 <h2><?= bm_e(bm_t('EINST.H_SICHERUNG')) ?></h2>
 <p class="sm-hilfe"><?= bm_t('EINST.SICHERUNG_ERKLAERUNG') ?></p>
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-technik"></i> <?= bm_t('LEGENDE.TECHNIK') ?></span>
-<span><i class="sm-punkt sm-b-aktion"></i> <?= bm_t('LEGENDE.AKTION') ?></span>
-</div>
 <div class="sm-knopfreihe">
   <form action="index.php" method="post">
     <?php echo bm_fmt(); ?>
@@ -1131,10 +1303,6 @@ foreach ($bm_hinweise as $bm_h) {
 </tr>
 <?php } ?>
 </table>
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-technik"></i> <?= bm_t('LEGENDE.TECHNIK') ?></span>
-<span><i class="sm-punkt sm-b-aktion"></i> <?= bm_t('LEGENDE.AKTION') ?></span>
-</div>
 
 <h3><?= bm_e(bm_t('EINST.H_PROFIL_IMPORT')) ?></h3>
 <div class="sm-hinweis"><?= bm_t('EINST.PROFIL_IMPORT_ERKLAERUNG') ?></div>
@@ -1155,6 +1323,10 @@ foreach ($bm_hinweise as $bm_h) {
 
 <!-- ================= Reiter: MQTT ================= -->
 <div class="sm-seite<?= $bm_tab === 'tab-mqtt' ? ' sm-active' : '' ?>" id="tab-mqtt">
+<?php /* O14 (Durchgang 29.09.2026): EINE Legende oben je Reiter - bis 0.9.29 standen bis zu drei verstreut im Reiter. */ ?>
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-aktion"></i> <?= bm_t('LEGENDE.AKTION') ?></span>
+</div>
 
 <h2>MQTT</h2>
 <form action="index.php" method="post">
@@ -1171,7 +1343,6 @@ foreach ($bm_hinweise as $bm_h) {
   <label for="mqtt_topic"><?= bm_e(bm_t('EINST.L_MQTT_TOPIC')) ?></label>
   <input data-role="none" type="text" id="mqtt_topic" name="mqtt_topic" value="<?= bm_e($bm_cfg['mqtt_topic']) ?>" placeholder="batteriebms">
 </div>
-<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= bm_t('LEGENDE.AKTION') ?></span></div>
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= bm_e(bm_t('ALLG.SPEICHERN')) ?></button>
 </div>
@@ -1228,8 +1399,18 @@ foreach (bm_mqtt_themen() as $bm_thema => $bm_schluessel) {
 
 <!-- ================= Reiter: Einbindung in Loxone ================= -->
 <div class="sm-seite<?= $bm_tab === 'tab-loxone' ? ' sm-active' : '' ?>" id="tab-loxone">
+<?php /* O14 (Durchgang 29.09.2026): EINE Legende oben je Reiter - bis 0.9.29 standen bis zu drei verstreut im Reiter. */ ?>
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-technik"></i> <?= bm_t('LEGENDE.TECHNIK') ?></span>
+<span><i class="sm-punkt sm-b-aktion"></i> <?= bm_t('LEGENDE.AKTION_TOKEN') ?></span>
+</div>
 <h2><?= bm_e(bm_t('LOX.H_TITEL')) ?></h2>
 <p><?= bm_t('LOX.EINLEITUNG') ?></p>
+<?php /* O16 (Durchgang 29.09.2026): der erste Schritt ist der Haken im Reiter
+       * MQTT - ab Werk aus ('mqtt_ein' => 0). Bis 0.9.29 stand er auf dieser
+       * Seite nirgends; am Geraet gemessen sendete ein frisch eingerichtetes
+       * Plugin deshalb nichts (06.09.2026). */ ?>
+<div class="<?= !empty($bm_cfg['mqtt_ein']) ? 'sm-hinweis' : 'sm-warnung' ?>"><?= bm_t(!empty($bm_cfg['mqtt_ein']) ? 'LOX.MQTT_ERSTER_SCHRITT_EIN' : 'LOX.MQTT_ERSTER_SCHRITT_AUS') ?></div>
 
 <div class="sm-step"><b><?= bm_e(bm_t('LOX.S1_TITEL')) ?></b><br><?= bm_t('LOX.S1_TEXT') ?></div>
 
@@ -1286,7 +1467,7 @@ if (!bm_felder_gemessen(1)) { ?>
 <?php } ?>
 <tr><td><span class="sm-mono">BMS_1_SOLLART</span></td>
     <td><span class="sm-mono"><?= bm_e(bm_check('SOLLART')) ?></span></td>
-    <td>&mdash;</td><td><span class="sm-mono">0 &hellip; 3</span></td>
+    <td>&mdash;</td><td><span class="sm-mono">0 &hellip; 4</span></td>
     <td><?= bm_t('BM_FELD.SOLLART') ?></td></tr>
 <tr><td><span class="sm-mono">BMS_1_SOLLALTER</span></td>
     <td><span class="sm-mono"><?= bm_e(bm_check('SOLLALTER')) ?></span></td>
@@ -1317,9 +1498,6 @@ if (!bm_felder_gemessen(1)) { ?>
   <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="vorlage" value="aus"><?= bm_e(bm_t('LOX.K_VORLAGE_AUS')) ?></button>
 </div>
 </form>
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-technik"></i> <?= bm_t('LEGENDE.TECHNIK') ?></span>
-</div>
 </div>
 
 <div class="sm-step"><b><?= bm_e(bm_t('LOX.S4_TITEL')) ?></b><br>
@@ -1359,9 +1537,6 @@ if (!bm_felder_gemessen(1)) { ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
     <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="token_neu" value="1"><?= bm_e(bm_t('LOX.K_TOKEN_NEU')) ?></button>
   </form>
-</div>
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-aktion"></i> <?= bm_t('LEGENDE.AKTION_TOKEN') ?></span>
 </div>
 </div>
 
@@ -1421,7 +1596,11 @@ function bm_bausteine()
         array(6,  'BAUSTEIN.T_VE',       'BAUSTEIN.N06', bm_baustein_befehl('ZYKLEN'), '&mdash;'),
         array(7,  'BAUSTEIN.T_VE',       'BAUSTEIN.N07', bm_baustein_befehl('ALTER'),  '&mdash;'),
         array(8,  'BAUSTEIN.T_VE',       'BAUSTEIN.N08', bm_baustein_befehl('OK', 'BAUSTEIN.Z_OK'), '&mdash;'),
-        array(9,  'BAUSTEIN.T_SWS',      'BAUSTEIN.N09', 'BAUSTEIN.P09', 'I &larr; #7'),
+        // O12 (Durchgang 29.09.2026): die Schwelle ist die Waechtergrenze der
+        // Anlage (bm_waechter_grenze(), 5 x Takt, mindestens 180 s), nicht
+        // fest 180 - bei Takt 60 s schlug #9 sonst bei jedem Abruf an.
+        array(9,  'BAUSTEIN.T_SWS',      'BAUSTEIN.N09',
+              array('text' => bm_e(sprintf(bm_t('BAUSTEIN.P09'), bm_waechter_grenze()))), 'I &larr; #7'),
         array(10, 'BAUSTEIN.T_NICHT',    'BAUSTEIN.N10', '',             'I &larr; #8'),
         array(11, 'BAUSTEIN.T_ODER',     'BAUSTEIN.N11', '',             'I1 &larr; #9, I2 &larr; #10'),
         array(12, 'BAUSTEIN.T_EVZ',      'BAUSTEIN.N12', 'BAUSTEIN.P12', 'I &larr; #11'),
@@ -1430,8 +1609,13 @@ function bm_bausteine()
         array(15, 'BAUSTEIN.T_EVZ',      'BAUSTEIN.N15', 'BAUSTEIN.P15', 'I &larr; #14'),
         array(16, 'BAUSTEIN.T_SWS',      'BAUSTEIN.N16', 'BAUSTEIN.P16', 'I &larr; #2'),
         array(17, 'BAUSTEIN.T_SWS',      'BAUSTEIN.N17', 'BAUSTEIN.P17', 'I &larr; #4'),
-        array(18, 'BAUSTEIN.T_ODER',     'BAUSTEIN.N18', '',             'I1 &larr; #15, I2 &larr; #16, I3 &larr; #17'),
-        array(19, 'BAUSTEIN.T_BENACHR',  'BAUSTEIN.N19', 'BAUSTEIN.P19', 'I &larr; #18'),
+        /* O13 (Durchgang 29.09.2026): kein ODER/UND mit drei Eingaengen
+         * (Regeln/04, A4) - Kaskade aus je zwei. Die Zeilen heissen 18a/18b
+         * und 27a/27b, damit alle uebrigen Nummern und die Erlaeuterungen
+         * gleich bleiben; jede Zeile verweist nur auf kleinere Nummern. */
+        array('18a', 'BAUSTEIN.T_ODER',  'BAUSTEIN.N18A', '',            'I1 &larr; #15, I2 &larr; #16'),
+        array('18b', 'BAUSTEIN.T_ODER',  'BAUSTEIN.N18', '',             'I1 &larr; #18a, I2 &larr; #17'),
+        array(19, 'BAUSTEIN.T_BENACHR',  'BAUSTEIN.N19', 'BAUSTEIN.P19', 'I &larr; #18b'),
         array(20, 'BAUSTEIN.T_STATUS',   'BAUSTEIN.N20', 'BAUSTEIN.P20', 'I1 &larr; #1, I2 &larr; #2'),
         array(21, 'BAUSTEIN.T_VE',       'BAUSTEIN.N21', 'BAUSTEIN.P21', '&mdash;'),
         array(22, 'BAUSTEIN.T_VEZ',      'BAUSTEIN.N22', 'BAUSTEIN.P22', '&mdash;'),
@@ -1439,14 +1623,15 @@ function bm_bausteine()
         array(24, 'BAUSTEIN.T_VEZ',      'BAUSTEIN.N24', 'BAUSTEIN.P24', '&mdash;'),
         array(25, 'BAUSTEIN.T_VERGL',    'BAUSTEIN.N25', 'BAUSTEIN.P25', 'I1 &larr; #1, I2 &larr; #24'),
         array(26, 'BAUSTEIN.T_TASTER',   'BAUSTEIN.N26', 'BAUSTEIN.P26', '&mdash;'),
-        array(27, 'BAUSTEIN.T_UND',      'BAUSTEIN.N27', '',             'I1 &larr; #23, I2 &larr; #25, I3 &larr; #26'),
+        array('27a', 'BAUSTEIN.T_UND',   'BAUSTEIN.N27A', '',            'I1 &larr; #23, I2 &larr; #25'),
+        array('27b', 'BAUSTEIN.T_UND',   'BAUSTEIN.N27', '',             'I1 &larr; #27a, I2 &larr; #26'),
         array(28, 'BAUSTEIN.T_VEZ',      'BAUSTEIN.N28', 'BAUSTEIN.P28', '&mdash;'),
-        array(29, 'BAUSTEIN.T_FORMEL',   'BAUSTEIN.N29', 'BAUSTEIN.P29', 'I1 &larr; #27, I2 &larr; #28'),
+        array(29, 'BAUSTEIN.T_FORMEL',   'BAUSTEIN.N29', 'BAUSTEIN.P29', 'I1 &larr; #27b, I2 &larr; #28'),
         array(30, 'BAUSTEIN.T_IMPULS',   'BAUSTEIN.N30', 'BAUSTEIN.P30', '&mdash;'),
-        array(31, 'BAUSTEIN.T_UND',      'BAUSTEIN.N31', '',             'I1 &larr; #27, I2 &larr; #30'),
+        array(31, 'BAUSTEIN.T_UND',      'BAUSTEIN.N31', '',             'I1 &larr; #27b, I2 &larr; #30'),
         array(32, 'BAUSTEIN.T_ANALOGSP', 'BAUSTEIN.N32', 'BAUSTEIN.P32', 'I &larr; #29, ' . bm_t('BAUSTEIN.TRIGGER') . ' &larr; #31'),
         array(33, 'BAUSTEIN.T_VA',       'BAUSTEIN.N33', 'BAUSTEIN.P33', 'I &larr; #32'),
-        array(34, 'BAUSTEIN.T_FLANKE',   'BAUSTEIN.N34', 'BAUSTEIN.P34', 'I &larr; #27'),
+        array(34, 'BAUSTEIN.T_FLANKE',   'BAUSTEIN.N34', 'BAUSTEIN.P34', 'I &larr; #27b'),
         array(35, 'BAUSTEIN.T_VA',       'BAUSTEIN.N35', 'BAUSTEIN.P35', 'I &larr; #34'),
         array(36, 'BAUSTEIN.T_VA',       'BAUSTEIN.N36', 'BAUSTEIN.P36', 'I &larr; #31'),
     );
@@ -1459,7 +1644,7 @@ function bm_bausteine()
 <tr><th>#</th><th><?= bm_e(bm_t('LOX.T_BAUSTEIN')) ?></th><th><?= bm_e(bm_t('LOX.T_NAMENSVORSCHLAG')) ?></th>
     <th><?= bm_e(bm_t('LOX.T_PARAMETER')) ?></th><th><?= bm_e(bm_t('LOX.T_EINGAENGE')) ?></th></tr>
 <?php foreach (bm_bausteine() as $bm_b) { ?>
-<tr><td><?= (int) $bm_b[0] ?></td><td><?= bm_t($bm_b[1]) ?></td><td><?= bm_t($bm_b[2]) ?></td>
+<tr><td><?= bm_e((string) $bm_b[0]) ?></td><td><?= bm_t($bm_b[1]) ?></td><td><?= bm_t($bm_b[2]) ?></td>
     <td><?= is_array($bm_b[3]) ? $bm_b[3]['text'] : ($bm_b[3] !== '' ? bm_t($bm_b[3]) : '&mdash;') ?></td><td><?= $bm_b[4] ?></td></tr>
 <?php } ?>
 </table>
@@ -1484,6 +1669,12 @@ function bm_bausteine()
 
 <!-- ================= Reiter: Test ================= -->
 <div class="sm-seite<?= $bm_tab === 'tab-test' ? ' sm-active' : '' ?>" id="tab-test">
+<?php /* O14 (Durchgang 29.09.2026): EINE Legende oben je Reiter - bis 0.9.29 standen bis zu drei verstreut im Reiter. */ ?>
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-lesen"></i> <?= bm_t('LEGENDE.LESEN') ?></span>
+<span><i class="sm-punkt sm-b-technik"></i> <?= bm_t('LEGENDE.TECHNIK') ?></span>
+<span><i class="sm-punkt sm-b-aktion"></i> <?= bm_t('LEGENDE.AKTION') ?></span>
+</div>
 <h2><?= bm_e(bm_t('TEST.H_SELBSTPRUEFUNG')) ?></h2>
 <p class="sm-hilfe"><?= bm_t('TEST.EINLEITUNG') ?></p>
 <table class="sm-tbl">
@@ -1521,11 +1712,6 @@ function bm_bausteine()
 <div class="sm-hilfe"><?= bm_t('TEST.ZELLEN_HILFE') ?></div>
 <?php } ?>
 
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-lesen"></i> <?= bm_t('LEGENDE.LESEN') ?></span>
-<span><i class="sm-punkt sm-b-technik"></i> <?= bm_t('LEGENDE.TECHNIK') ?></span>
-<span><i class="sm-punkt sm-b-aktion"></i> <?= bm_t('LEGENDE.AKTION') ?></span>
-</div>
 
 <h3><?= bm_e(bm_t('TEST.H_LESEN')) ?></h3>
 <div class="sm-knopfreihe">
@@ -1656,6 +1842,10 @@ if (is_file($bm_mdatei)) {
 
 <!-- ================= Reiter: Logdateien ================= -->
 <div class="sm-seite<?= $bm_tab === 'tab-log' ? ' sm-active' : '' ?>" id="tab-log">
+<?php /* O14 (Durchgang 29.09.2026): EINE Legende oben je Reiter - bis 0.9.29 standen bis zu drei verstreut im Reiter. */ ?>
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-aktion"></i> <?= bm_t('LEGENDE.AKTION_LOG') ?></span>
+</div>
 <h2><?= bm_e(bm_t('LOG.H_TITEL')) ?></h2>
 <?php
 if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {
@@ -1669,13 +1859,13 @@ if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {
 <?php } else { ?>
 <div class="sm-hinweis"><?= bm_t('LOG.LEER') ?></div>
 <?php } ?>
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-aktion"></i> <?= bm_t('LEGENDE.AKTION_LOG') ?></span>
-</div>
 <div class="sm-knopfreihe">
   <form action="index.php" method="post">
     <?php echo bm_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-log">
+    <label style="display:inline-flex;align-items:center;gap:6px;margin-right:10px;font-size:0.9em;">
+      <input data-role="none" type="checkbox" name="log_leeren_ok" value="1"> <?= bm_e(bm_t('LOG.L_HAKEN')) ?>
+    </label>
     <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="log_leeren" value="1"><?= bm_e(bm_t('LOG.K_LEEREN')) ?></button>
   </form>
 </div>

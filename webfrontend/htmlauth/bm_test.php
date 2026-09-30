@@ -22,7 +22,9 @@ function bm_pruefungen()
     $zeilen = array();
 
     $pid = bm_dienst_pid();
-    $zeilen[] = bm_pruefzeile($pid > 0 ? 1 : 0, bm_t('TEST.F_DIENST'),
+    /* O4 (Durchgang 29.09.2026): "bewusst angehalten" ist kein Befund -
+     * grau, wie im Hausstandard (Klasse 8). Rot nur, wenn er laufen soll. */
+    $zeilen[] = bm_pruefzeile($pid > 0 ? 1 : (bm_dienst_soll() ? 0 : -1), bm_t('TEST.F_DIENST'),
         $pid > 0 ? bm_t('TEST.A_DIENST_LAEUFT') . ' ' . $pid
                  : (bm_dienst_soll() ? bm_t('TEST.A_DIENST_SOLL_TOT') : bm_t('TEST.A_DIENST_GESTOPPT')));
 
@@ -105,7 +107,18 @@ function bm_pruefungen()
     }
 
     // Je Speicher: antwortet er, und ist sein Profil geprueft?
+    /* O4: ein Abbild ueber der Waechtergrenze ist veraltet - grau mit
+     * "veraltet", nie ein Haken auf einen Stand von vor Stunden (gemessen:
+     * Haken auf ein 7200 s altes Abbild). */
+    $bm_abb_alter = bm_alter();
+    $bm_abb_grenze = bm_waechter_grenze($cfg);
     foreach ($werte as $nr => $w) {
+        if ($bm_abb_alter > $bm_abb_grenze) {
+            $zeilen[] = bm_pruefzeile(-1,
+                bm_e($w['name']) . ' <span class="sm-mono">' . bm_e($w['transport']) . '</span>',
+                sprintf(bm_t('TEST.A_GERAET_VERALTET'), (int) $bm_abb_alter, (int) $bm_abb_grenze));
+            continue;
+        }
         $zeilen[] = bm_pruefzeile($w['ok'] ? 1 : 0,
             bm_e($w['name']) . ' <span class="sm-mono">' . bm_e($w['transport']) . '</span>',
             $w['ok'] ? sprintf(bm_t('TEST.A_GERAET_OK'),
@@ -229,7 +242,13 @@ function bm_pruefungen()
      * der Shell aus auch erreicht. Dafuer gibt es die Zeile darunter. */
     $abbildalter = bm_alter();
     $grenze = bm_waechter_grenze($cfg);
-    if ($abbildalter < 0) {
+    /* O4: die Frage "arbeitet der Dienst noch?" stellt sich nur bei einem
+     * laufenden Dienst. Bis 0.9.29 stand hier bei bewusst angehaltenem Dienst
+     * ein Kreuz mit dem Satz, der Waechter starte ihn neu - er startet nur,
+     * wenn der Dienst laufen soll (dienst.sh, soll_laufen). */
+    if ($pid <= 0) {
+        // keine Zeile
+    } elseif ($abbildalter < 0) {
         $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_ABBILD'), bm_t('TEST.A_ABBILD_NIE'));
     } else {
         $zeilen[] = bm_pruefzeile($abbildalter <= $grenze ? 1 : 0, bm_t('TEST.F_ABBILD'),
@@ -302,7 +321,7 @@ function bm_pruefungen()
     $zeilen[] = bm_pruefzeile($wlok ? 1 : 0, bm_t('TEST.F_WAECHTERLIB'),
         $wlok ? sprintf(bm_t('TEST.A_WAECHTERLIB_OK'), bm_e($waechterlib), (int) $grenze)
               : sprintf(bm_t('TEST.A_WAECHTERLIB_FEHLT'),
-                        bm_e($waechterlib !== '' ? $waechterlib : '(kein LBHOMEDIR)')));
+                        bm_e($waechterlib !== '' ? $waechterlib : bm_t('TEST.KEIN_LBHOMEDIR'))));
 
     /* Meldet der Waechter, dass er stillsteht? */
     $stummdatei = $p['datadir'] . '/waechter_stumm';
@@ -409,7 +428,168 @@ function bm_pruefungen()
     $zeilen[] = bm_pruefzeile($hatSoll ? 1 : 0, bm_t('TEST.F_VORLAGE_SOLL'),
         $hatSoll ? bm_t('TEST.A_VORLAGE_SOLL_OK') : bm_t('TEST.A_VORLAGE_SOLL_FEHLT'));
 
+    /* ---------------------------------------------------------------
+     * O5 (Durchgang 29.09.2026): die Pflichtzeilen des Hausstandards, die
+     * bis 0.9.29 fehlten (Regeln/04, "Pflichtzeilen jedes Plugins mit
+     * Dienst und Endpunkt"). Jede zaehlt in der eigenen Datei bzw. gegen
+     * den Sendecode; die Zaehlung steht je in einer eigenen Funktion, damit
+     * sie sich in beide Richtungen eichen laesst
+     * (bms_bau_skripte/proben/o5_eichung.php).
+     * --------------------------------------------------------------- */
+    list($cr_stand, $cr_text) = bm_cron_eintrag($p['home'], $p['plugin']);
+    $zeilen[] = bm_pruefzeile($cr_stand, bm_t('TEST.F_CRON'), $cr_text);
+
+    $quelle = (string) @file_get_contents(__DIR__ . '/index.php');
+    list($fm_alle, $fm_ohne) = bm_formulare_zaehlen($quelle);
+    $zeilen[] = bm_pruefzeile($fm_alle > 0 && !$fm_ohne ? 1 : 0, bm_t('TEST.F_FORMULARE'),
+        !$fm_ohne ? sprintf(bm_t('TEST.A_FORMULARE_OK'), $fm_alle)
+                  : sprintf(bm_t('TEST.A_FORMULARE_FEHLT'), count($fm_ohne), $fm_alle,
+                            bm_e(implode(', ', $fm_ohne))));
+
+    list($rt_ok, $rt_text) = bm_reiter_abgleich($quelle);
+    $zeilen[] = bm_pruefzeile($rt_ok ? 1 : 0, bm_t('TEST.F_REITER'), bm_e($rt_text));
+
+    list($sa_ok, $sa_text) = bm_sm_active_zaehlen($quelle);
+    $zeilen[] = bm_pruefzeile($sa_ok ? 1 : 0, bm_t('TEST.F_SM_ACTIVE'), bm_e($sa_text));
+
+    list($th_fehlt, $th_zuviel, $th_zahl) = bm_themen_abgleich(array_keys(bm_mqtt_themen()),
+        bm_themen_gesendet($cfg));
+    $zeilen[] = bm_pruefzeile(!$th_fehlt && !$th_zuviel ? 1 : 0, bm_t('TEST.F_THEMEN'),
+        (!$th_fehlt && !$th_zuviel) ? sprintf(bm_t('TEST.A_THEMEN_OK'), $th_zahl, $th_zahl)
+        : sprintf(bm_t('TEST.A_THEMEN_ABWEICHUNG'),
+                  bm_e($th_fehlt ? implode(', ', $th_fehlt) : '-'),
+                  bm_e($th_zuviel ? implode(', ', $th_zuviel) : '-')));
+
     return $zeilen;
+}
+
+/**
+ * O5: Steht der Minutentakt des Waechters? LoxBerry legt cron/cron.01min
+ * beim Installieren unter system/cron/cron.<takt>/<name> ab. Gesucht wird
+ * ueber ALLE Takt-Ordner (glob), damit ein spaeter geaenderter Takt nicht als
+ * fehlend gilt. Rueckgabe: array(stand, text).
+ */
+function bm_cron_eintrag($home, $plugin)
+{
+    if ((string) $home === '') {
+        return array(-1, bm_t('TEST.A_CRON_KEINE_WURZEL'));
+    }
+    $funde = array();
+    foreach ((array) glob($home . '/system/cron/cron.*/' . $plugin) as $f) {
+        if (is_file($f)) {
+            $funde[] = basename(dirname($f)) . '/' . basename($f);
+        }
+    }
+    if (!$funde) {
+        return array(0, sprintf(bm_t('TEST.A_CRON_FEHLT'), bm_e($home . '/system/cron/cron.*/' . $plugin)));
+    }
+    return array(1, sprintf(bm_t('TEST.A_CRON_OK'), bm_e(implode(', ', $funde))));
+}
+
+/**
+ * O5: Traegt jedes POST-Formular das Merkmal (bm_fmt()) vor seinem Ende?
+ * Rueckgabe: array(Zahl der POST-Formulare, Liste der Zeilennummern ohne).
+ */
+function bm_formulare_zaehlen($quelle)
+{
+    $alle = 0;
+    $ohne = array();
+    if (!preg_match_all('/<form\b[^>]*>/i', $quelle, $m, PREG_OFFSET_CAPTURE)) {
+        return array(0, array());
+    }
+    foreach ($m[0] as $f) {
+        if (stripos($f[0], 'method="post"') === false) {
+            continue;
+        }
+        $alle++;
+        $ende = stripos($quelle, '</form>', $f[1]);
+        $stueck = ($ende === false) ? '' : substr($quelle, $f[1], $ende - $f[1]);
+        if (strpos($stueck, 'bm_fmt()') === false) {
+            $ohne[] = bm_t('TEST.A_ZEILE') . ' ' . (substr_count(substr($quelle, 0, $f[1]), "\n") + 1);
+        }
+    }
+    return array($alle, $ohne);
+}
+
+/**
+ * O5: Passen Reiterleiste (data-ziel), Bereiche (id="tab-...") und
+ * Positivliste ($bm_muster) zusammen? Rueckgabe: array(ok, text).
+ */
+function bm_reiter_abgleich($quelle)
+{
+    preg_match_all('/data-ziel="(tab-[a-z]+)"/', $quelle, $l);
+    preg_match_all('/class="sm-seite[^"]*"[^>]*id="(tab-[a-z]+)"/', $quelle, $s);
+    $pos = array();
+    if (preg_match('/\$bm_muster = \'\/\^tab-\(([a-z|]+)\)\$\/\';/', $quelle, $pm)) {
+        foreach (explode('|', $pm[1]) as $x) {
+            $pos[] = 'tab-' . $x;
+        }
+    }
+    $leiste = array_values(array_unique($l[1]));
+    $seiten = array_values(array_unique($s[1]));
+    sort($leiste);
+    sort($seiten);
+    sort($pos);
+    $ok = $leiste && $leiste === $seiten && $seiten === $pos;
+    return array($ok, sprintf(bm_t($ok ? 'TEST.A_REITER_OK' : 'TEST.A_REITER_ABWEICHUNG'),
+        implode(' ', $leiste), implode(' ', $seiten), implode(' ', $pos)));
+}
+
+/**
+ * O5: Setzt der Server sm-active - an jedem Reiter der Leiste UND an jedem
+ * Bereich, abhaengig von $bm_tab? Ohne das ist die Seite ohne JavaScript
+ * leer. Rueckgabe: array(ok, text).
+ */
+function bm_sm_active_zaehlen($quelle)
+{
+    preg_match_all('/data-ziel="(tab-[a-z]+)"/', $quelle, $l);
+    $fehlt = array();
+    foreach (array_unique($l[1]) as $t) {
+        $n = substr_count($quelle, "\$bm_tab === '" . $t . "' ? ' sm-active'");
+        if ($n < 2) {
+            $fehlt[] = $t . ' (' . $n . '/2)';
+        }
+    }
+    $ok = $l[1] && !$fehlt && strpos($quelle, '.sm-seite.sm-active') !== false;
+    return array($ok, $ok ? sprintf(bm_t('TEST.A_SM_ACTIVE_OK'), count(array_unique($l[1])))
+                          : sprintf(bm_t('TEST.A_SM_ACTIVE_FEHLT'), implode(', ', $fehlt)));
+}
+
+/**
+ * O5: Welche Themen (in der Schreibweise der Themenliste) bildet der
+ * Sendecode? Gerechnet aus bm_mqtt_paare() mit einem vollstaendig belegten
+ * Abbild und eingeschaltetem EVCC - es wird nichts gesendet.
+ */
+function bm_themen_gesendet(array $cfg)
+{
+    $e = array('ok' => 1, 'ok_ts' => 1, 'alarmtext' => 'x', 'sollwert_quelle' => 'x',
+               'fehlertext' => 'x', 'sollwert' => 'laden:1', 'sollwert_alter' => 1,
+               'module' => array(1 => array('uzmax' => 1, 'uzmin' => 1, 'uzdiff' => 1, 'tmax' => 1,
+                                            'zellen' => array(1 => 3300))));
+    foreach (array('SOC', 'SOH', 'UBAT', 'IBAT', 'PBAT', 'TMAX', 'TMIN', 'UZMAX', 'UZMIN',
+                   'UZDIFF', 'ZYKLEN', 'KAPAZ', 'MODULE', 'ZELLEN', 'FEHLER', 'WARNUNG', 'MODUS',
+                   'UZMINMOD', 'UZMINZELLE', 'RESTKWH', 'RESTZEIT', 'ALARM') as $f) {
+        $e[$f] = 1;
+    }
+    $cfg['evcc_ein'] = 1;
+    $cfg['evcc_geraet'] = 1;
+    $aus = array();
+    foreach (array_keys(bm_mqtt_paare(array('ok' => 1, 'ts' => 1, 'geraete' => array(1 => $e)),
+                                      false, $cfg)) as $k) {
+        $k = preg_replace('#^geraet[0-9]+/#', 'geraetN/', (string) $k);
+        $k = preg_replace('#/modul/[0-9]+/#', '/modul/M/', $k);
+        $k = preg_replace('#/zelle/[0-9]+$#', '/zelle/Z', $k);
+        $aus[$k] = true;
+    }
+    return array_keys($aus);
+}
+
+/** O5: Abgleich Themenliste gegen Sendecode. array(fehlt, zuviel, Zahl). */
+function bm_themen_abgleich(array $liste, array $gesendet)
+{
+    $fehlt = array_values(array_diff($gesendet, $liste));    // gesendet, aber nicht gelistet
+    $zuviel = array_values(array_diff($liste, $gesendet));   // gelistet, aber nie gesendet
+    return array($fehlt, $zuviel, count(array_unique($liste)));
 }
 
 /** Ausgabe von bms_dienst.php --selbsttest. */
@@ -418,8 +598,8 @@ function bm_selbsttest_ausgabe()
     $p = bm_paths();
     $skript = $p['bindir'] . '/bms_dienst.php';
     if (!is_file($skript)) {
-        return "[FEHL] bms_dienst.php fehlt.\n       Erwartet: " . $skript
-             . "\n       Abhilfe: Plugin neu installieren.";
+        // O15: ueber die Sprachdatei (bis 0.9.29 fest Deutsch).
+        return sprintf(bm_t('TEST.SELBSTTEST_FEHLT'), $skript);
     }
     $ausgabe = array();
     @exec('php ' . escapeshellarg($skript) . ' --selbsttest 2>&1', $ausgabe);

@@ -716,6 +716,14 @@ function bm_vorgaben()
         'evcc_ein'       => 0,
         'evcc_geraet'    => 1,      // welcher Speicher EVCC als Hausspeicher gilt
         'evcc_ladewatt'  => 0,      // Leistung fuer Betriebsart 3, 0 = watt ist Pflicht
+        /* M3 (Durchgang 29.09.2026): das zuletzt verlassene Themenpraefix.
+         * Beim Praefixwechsel und beim Abschalten von MQTT werden die
+         * zurueckbehaltenen Themen darunter sofort geleert; der UDP-Eingang
+         * des Gateways verwirft aber unter Last. Die Deinstallation leert
+         * deshalb dieses Praefix ein zweites Mal. Leer heisst: kein anderes
+         * Praefix war je in Gebrauch. Kein Schalter, keine Wirkung auf den
+         * Betrieb - nur ein Vermerk. */
+        'mqtt_praefix_alt' => '',
     );
 }
 
@@ -787,17 +795,31 @@ function bm_wert_pruefen($schluessel, $wert)
             return (is_int($wert) || preg_match('/^[0-9]{1,12}\z/', (string) $wert) === 1)
                 ? '' : sprintf(bm_t('EINST.FEHLER_ZAHL'), $schluessel);
         case 'mqtt_topic':
+            /* O7: auch kein Schraegstrich am Rand - das Formular weist ihn ab,
+             * statt ihn abzuschneiden; dieselbe Beurteilung gilt hier. */
             return (is_string($wert)
-                    && preg_match('#^[A-Za-z0-9_/\-]{1,64}\z#', $wert) === 1)
+                    && preg_match('#^[A-Za-z0-9_\-]([A-Za-z0-9_/\-]{0,62}[A-Za-z0-9_\-])?\z#', $wert) === 1)
+                ? '' : bm_t('EINST.FEHLER_TOPIC');
+        case 'mqtt_praefix_alt':
+            return ($wert === '' || (is_string($wert)
+                    && preg_match('#^[A-Za-z0-9_\-]([A-Za-z0-9_/\-]{0,62}[A-Za-z0-9_\-])?\z#', $wert) === 1))
                 ? '' : bm_t('EINST.FEHLER_TOPIC');
         case 'aktionstoken':
-            /* Weit gefasst, wie der Hausstandard es seit VolkswagenID 0.9.12
-             * verlangt: zugelassen ist, was ohne Kodierung in eine Adresse
-             * passt. Die LEERE Zeichenkette ist zulaessig - 'kein Token
-             * gesichert' ist kein unzulaessiger Wert, sondern eine Lage. */
-            return (is_string($wert)
-                    && preg_match('/^[A-Za-z0-9_.\-]{0,64}\z/', $wert) === 1)
-                ? '' : sprintf(bm_t('EINST.FEHLER_ZAHL'), $schluessel);
+            /* C9 (Durchgang 29.09.2026): zugelassen ist eine Zeichenkette aus
+             * 1 bis 64 Zeichen (Buchstaben, Ziffern, Punkt, Bindestrich, Unterstrich) - dieselbe Beurteilung wie in
+             * bm_token() und in der Selbstheilung (bm_token_gueltig()). Bis
+             * 0.9.29 galt {0,64} mit _.- : "Array" und ein Token aus einem
+             * einzigen Zeichen gingen durch, und ein erratbares Token stand
+             * danach in jeder Adresse (gemessen, Befund R[array]). Die LEERE
+             * Zeichenkette bleibt zulaessig - 'kein Token gesichert' ist
+             * keine unzulaessige Angabe, sondern eine Lage (das Zurueckspielen
+             * behaelt dann das bisherige). Eine Liste bekommt ihren eigenen
+             * Satz: bis 0.9.29 hiess es dort "muss eine ganze Zahl sein". */
+            if (!is_string($wert)) {
+                return bm_t('EINST.FEHLER_TOKEN_LISTE');
+            }
+            return ($wert === '' || bm_token_gueltig($wert))
+                ? '' : bm_t('EINST.FEHLER_TOKEN_MUSTER');
         case 'geraete':
             return is_array($wert) ? '' : sprintf(bm_t('EINST.FEHLER_ZAHL'), $schluessel);
     }
@@ -818,6 +840,180 @@ function bm_geraetedatei_taugt($dev)
     $dev = (string) $dev;
     return preg_match('#^/dev/[A-Za-z0-9_/\-\.]{1,60}\z#', $dev) === 1
         && strpos($dev, '..') === false;
+}
+
+/* C10/O2/O7 (Durchgang 29.09.2026): die Werte einer Geraetezeile an EINER
+ * Stelle beurteilt - vom Formular, vom Zurueckspielen, von bm_geraete() (dem
+ * Dienst) und von der Anzeige der Tabelle. Bis 0.9.29 las der Dienst
+ * !empty($g['schreiben']) - "nein" gab das Schreiben frei -, waehrend die
+ * Seite "Ja" nur bei '1' zeigte. */
+if (!defined('BM_NAME_HOECHSTENS')) {
+    define('BM_NAME_HOECHSTENS', 64);   // Zeichen; gewaehlt, nicht gemessen
+}
+
+/** Ein Geraetename: Text, hoechstens BM_NAME_HOECHSTENS Zeichen, ohne
+ *  Steuerzeichen und ohne Anfuehrungszeichen (abgewiesen, nicht entfernt). */
+function bm_geraetename_taugt($name)
+{
+    if (!is_string($name)) {
+        return false;
+    }
+    return preg_match('/^[^\x00-\x1F\x7F"\']{0,' . (int) BM_NAME_HOECHSTENS . '}\z/u', $name) === 1;
+}
+
+/** Steht das Schreiben fuer diese Zeile frei? Nur die ganze Zahl 1 oder der
+ *  Text "1" - alles andere heisst nein (geschlossen). */
+function bm_schreiben_an($wert)
+{
+    return ($wert === 1 || $wert === '1') ? 1 : 0;
+}
+
+/** Vorzeichen einer Zeile: -1 nur bei -1 oder "-1", sonst die Hausvorgabe 1. */
+function bm_vorzeichen_wert($wert)
+{
+    return ($wert === -1 || $wert === '-1') ? -1 : 1;
+}
+
+/**
+ * Taugt ein Aktionstoken? (C9, Durchgang 29.09.2026)
+ *
+ * Eine Zeichenkette aus 1 bis 64 Zeichen (Buchstaben, Ziffern, Punkt, Bindestrich, Unterstrich). Das Plugin selbst
+ * wuerfelt 24 Zeichen aus Kleinbuchstaben und Ziffern (bm_token_erzeugen()).
+ * Bis 0.9.29 wurde ein Token nur mit (string) gewandelt: eine Liste in der
+ * Konfiguration oder der Zweitschrift wurde zu "Array", und der Endpunkt
+ * nahm danach token=Array an (gemessen, Befund E13 und heilung_liste.php).
+ */
+function bm_token_gueltig($t)
+{
+    return is_string($t) && preg_match('/^[A-Za-z0-9_.\-]{1,64}\z/', $t) === 1;
+}
+
+/**
+ * Eine Datei unteilbar schreiben, Rechte VOR dem Inhalt (C11).
+ *
+ * Nebendatei mit Prozessnummer und Zufall, erst leer anlegen und schuetzen,
+ * dann fuellen, dann umbenennen. Verglichen wird mit der vollen Laenge: eine
+ * kurze Schreibung ist genauso kaputt wie keine (Regeln/03, "atomar
+ * schreiben"). Rueckgabe true nur, wenn die Datei vollstaendig dasteht.
+ */
+function bm_datei_schreiben($pfad, $inhalt, $rechte = 0600)
+{
+    $inhalt = (string) $inhalt;
+    $ordner = dirname($pfad);
+    if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) {
+        return false;
+    }
+    $tmp = $pfad . '.tmp.' . getmypid() . '.' . bin2hex(random_bytes(4));
+    $fh = @fopen($tmp, 'c');
+    if ($fh === false) {
+        return false;
+    }
+    fclose($fh);
+    @chmod($tmp, $rechte);
+    if (@file_put_contents($tmp, $inhalt) !== strlen($inhalt)) {
+        @unlink($tmp);
+        return false;
+    }
+    if (!@rename($tmp, $pfad)) {
+        @unlink($tmp);
+        return false;
+    }
+    @chmod($pfad, $rechte);
+    return true;
+}
+
+/**
+ * O1 (Durchgang 29.09.2026): Einmalmeldung fuer Post/Redirect/Get, Bauart
+ * AudiConnect 0.9.22. Jeder POST der Oberflaeche endet mit 303; was er zu
+ * melden hat, liegt bis zum naechsten GET (hoechstens 120 s) in einer Datei
+ * mit 0600 im Datenordner und wird beim Lesen geloescht. Bis 0.9.29 wurde die
+ * Antwort direkt gezeichnet - ein Neuladen schickte den POST noch einmal
+ * (gemessen: "Neues Token" dreimal = drei Tokens).
+ */
+function bm_einmal_schreiben(array $daten)
+{
+    $p = bm_paths();
+    if ($p['datadir'] === '' || !is_dir($p['datadir'])) {
+        return false;
+    }
+    $daten['zeit'] = time();
+    $js = json_encode($daten, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    return is_string($js) && bm_datei_schreiben($p['datadir'] . '/einmalmeldung.json', $js, 0600);
+}
+
+/**
+ * Ein Profil beurteilen - EINE Quelle fuer das Hochladen eines Profils und
+ * fuer die eigenen Profile in einer Sicherung (O10). Rueckgabe: Liste der
+ * Beanstandungen (bereits fuer HTML maskiert), leer = taugt.
+ * Wortgleich aus dem Handler profil_import der Oberflaeche herausgezogen.
+ */
+function bm_profil_pruefen($pr)
+{
+    $bean = array();
+    if (!is_array($pr)) {
+        return array(bm_t('EINST.FEHLER_PROFIL_JSON'));
+    }
+    if (!isset($pr['transport']) || !is_string($pr['transport'])
+        || !in_array((string) $pr['transport'], bm_transporte(), true)) {
+        $bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL_TRANSPORT'), implode(', ', bm_transporte()));
+    }
+    foreach (array('name', 'quelle', 'stand') as $pflicht) {
+        if (!isset($pr[$pflicht]) || !is_string($pr[$pflicht]) || trim($pr[$pflicht]) === '') {
+            $bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL_PFLICHT'), $pflicht);
+        }
+    }
+    if (isset($pr['stand']) && !in_array($pr['stand'], array('dokumentiert', 'unbestaetigt'), true)) {
+        $bean[] = bm_t('EINST.FEHLER_PROFIL_STAND');
+    }
+    $typen = array('u16', 's16', 'u32', 's32', 'f32', 'u16hi', 'u16lo');
+    foreach (array('felder', 'rechnung') as $ab) {
+        foreach ((array) (isset($pr[$ab]) ? $pr[$ab] : array()) as $fn => $fd) {
+            if (is_array($fd) && isset($fd['typ'])
+                && !in_array((string) $fd['typ'], $typen, true)) {
+                $bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL_TYP'),
+                    bm_e((string) $fn), bm_e((string) $fd['typ']), implode(', ', $typen));
+            }
+        }
+    }
+    foreach (bm_profil_doppelregister($pr) as $dr) {
+        $bean[] = bm_e($dr);
+    }
+    $erlaubt = bm_status_felder();
+    foreach (array('felder', 'rechnung') as $ab) {
+        foreach ((array) (isset($pr[$ab]) ? $pr[$ab] : array()) as $f => $u) {
+            if (!isset($erlaubt[$f])) {
+                $bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL_FELD'), bm_e($f), $ab);
+            }
+        }
+    }
+    return $bean;
+}
+
+function bm_einmal_lesen()
+{
+    $f = bm_paths()['datadir'] . '/einmalmeldung.json';
+    if (!is_file($f)) {
+        return null;
+    }
+    $d = json_decode((string) @file_get_contents($f), true);
+    @unlink($f);
+    if (!is_array($d) || !isset($d['zeit']) || abs(time() - (int) $d['zeit']) > 120) {
+        return null;
+    }
+    $aus = array();
+    foreach (array('meldungen', 'fehler') as $k) {
+        $aus[$k] = array();
+        if (isset($d[$k]) && is_array($d[$k])) {
+            foreach ($d[$k] as $m) {
+                if (is_string($m)) {
+                    $aus[$k][] = $m;
+                }
+            }
+        }
+    }
+    $aus['test'] = (isset($d['test']) && is_string($d['test'])) ? $d['test'] : '';
+    $aus['tab'] = (isset($d['tab']) && is_string($d['tab'])) ? $d['tab'] : '';
+    return $aus;
 }
 
 function bm_json_lesen($pfad)
@@ -968,8 +1164,12 @@ function bm_konfig_taugt($roh)
         return false;
     }
     $d = json_decode($roh, true);
+    /* C9: das Token muss taugen, nicht nur "nicht leer" sein. Eine
+     * Zweitschrift mit dem Token als Liste galt bis 0.9.29 als heilbar -
+     * (string) machte "Array" daraus, und danach nahm der Endpunkt
+     * token=Array an (gemessen, heilung_liste.php). */
     return is_array($d) && isset($d['aktionstoken'])
-        && trim((string) $d['aktionstoken']) !== '';
+        && bm_token_gueltig($d['aktionstoken']);
 }
 
 function bm_config()
@@ -998,8 +1198,9 @@ function bm_config()
              * Seite gelegt. Sie ist das einzige, was von den Einstellungen
              * noch da ist, wenn auch die Zweitschrift nichts taugt. */
             if ($darf && !is_file($p['config'] . '.kaputt')) {
-                @copy($p['config'], $p['config'] . '.kaputt');
-                @chmod($p['config'] . '.kaputt', 0600);
+                // C11: Rechte vor dem Inhalt - copy() legte mit der umask an
+                // (0644 in WSL gemessen), und das Token war kurz lesbar.
+                bm_datei_schreiben($p['config'] . '.kaputt', (string) @file_get_contents($p['config']), 0600);
             }
             bm_log_gebremst('kaputt', 'Die Konfiguration ' . basename($p['config'])
                 . ' ist kein gueltiges JSON. Eine Abschrift liegt als '
@@ -1013,8 +1214,9 @@ function bm_config()
 
         if ($heilbar && $darf) {
             @mkdir($p['configdir'], 0775, true);
-            if (@copy($p['sicherung'], $p['config'])) {
-                @chmod($p['config'], 0600);   // copy() legt sonst mit der umask an
+            // C11: Rechte vor dem Inhalt, volle Laenge geprueft (bis 0.9.29
+            // copy() und danach chmod).
+            if (bm_datei_schreiben($p['config'], $sicher, 0600)) {
                 bm_konfig_lage('aus der Zweitschrift');
                 $roh = $sicher;
                 $zustand = 'ok';
@@ -1048,9 +1250,16 @@ function bm_config_speichern($cfg)
      * Geheimnis wirklich traegt (B02). Sonst ueberschreibt eine
      * Werkseinstellung, die gerade erst aus einem Fehler entstanden ist, die
      * letzte brauchbare Sicherung - und dann ist nichts mehr da. */
-    if (isset($cfg['aktionstoken']) && trim((string) $cfg['aktionstoken']) !== '') {
-        @copy($p['config'], $p['sicherung']);
-        @chmod($p['sicherung'], 0600);
+    if (isset($cfg['aktionstoken']) && bm_token_gueltig($cfg['aktionstoken'])) {
+        /* C11: die Zweitschrift ueber denselben unteilbaren Weg, Rechte vor
+         * dem Inhalt. Bis 0.9.29 copy() und danach chmod - beim ersten
+         * Anlegen stand die Datei mit dem Token kurz mit 0644 da (in WSL
+         * gemessen, umask 022), und ein misslungenes Kopieren blieb stumm. */
+        if (!bm_json_schreiben($p['sicherung'], $cfg, 0600)) {
+            bm_log_gebremst('zweitschrift', 'Die Zweitschrift ' . $p['sicherung']
+                . ' liess sich nicht schreiben. Die Konfiguration selbst ist gespeichert;'
+                . ' ein Update oder eine Selbstheilung faende aber den vorigen Stand.', 3600);
+        }
     }
     return true;
 }
@@ -1067,7 +1276,7 @@ function bm_config_speichern($cfg)
  * Dieselben Massstaebe wie im Formular - das ist der Sinn (B01/B04).
  * Rueckgabe: Liste von Beanstandungen, leer heisst in Ordnung.
  */
-function bm_geraetezeilen_pruefen($liste)
+function bm_geraetezeilen_pruefen($liste, array $zusatzprofile = array())
 {
     $bean = array();
     if (!is_array($liste)) {
@@ -1081,21 +1290,54 @@ function bm_geraetezeilen_pruefen($liste)
             $bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL'), $nr);
             continue;
         }
-        $pk = isset($g['profil']) ? (string) $g['profil'] : '';
-        if (!isset($profile[$pk])) {
-            $bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL'), $nr);
+        $pk = (isset($g['profil']) && is_string($g['profil'])) ? $g['profil'] : '';
+        /* O10: ein Profil, das die Sicherung selbst mitbringt
+         * ($zusatzprofile), zaehlt als vorhanden. Fehlt es trotzdem, nennt
+         * die Abweisung seinen Schluessel - bis 0.9.29 hiess es nur "kein
+         * gueltiges Profil gewaehlt", und beim Umzug war nicht zu sehen,
+         * welches eigene Profil fehlt. */
+        if (!isset($profile[$pk]) && !isset($zusatzprofile[$pk])) {
+            $bean[] = ($pk === '') ? sprintf(bm_t('EINST.FEHLER_PROFIL'), $nr)
+                : sprintf(bm_t('EINST.FEHLER_PROFIL_FEHLT'), $nr, bm_text_sauber($pk, 60));
             continue;
+        }
+        /* C10 (Durchgang 29.09.2026): die Werte der Zeile, die bis 0.9.29
+         * gar nicht beurteilt wurden. Gemessen: "schreiben": "nein" wurde
+         * angenommen und gab das Schreiben FREI (bm_geraete() las
+         * !empty()), waehrend die Seite "Nein" zeigte; ein Name als Liste
+         * ergab unter PHP 8.5 elf Warnungen in der Seite. Dieselben
+         * Massstaebe wie im Formular. */
+        if (array_key_exists('schreiben', $g)
+            && !in_array($g['schreiben'], array(0, 1, '0', '1'), true)) {
+            $bean[] = sprintf(bm_t('EINST.FEHLER_SCHREIBEN'), $nr);
+        }
+        if (array_key_exists('vorzeichen', $g)
+            && !in_array($g['vorzeichen'], array(1, -1, '1', '-1'), true)) {
+            $bean[] = sprintf(bm_t('EINST.FEHLER_VORZEICHEN'), $nr);
+        }
+        if (array_key_exists('name', $g) && !bm_geraetename_taugt($g['name'])) {
+            $bean[] = sprintf(bm_t('EINST.FEHLER_NAME'), $nr, BM_NAME_HOECHSTENS);
+        }
+        if (array_key_exists('nennkapaz', $g) && $g['nennkapaz'] !== ''
+            && (is_array($g['nennkapaz']) || is_bool($g['nennkapaz']) || $g['nennkapaz'] === null
+                || preg_match('/^[0-9]{1,4}([.,][0-9]{1,2})?\z/', (string) $g['nennkapaz']) !== 1)) {
+            $bean[] = sprintf(bm_t('EINST.FEHLER_KAPAZ'), $nr);
+        }
+        foreach (array('ip', 'geraetedatei', 'profil') as $bm_tf) {
+            if (isset($g[$bm_tf]) && !is_string($g[$bm_tf])) {
+                $bean[] = sprintf(bm_t('EINST.FEHLER_ZEILE_TEXT'), $nr, $bm_tf);
+            }
         }
         /* Geprueft wird der Wert, der gespeichert wird - nicht eine
          * getrimmte Kopie. Bis 0.9.25 ging "192.168.1.5\n" aus einer
          * Sicherung hier durch und stand danach roh in der Konfiguration
          * (gemessen 24.09.2026). Das Formular speichert ueber bm_saeubern()
          * ohnehin ohne Rand; eine eigene Sicherung trifft das also nicht. */
-        $dev = (string) (isset($g['geraetedatei']) ? $g['geraetedatei'] : '');
+        $dev = (isset($g['geraetedatei']) && is_string($g['geraetedatei'])) ? $g['geraetedatei'] : '';
         if ($dev !== '' && ($dev !== trim($dev) || !bm_geraetedatei_taugt($dev))) {
             $bean[] = sprintf(bm_t('EINST.FEHLER_DEV'), $nr);
         }
-        $ip = (string) (isset($g['ip']) ? $g['ip'] : '');
+        $ip = (isset($g['ip']) && is_string($g['ip'])) ? $g['ip'] : '';
         if ($ip !== ''
             && preg_match('/^\d{1,3}(\.\d{1,3}){3}\z/', $ip) !== 1
             && preg_match('/^[A-Za-z0-9][A-Za-z0-9\.\-]{1,80}\z/', $ip) !== 1) {
@@ -1108,7 +1350,8 @@ function bm_geraetezeilen_pruefen($liste)
             if (!isset($g[$f]) || $g[$f] === '') {
                 continue;
             }
-            if (preg_match('/^[0-9]{1,6}\z/', (string) $g[$f]) !== 1
+            if (is_array($g[$f]) || is_bool($g[$f])
+                || preg_match('/^[0-9]{1,6}\z/', (string) $g[$f]) !== 1
                 || (int) $g[$f] < $gr[0] || (int) $g[$f] > $gr[1]) {
                 $bean[] = sprintf(bm_t('EINST.FEHLER_ZAHL_ZEILE'), $nr,
                     bm_t('EINST.T_' . strtoupper($f)), $gr[0], $gr[1]);
@@ -1148,7 +1391,7 @@ function bm_geraete()
         if (!is_array($g)) {
             continue;
         }
-        $pk = isset($g['profil']) ? (string) $g['profil'] : '';
+        $pk = (isset($g['profil']) && is_string($g['profil'])) ? $g['profil'] : '';
         if (!isset($profile[$pk])) {
             bm_log_gebremst('profil_weg_' . $n, 'Speicher ' . $n . ': das Profil "'
                 . $pk . '" gibt es nicht (mehr). Die Zeile wird uebergangen, ihre '
@@ -1159,8 +1402,8 @@ function bm_geraete()
         }
         $pr = $profile[$pk];
         $seriell = ($pr['transport'] === 'pylontech_rs485');
-        $ip = trim((string) (isset($g['ip']) ? $g['ip'] : ''));
-        $dev = trim((string) (isset($g['geraetedatei']) ? $g['geraetedatei'] : ''));
+        $ip = (isset($g['ip']) && is_string($g['ip'])) ? trim($g['ip']) : '';
+        $dev = (isset($g['geraetedatei']) && is_string($g['geraetedatei'])) ? trim($g['geraetedatei']) : '';
         if ($seriell) {
             if ($dev === '') {
                 $dev = isset($pr['geraetedatei']) ? $pr['geraetedatei'] : '/dev/ttyUSB0';
@@ -1189,8 +1432,11 @@ function bm_geraete()
         }
         $out[$n] = array(
             'nr'           => $n,
-            'name'         => trim((string) (isset($g['name']) ? $g['name'] : '')) !== ''
-                              ? trim((string) $g['name']) : ('Speicher ' . $n),
+            // O15: der Ersatzname kommt aus der Sprachdatei (bis 0.9.29 fest
+            // "Speicher N", auch in der englischen Oberflaeche). Ein Name, der
+            // kein Text ist, gilt als leer (C10).
+            'name'         => (isset($g['name']) && is_string($g['name']) && trim($g['name']) !== '')
+                              ? trim($g['name']) : sprintf(bm_t('ALLG.SPEICHER_NAME'), $n),
             'profil'       => $pk,
             'profilname'   => $pr['name'],
             'transport'    => $pr['transport'],
@@ -1210,8 +1456,11 @@ function bm_geraete()
             // als positiv meldet, steht in keinem Datenblatt verlaesslich -
             // deshalb ein Schalter statt einer Annahme. Hausvorgabe:
             // positiv = laden.
-            'vorzeichen'   => (isset($g['vorzeichen']) && (int) $g['vorzeichen'] === -1) ? -1 : 1,
-            'schreiben'    => !empty($g['schreiben']) ? 1 : 0,
+            'vorzeichen'   => bm_vorzeichen_wert(isset($g['vorzeichen']) ? $g['vorzeichen'] : 1),
+            /* C10: nur 1 oder "1" gibt das Schreiben frei. Bis 0.9.29 stand
+             * hier !empty() - "nein", "false" und "0.0" gaben es FREI, waehrend
+             * die Seite "Nein" zeigte (gemessen, Befund O2/R). */
+            'schreiben'    => bm_schreiben_an(isset($g['schreiben']) ? $g['schreiben'] : 0),
             'max_laden'    => isset($g['max_laden']) && $g['max_laden'] !== ''
                               ? max(0, min(30000, (int) $g['max_laden'])) : 0,
             'max_entladen' => isset($g['max_entladen']) && $g['max_entladen'] !== ''
@@ -1259,13 +1508,27 @@ function bm_token_erzeugen($laenge = 24)
 function bm_token()
 {
     $cfg = bm_config();
-    if (trim((string) $cfg['aktionstoken']) !== '') {
-        return (string) $cfg['aktionstoken'];
+    /* C9 (Durchgang 29.09.2026): nur ein Token, das taugt (bm_token_gueltig()),
+     * wird zurueckgegeben. Bis 0.9.29 machte (string) aus einer Liste "Array" -
+     * und genau dieses Wort galt danach als Token. */
+    if (bm_token_gueltig($cfg['aktionstoken'])) {
+        return $cfg['aktionstoken'];
     }
     /* Die Sperre des unangemeldeten Bereichs gilt auch hier: der Endpunkt
      * antwortet lieber mit 403, als ein Token anzulegen (B03). */
     if (bm_nur_lesen()) {
         return '';
+    }
+    /* Steht ein Token da, das nicht taugt (Liste, zu kurz, fremde Zeichen),
+     * wird es ersetzt - und das gesagt, einmal, damit niemand den Fehler in
+     * Loxone sucht. Eine Liste war nie ein benutzbares Token; ein zu kurzes
+     * konnte nur von Hand oder aus einer Sicherung vor 0.9.30 kommen. */
+    if (is_array($cfg['aktionstoken'])
+        || (is_string($cfg['aktionstoken']) && trim($cfg['aktionstoken']) !== '')) {
+        bm_log_gebremst('token_untauglich', 'Das gespeicherte Aktionstoken taugt nicht (erlaubt '
+            . 'sind 1 bis 64 Zeichen (Buchstaben, Ziffern, Punkt, Bindestrich, Unterstrich)). Es wird ein neues erzeugt - alle Adressen '
+            . 'im Miniserver muessen im Reiter "Einbindung in Loxone" neu uebernommen werden.', 3600);
+        $cfg['aktionstoken'] = '';
     }
     /* Fehlt das Token, obwohl eine Konfiguration BESTEHT, ist das kein
      * Neuanfang, sondern ein Verlust - meist aus einer unvollstaendigen
@@ -1296,7 +1559,7 @@ function bm_token()
     }
     if (@flock($fp, LOCK_EX)) {
         $cfg = bm_config();                      // zweiter Blick unter der Sperre
-        if (trim((string) $cfg['aktionstoken']) === '') {
+        if (!bm_token_gueltig($cfg['aktionstoken'])) {
             $cfg['aktionstoken'] = bm_token_erzeugen();
             if (!bm_config_speichern($cfg)) {
                 bm_log('Das neu erzeugte Aktionstoken liess sich NICHT speichern. '
@@ -1346,6 +1609,224 @@ function bm_sollart($sollwert)
         return 3;
     }
     return 0;
+}
+
+/* ==================================================================
+ * Offene Zwaenge (C4/C5/I4, Durchgang 29.09.2026)
+ *
+ * Ein Zwang am Speicher hinterlaesst die Sollwertdatei
+ * data/plugins/<ordner>/soll_geraetN.json. Bis 0.9.29 trug sie nur Aktion,
+ * Leistung und Zeitpunkt, und Totmannschaltung wie Ruecknahme beim Anhalten
+ * liefen ueber die GERAETELISTE. Gemessen (Befund C4, Faelle G1, G2, B4):
+ * wurde die Zeile des gezwungenen Speichers entfernt, rueckte die Liste auf,
+ * oder war die Konfiguration kaputt, sah keiner der beiden Wege die Datei
+ * mehr - der Speicher blieb im Zwang, und nichts meldete es.
+ *
+ * Seit 0.9.30 traegt die Datei die ANSCHRIFT des Speichers (Weg, Adresse,
+ * Port, Unit, Geraetedatei, Profil, Name) und die Schrittfolge "automatik"
+ * des Profils. Die Ruecknahme findet den Speicher darueber, auch wenn er in
+ * der Liste nicht mehr - oder unter einer anderen Nummer - steht.
+ * ================================================================== */
+
+/** Die Anschrift eines Speichers aus seiner Geraetezeile (bm_geraete()). */
+function bm_geraet_anschrift(array $g)
+{
+    return array(
+        'name'         => isset($g['name']) ? (string) $g['name'] : '',
+        'profil'       => isset($g['profil']) ? (string) $g['profil'] : '',
+        'transport'    => isset($g['transport']) ? (string) $g['transport'] : '',
+        'ip'           => isset($g['ip']) ? (string) $g['ip'] : '',
+        'port'         => isset($g['port']) ? (int) $g['port'] : 0,
+        'unit'         => isset($g['unit']) ? (int) $g['unit'] : 0,
+        'geraetedatei' => isset($g['geraetedatei']) ? (string) $g['geraetedatei'] : '',
+        'baud'         => isset($g['baud']) ? (int) $g['baud'] : 0,
+    );
+}
+
+/** Bezeichnen zwei Anschriften dasselbe Geraet? Der Name zaehlt nicht mit -
+ *  er ist Beschriftung, keine Adresse. */
+function bm_anschrift_gleich($a, $b)
+{
+    if (!is_array($a) || !is_array($b)) {
+        return false;
+    }
+    foreach (array('transport', 'ip', 'port', 'unit', 'geraetedatei') as $k) {
+        $x = isset($a[$k]) ? (string) $a[$k] : '';
+        $y = isset($b[$k]) ? (string) $b[$k] : '';
+        if ($x !== $y) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * Die Anschrift einer ROHEN Geraetezeile (Formular, Sicherung), mit den
+ * Vorgaben des Profils ergaenzt wie in bm_geraete(). null, wenn die Zeile
+ * keinen Speicher beschreibt (kein Profil, keine Adresse).
+ */
+function bm_zeile_anschrift($zeile, array $profile)
+{
+    if (!is_array($zeile)) {
+        return null;
+    }
+    $pk = (isset($zeile['profil']) && is_string($zeile['profil'])) ? $zeile['profil'] : '';
+    if (!isset($profile[$pk])) {
+        return null;
+    }
+    $pr = $profile[$pk];
+    $g = array('profil' => $pk, 'transport' => (string) $pr['transport'],
+               'name' => (isset($zeile['name']) && is_string($zeile['name'])) ? trim($zeile['name']) : '');
+    $ip = (isset($zeile['ip']) && is_string($zeile['ip'])) ? trim($zeile['ip']) : '';
+    $dev = (isset($zeile['geraetedatei']) && is_string($zeile['geraetedatei'])) ? trim($zeile['geraetedatei']) : '';
+    if ($g['transport'] === 'pylontech_rs485') {
+        $g['ip'] = $ip;
+        $g['geraetedatei'] = $dev !== '' ? $dev
+            : (isset($pr['geraetedatei']) ? (string) $pr['geraetedatei'] : '/dev/ttyUSB0');
+    } else {
+        $g['ip'] = $ip !== '' ? $ip : (isset($pr['ip']) ? (string) $pr['ip'] : '');
+        $g['geraetedatei'] = $dev;
+        if ($g['ip'] === '') {
+            return null;
+        }
+    }
+    $g['port'] = (isset($zeile['port']) && $zeile['port'] !== '' && !is_array($zeile['port']))
+        ? max(1, min(65535, (int) $zeile['port'])) : (int) (isset($pr['port']) ? $pr['port'] : 0);
+    $g['unit'] = (isset($zeile['unit']) && $zeile['unit'] !== '' && !is_array($zeile['unit']))
+        ? max(0, min(247, (int) $zeile['unit'])) : (int) (isset($pr['unit']) ? $pr['unit'] : 0);
+    $g['baud'] = (isset($zeile['baud']) && $zeile['baud'] !== '' && !is_array($zeile['baud']))
+        ? (int) $zeile['baud'] : (int) (isset($pr['baud']) ? $pr['baud'] : 115200);
+    return bm_geraet_anschrift($g);
+}
+
+/**
+ * C4 (Durchgang 29.09.2026): Wuerde eine neue Geraeteliste einen Speicher mit
+ * offenem Zwang von seiner Nummer verdraengen (entfernt, aufgerueckt, andere
+ * Adresse)? Rueckgabe: Klartext der betroffenen Speicher, leer = nein.
+ * Der Formular-Handler und das Zurueckspielen weisen dann ab, statt die Liste
+ * still zu verdichten - erst "Automatik", dann umbauen.
+ */
+function bm_zwang_verschoben($neue_liste, array $profile = array())
+{
+    $offen = bm_zwang_offen();
+    if (!$offen) {
+        return '';
+    }
+    if (!$profile) {
+        $profile = bm_profile();
+    }
+    $jetzt = bm_geraete();
+    $neu = array_values(is_array($neue_liste) ? $neue_liste : array());
+    $betroffen = array();
+    foreach ($offen as $nr => $soll) {
+        if (isset($soll['anschrift']) && is_array($soll['anschrift'])) {
+            $ref = $soll['anschrift'];
+        } elseif (isset($jetzt[$nr])) {
+            $ref = bm_geraet_anschrift($jetzt[$nr]);
+        } else {
+            continue;   // schon verwaist - das meldet und erledigt der Dienst
+        }
+        $ziel = isset($neu[$nr - 1]) ? bm_zeile_anschrift($neu[$nr - 1], $profile) : null;
+        if ($ziel === null || !bm_anschrift_gleich($ref, $ziel)) {
+            $betroffen[$nr] = $soll;
+        }
+    }
+    return $betroffen ? bm_zwang_namen($betroffen) : '';
+}
+
+/**
+ * Alle offenen Zwaenge nach Nummer: array(nr => Inhalt der Sollwertdatei).
+ * Gelesen wird der Datenordner, nicht die Geraeteliste - das ist der Punkt.
+ */
+function bm_zwang_offen()
+{
+    $aus = array();
+    $ordner = bm_paths()['datadir'];
+    clearstatcache();
+    foreach ((array) glob($ordner . '/soll_geraet*.json') as $datei) {
+        if (!preg_match('/soll_geraet([0-9]{1,3})\.json$/', $datei, $m)) {
+            continue;
+        }
+        $d = bm_json_lesen($datei);
+        $aus[(int) $m[1]] = is_array($d) ? $d : array();
+    }
+    ksort($aus);
+    return $aus;
+}
+
+/** Klartext der offenen Zwaenge fuer Meldungen: "Keller (Speicher 1), ...". */
+function bm_zwang_namen(?array $offen = null)
+{
+    if ($offen === null) {
+        $offen = bm_zwang_offen();
+    }
+    $geraete = bm_geraete();
+    $teile = array();
+    foreach ($offen as $nr => $s) {
+        $name = (isset($s['anschrift']['name']) && (string) $s['anschrift']['name'] !== '')
+            ? (string) $s['anschrift']['name']
+            : (isset($geraete[$nr]) ? $geraete[$nr]['name'] : '');
+        $teile[] = ($name !== '' ? bm_text_sauber($name, 64) . ' ' : '')
+                 . '(' . sprintf(bm_t('ALLG.SPEICHER_NAME'), (int) $nr) . ')';
+    }
+    return implode(', ', $teile);
+}
+
+/**
+ * Wie lange darf das Anhalten dauern? (C5, Durchgang 29.09.2026)
+ *
+ * Beim Anhalten nimmt der Dienst jeden offenen Zwang zurueck, einen Speicher
+ * nach dem anderen. Ein Speicher, der nicht antwortet, kostet die
+ * Zeitueberschreitung beim Verbinden und noch einmal beim Schreiben. Bis
+ * 0.9.29 liess bin/dienst.sh fest zehn Sekunden Zeit und schoss dann mit
+ * kill -9 nach - bei zwei Speichern, von denen der erste schwieg, wurde der
+ * zweite nie zurueckgenommen (gemessen, Fall K, Zeitueberschreitung 30 s).
+ *
+ * Je Speicher (eingerichtet ODER mit offenem Zwang): 2 x Zeitueberschreitung
+ * + 2 s, zusammen mindestens 10 s. Gewaehlt, nicht gemessen; die Rechnung
+ * steht im Hilfetext.
+ */
+function bm_anhalte_frist($cfg = null)
+{
+    if (!is_array($cfg)) {
+        $cfg = bm_config();
+    }
+    $tmo = max(1, min(30, (int) $cfg['zeitueberschreitung']));
+    $nummern = array();
+    foreach (array_keys(bm_geraete()) as $nr) {
+        $nummern[(int) $nr] = true;
+    }
+    foreach (array_keys(bm_zwang_offen()) as $nr) {
+        $nummern[(int) $nr] = true;
+    }
+    return max(10, count($nummern) * (2 * $tmo + 2));
+}
+
+/**
+ * Ab welchem Alter des Abbilds gilt OK nicht mehr? (C8, Entscheidung 4 vom
+ * 29.09.2026): OK=0, sobald ALTER groesser ist als das Dreifache des
+ * Abruftakts. ALTER bleibt daneben unveraendert.
+ */
+function bm_ok_grenze($cfg = null)
+{
+    if (!is_array($cfg)) {
+        $cfg = bm_config();
+    }
+    return 3 * max(5, min(3600, (int) $cfg['intervall']));
+}
+
+/**
+ * Die beiden Registerworte eines 32-Bit-Schreibschritts in der Reihenfolge
+ * des Profils ('wort' => 'nieder' heisst niederes Wort zuerst). EINE Stelle
+ * fuer den Normalweg UND die Notruecknahme (C11): bis 0.9.29 las die
+ * Notruecknahme das Feld 'wort' nicht und schrieb immer hohes Wort zuerst.
+ */
+function bm_worte($wert, array $schritt)
+{
+    $wert = (int) $wert;
+    return (isset($schritt['wort']) && $schritt['wort'] === 'nieder')
+        ? array($wert & 0xFFFF, ($wert >> 16) & 0xFFFF)
+        : array(($wert >> 16) & 0xFFFF, $wert & 0xFFFF);
 }
 
 /* ---------------- Zwischenspeicher ---------------- */
@@ -1636,7 +2117,7 @@ function bm_upgrade_marke()
 function bm_dienst($befehl)
 {
     if (!in_array($befehl, array('start', 'stop', 'restart'), true)) {
-        return array(0, 'Unbekannter Befehl.');
+        return array(0, bm_t('EINST.DIENST_UNBEKANNT'));
     }
     /* Waehrend einer Aktualisierung startet bin/dienst.sh ohnehin keinen
      * Dienst. Die Oberflaeche fragt trotzdem selbst: dienst.sh endet dann
@@ -1659,7 +2140,7 @@ function bm_dienst($befehl)
     }
     $skript = bm_paths()['bindir'] . '/dienst.sh';
     if (!is_file($skript)) {
-        return array(0, 'dienst.sh nicht gefunden: ' . $skript);
+        return array(0, sprintf(bm_t('EINST.DIENST_SH_FEHLT'), $skript));
     }
     $ausgabe = array();
     $code = 0;
@@ -1765,14 +2246,19 @@ function bm_befehl_absetzen($befehl, $wartezeit = null)
 
     $ordner = $p['datadir'] . '/befehle';
     if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) {
-        return array(0, 'Der Ordner fuer die Warteschlange liess sich nicht anlegen: ' . $ordner);
+        return array(0, sprintf(bm_t('DIENST.ORDNER_WARTESCHLANGE'), $ordner));
     }
     $kennung = bin2hex(random_bytes(8));
     $datei = $ordner . '/' . $kennung . '.json';
     $tmp = $datei . '.tmp';
-    if (@file_put_contents($tmp, json_encode($befehl)) === false || !@rename($tmp, $datei)) {
+    /* C11: die volle Laenge zaehlt, nicht "nicht false". Ein gekuerzt
+     * geschriebener Befehl galt bis 0.9.29 als abgelegt und bekam nach der
+     * Wartezeit "Ergebnis unbekannt". Seine Nutzlast wird VOR dem Schreiben
+     * gebildet und geprueft. */
+    $js = json_encode($befehl);
+    if ($js === false || @file_put_contents($tmp, $js) !== strlen($js) || !@rename($tmp, $datei)) {
         @unlink($tmp);
-        return array(0, 'Der Befehl liess sich nicht ablegen: ' . $datei);
+        return array(0, sprintf(bm_t('DIENST.BEFEHL_NICHT_ABGELEGT'), $datei));
     }
     $antwort = $p['datadir'] . '/antworten/' . $kennung . '.json';
     for ($i = 0; $i < $wartezeit * 10; $i++) {
@@ -1784,7 +2270,7 @@ function bm_befehl_absetzen($befehl, $wartezeit = null)
         }
         usleep(100000);
     }
-    return array(2, 'Eingereiht, aber der Dienst hat innerhalb von ' . $wartezeit . ' s nicht geantwortet.');
+    return array(2, sprintf(bm_t('DIENST.KEINE_ANTWORT'), $wartezeit));
 }
 
 /* ---------------- Verlauf ---------------- */
@@ -2700,6 +3186,44 @@ function bm_mqtt_zustand()
  * Drei Ausgaenge, nicht zwei: ist die Fassung nicht feststellbar, werden
  * BEIDE Faelle genannt statt einer behauptet.
  */
+/**
+ * Die Abo-Datei des MQTT-Gateways: config/plugins/<ordner>/mqtt_subscriptions.cfg
+ * mit einer Zeile "<praefix>/#" (M4, Durchgang 29.09.2026).
+ *
+ * Das Gateway V1 liest diese Datei jedes installierten Plugins und abonniert
+ * daraus, beim Start und bei jeder Aenderung (Regeln/07, am Geraet belegt
+ * 13.09.2026, Midea2Lox). Bis 0.9.29 lieferte dieses Plugin keine; unter V1
+ * kam ohne einen Eintrag von Hand am Miniserver nichts an, und nach einem
+ * Praefixwechsel musste er neu gemacht werden. Mitgeliefert wird
+ * "batteriebms/#"; beim Dienststart und beim Speichern des Praefixes wird sie
+ * nachgefuehrt, NUR wenn sie abweicht (Bauart Einspeisebremse 0.9.20). Ob
+ * Gateway V2 die Datei liest, ist NICHT gemessen.
+ *
+ * Rueckgabe array(pfad, steht das Praefix darin?).
+ */
+function bm_abo_datei($praefix, $schreiben = false)
+{
+    $p = bm_paths();
+    $pfad = $p['configdir'] . '/mqtt_subscriptions.cfg';
+    $pr = bm_mqtt_thema_saeubern((string) $praefix);
+    if ($pr === '') {
+        $pr = 'batteriebms';
+    }
+    $soll = $pr . '/#';
+    $roh = is_readable($pfad) ? (string) @file_get_contents($pfad) : '';
+    $da = in_array($soll, array_map('trim', preg_split('/\r?\n/', $roh)), true);
+    if ($schreiben && $p['home'] !== '' && $roh !== $soll . "\n" && is_dir($p['configdir'])) {
+        if (bm_datei_schreiben($pfad, $soll . "\n", 0644)) {
+            bm_log('MQTT: Abo-Datei des Gateways gesetzt: ' . $soll . ' (' . $pfad . ').');
+            $da = true;
+        } else {
+            bm_log_gebremst('abo_datei', 'MQTT: die Abo-Datei ' . $pfad . ' liess sich nicht '
+                . 'schreiben - unter Gateway V1 muss das Abo ' . $soll . ' von Hand eingetragen werden.');
+        }
+    }
+    return array($pfad, $da);
+}
+
 function bm_abo_text()
 {
     $m = bm_mqtt_zustand();
@@ -2772,7 +3296,11 @@ function bm_mqtt_je_retained($thema)
  */
 function bm_mqtt_behalten_fragen(array $themen)
 {
-    $aus = array('lage' => 'unbekannt', 'belegt' => array());
+    /* M5 (Durchgang 29.09.2026): 'grund' sagt im Klartext, WARUM die
+     * Rueckfrage scheiterte. Bis 0.9.29 ergaben CONNACK 5, ein abgelehntes
+     * Abonnement und ein geschlossener Port wortgleich dieselbe
+     * Protokollzeile (gemessen, Faelle F7 bis F9). */
+    $aus = array('lage' => 'unbekannt', 'belegt' => array(), 'grund' => '');
     $soll = array();
     foreach ($themen as $t) {
         if ((string) $t !== '') {
@@ -2785,6 +3313,7 @@ function bm_mqtt_behalten_fragen(array $themen)
     }
     $m = bm_mqtt_zustand();
     if (!$m['gefunden']) {
+        $aus['grund'] = 'in der general.json steht kein MQTT-Abschnitt';
         return $aus;
     }
     $host = trim((string) $m['broker']);
@@ -2797,6 +3326,8 @@ function bm_mqtt_behalten_fragen(array $themen)
     }
     $s = @stream_socket_client('tcp://' . $host . ':' . $port, $errno, $errstr, 2);
     if (!$s) {
+        $aus['grund'] = 'keine Verbindung zum Broker ' . $host . ':' . $port . ' ('
+            . bm_text_sauber((string) $errstr, 120) . ')';
         return $aus;
     }
     stream_set_timeout($s, 1);
@@ -2853,8 +3384,21 @@ function bm_mqtt_behalten_fragen(array $themen)
         if ($kennwort !== '') { $nutz .= $zk($kennwort); }
     }
     $kopf = $zk('MQTT') . chr(4) . chr($flags) . pack('n', 10);
-    if (@fwrite($s, chr(0x10) . $laenge(strlen($kopf . $nutz)) . $kopf . $nutz) !== false) {
+    if (@fwrite($s, chr(0x10) . $laenge(strlen($kopf . $nutz)) . $kopf . $nutz) === false) {
+        $aus['grund'] = 'CONNECT liess sich nicht senden';
+    } else {
         $ack = $paket();
+        if ($ack === null || ($ack[0] >> 4) !== 2 || strlen($ack[1]) < 2) {
+            $aus['grund'] = 'der Broker hat auf CONNECT nicht geantwortet';
+        } elseif (ord($ack[1][1]) !== 0) {
+            /* Rueckgabecodes nach MQTT 3.1.1, Abschnitt 3.2.2.3. */
+            $cn = ord($ack[1][1]);
+            $ct = array(1 => 'Protokollfassung abgelehnt', 2 => 'Client-Kennung abgelehnt',
+                        3 => 'Broker nicht verfuegbar', 4 => 'Benutzername oder Kennwort falsch',
+                        5 => 'nicht autorisiert');
+            $aus['grund'] = 'CONNACK ' . $cn . ' (' . (isset($ct[$cn]) ? $ct[$cn] : 'unbekannter Code')
+                . ')' . ((string) $m['user'] === '' ? ', ohne Anmeldung' : ', mit Anmeldung');
+        }
         if ($ack !== null && ($ack[0] >> 4) === 2 && strlen($ack[1]) >= 2 && ord($ack[1][1]) === 0) {
             $sub = pack('n', 1);
             foreach (array_keys($soll) as $t) {
@@ -2876,12 +3420,18 @@ function bm_mqtt_behalten_fragen(array $themen)
                        Faelle S3, S4, S7, S9, S11). Bauart bw_mqtt_behalten_liste(),
                        Beschattungswaechter 0.9.21. */
                     $rc = (string) substr($pk[1], 2);
-                    if (strlen($rc) !== count($soll)) { break; }
+                    if (strlen($rc) !== count($soll)) {
+                        $aus['grund'] = 'SUBACK mit ' . strlen($rc) . ' statt ' . count($soll) . ' Rueckgabecodes';
+                        break;
+                    }
                     $abgelehnt = false;
                     for ($i = 0; $i < strlen($rc); $i++) {
                         if (ord($rc[$i]) >= 0x80) { $abgelehnt = true; }
                     }
-                    if ($abgelehnt) { break; }
+                    if ($abgelehnt) {
+                        $aus['grund'] = 'SUBACK: der Broker hat das Abonnement abgelehnt (0x80, etwa durch eine ACL)';
+                        break;
+                    }
                     $bestaetigt = true;
                     // Zurueckbehaltenes kommt unmittelbar nach dem SUBACK.
                     $ende = min($ende, microtime(true) + 1.0);
@@ -2897,6 +3447,8 @@ function bm_mqtt_behalten_fragen(array $themen)
             }
             if ($bestaetigt) {
                 $aus['lage'] = 'ok';
+            } elseif ($aus['grund'] === '') {
+                $aus['grund'] = 'der Broker hat das Abonnement nicht bestaetigt';
             }
         }
         @fwrite($s, chr(0xE0) . chr(0));
@@ -2942,12 +3494,27 @@ function bm_mqtt_altlast_pruefen($praefix, array $themen)
     if (!$offen) {
         return array();
     }
+    /* M5 (Durchgang 29.09.2026): Scheitert die Rueckfrage, ging bis 0.9.29
+     * in JEDEM Takt je Thema eine leere retain-Nutzlast hinaus (gemessen:
+     * 12 je Minute bei Takt 5 s). Jetzt hoechstens ein Versuch je Stunde:
+     * Rueckfrage und - nur wenn sie scheitert - einmal abraeumen. Der Merker
+     * haengt weiter allein an der Bestaetigung des Brokers. */
+    $versuch = bm_paths()['datadir'] . '/.mqtt_rueckfrage_versuch';
+    $zuletzt = is_file($versuch) ? (int) trim((string) @file_get_contents($versuch)) : 0;
+    if ($zuletzt > 0 && $zuletzt <= time() && time() - $zuletzt < 3600) {
+        return array();
+    }
     $f = bm_mqtt_behalten_fragen(array_values($offen));
     if ($f['lage'] !== 'ok') {
+        @file_put_contents($versuch, time() . "\n");
         bm_log_gebremst('mqtt_rueckfrage', 'MQTT: der Broker liess sich nicht befragen, ob unter '
-            . implode(', ', $offen) . ' noch ein zurueckbehaltener Wert einer Vorfassung steht. '
-            . 'Er wird deshalb bei jedem Senden geloescht, bis der Broker antwortet.');
+            . implode(', ', $offen) . ' noch ein zurueckbehaltener Wert einer Vorfassung steht ('
+            . ($f['grund'] !== '' ? $f['grund'] : 'ohne Angabe') . '). '
+            . 'Er wird jetzt einmal geloescht; der naechste Versuch folgt fruehestens in einer Stunde.');
         return array_fill_keys(array_keys($offen), true);
+    }
+    if (is_file($versuch)) {
+        @unlink($versuch);
     }
     $raeumen = array();
     $neu = array();
@@ -2986,27 +3553,47 @@ function bm_mqtt_altlast_pruefen($praefix, array $themen)
  * fuer jede Speichernummer aus der Konfiguration (jeder Eintrag, auch ein
  * unvollstaendiger) und aus dem letzten Abbild (loxone.json).
  */
-function bm_mqtt_leer_themen()
+function bm_mqtt_leer_themen($auswahl = null)
 {
+    /* M3 (Durchgang 29.09.2026): $auswahl waehlt einen Teil aus, statt alles
+     * zu leeren - array('geraete' => array(nr, ...), 'evcc' => bool,
+     * 'allgemein' => bool). null heisst wie bisher: alles (Deinstallation,
+     * Praefixwechsel, MQTT aus). */
     $p = bm_paths();
     $cfg = bm_config();
     $nummern = array();
-    $n = (isset($cfg['geraete']) && is_array($cfg['geraete'])) ? count($cfg['geraete']) : 0;
-    for ($i = 1; $i <= $n; $i++) {
-        $nummern[$i] = true;
-    }
-    $lox = bm_json_lesen($p['datadir'] . '/loxone.json');
-    if (isset($lox['geraete']) && is_array($lox['geraete'])) {
-        foreach (array_keys($lox['geraete']) as $nr) {
+    if (is_array($auswahl)) {
+        foreach ((isset($auswahl['geraete']) ? (array) $auswahl['geraete'] : array()) as $nr) {
             if ((int) $nr > 0) {
                 $nummern[(int) $nr] = true;
             }
         }
+    } else {
+        $n = (isset($cfg['geraete']) && is_array($cfg['geraete'])) ? count($cfg['geraete']) : 0;
+        for ($i = 1; $i <= $n; $i++) {
+            $nummern[$i] = true;
+        }
+        $lox = bm_json_lesen($p['datadir'] . '/loxone.json');
+        if (isset($lox['geraete']) && is_array($lox['geraete'])) {
+            foreach (array_keys($lox['geraete']) as $nr) {
+                if ((int) $nr > 0) {
+                    $nummern[(int) $nr] = true;
+                }
+            }
+        }
     }
+    $mit_evcc = !is_array($auswahl) || !empty($auswahl['evcc']);
+    $mit_allgemein = !is_array($auswahl) || !empty($auswahl['allgemein']);
     $themen = array();
     foreach (array_keys(bm_mqtt_themen()) as $st) {
         if (strpos($st, '/M/') !== false) {
             continue;       // Modul- und Zellthemen gingen nie retained hinaus
+        }
+        if (strncmp($st, 'evcc/', 5) === 0 && !$mit_evcc) {
+            continue;
+        }
+        if (strncmp($st, 'evcc/', 5) !== 0 && strncmp($st, 'geraetN/', 8) !== 0 && !$mit_allgemein) {
+            continue;
         }
         if (strncmp($st, 'geraetN/', 8) === 0) {
             foreach (array_keys($nummern) as $nr) {
@@ -3039,14 +3626,20 @@ function bm_mqtt_leer_themen()
  * steht noch etwas bzw. Senden gescheitert, 2 nicht moeglich.
  * Bauart ZendureSolarFlow 0.9.26, zd_mqtt_leeren().
  */
-function bm_mqtt_leeren($runden = 3, $pause = 1.0)
+function bm_mqtt_leeren($runden = 3, $pause = 1.0, $praefix = null, $auswahl = null)
 {
     if (bm_paths()['home'] === '') {
         echo "<INFO> MQTT: keine LoxBerry-Wurzel - zurueckbehaltene Themen wurden nicht geleert.\n";
         return 2;
     }
-    $cfg = bm_config();
-    $praefix = bm_mqtt_thema_saeubern((string) $cfg['mqtt_topic']);
+    /* M3: ein anderes Praefix als das eingestellte (das alte nach einem
+     * Wechsel, auch aus der Deinstallation: --mqtt-leeren --praefix=...). */
+    if ($praefix !== null && (string) $praefix !== '') {
+        $praefix = bm_mqtt_thema_saeubern((string) $praefix);
+    } else {
+        $cfg = bm_config();
+        $praefix = bm_mqtt_thema_saeubern((string) $cfg['mqtt_topic']);
+    }
     if ($praefix === '') {
         $praefix = 'batteriebms';
     }
@@ -3057,10 +3650,14 @@ function bm_mqtt_leeren($runden = 3, $pause = 1.0)
         return 2;
     }
     $offen = array();
-    foreach (bm_mqtt_leer_themen() as $t) {
+    foreach (bm_mqtt_leer_themen($auswahl) as $t) {
         $offen[] = $praefix . '/' . $t;
     }
     $n = count($offen);
+    if ($n === 0) {
+        echo "<OK> MQTT: unter " . $praefix . "/ ist nichts zu leeren.\n";
+        return 0;
+    }
     $strom = @stream_socket_client('udp://127.0.0.1:' . (int) $z['udpport'], $errno, $errstr, 2);
     if (!$strom) {
         echo "<WARNING> MQTT: der UDP-Eingang des Gateways war nicht erreichbar - "
@@ -3146,7 +3743,52 @@ function bm_mqtt_senden(array $paare, $praefix)
         }
     }
     $raeumen = $alt ? bm_mqtt_altlast_pruefen($praefix, $alt) : array();
+    /* M6 (Durchgang 29.09.2026): Aenderungsversand, Bauart Einspeisebremse.
+     * Bis 0.9.29 ging in jedem Takt der volle Satz hinaus - bei Takt 5 s und
+     * einem Speicher rund 370 Datagramme je Minute an einen UDP-Eingang, der
+     * unter Last verwirft (Regeln/07). Jetzt:
+     *   - ein Wert geht nur hinaus, wenn er sich gegen den zuletzt gesendeten
+     *     geaendert hat,
+     *   - der volle Satz hoechstens alle 10 min (und nach jedem Dienststart,
+     *     Praefixwechsel oder Speichern, weil dann der Merker fehlt),
+     *   - das Lebenszeichen ts und geraetN/ts hoechstens alle 30 s,
+     *   - Modul- und Zellwerte nur bei Aenderung oder im vollen Satz.
+     * Der Merker liegt im Datenordner (mqtt_letzte.json); fehlt er oder
+     * taugt er nicht, geht der volle Satz hinaus. */
+    $jetzt = time();
+    $mdatei = bm_paths()['datadir'] . '/mqtt_letzte.json';
+    $merk = bm_json_lesen($mdatei);
+    if (!is_array($merk) || !isset($merk['_praefix'], $merk['_voll'], $merk['werte'])
+        || !is_array($merk['werte']) || (string) $merk['_praefix'] !== (string) $praefix) {
+        $merk = array('_praefix' => (string) $praefix, '_voll' => 0, '_ts' => 0, 'werte' => array());
+    }
+    $voll = ($jetzt - (int) $merk['_voll'] >= 600) || (int) $merk['_voll'] > $jetzt;
+    $ts_faellig = $voll || ($jetzt - (int) (isset($merk['_ts']) ? $merk['_ts'] : 0) >= 30)
+        || (int) (isset($merk['_ts']) ? $merk['_ts'] : 0) > $jetzt;
+    $ts_gesendet = false;
     foreach ($paare as $k => $v) {
+        $k = (string) $k;
+        $vorab = bm_mqtt_nutzlast($k, $v);
+        if ($vorab === null) {
+            // Fehlt der Wert, merkt sich der Versand nichts: kommt derselbe
+            // Wert zurueck, geht er wieder hinaus.
+            unset($merk['werte'][$k]);
+            continue;
+        }
+        $teile = explode('/', $k);
+        $ist_ts = (end($teile) === 'ts');
+        if (!$voll && !isset($raeumen[$k])) {
+            if ($ist_ts && !$ts_faellig) {
+                continue;
+            }
+            if (!$ist_ts && array_key_exists($k, $merk['werte']) && $merk['werte'][$k] === $vorab) {
+                continue;
+            }
+        }
+        $merk['werte'][$k] = $vorab;
+        if ($ist_ts) {
+            $ts_gesendet = true;
+        }
         // Der UDP-Eingang des Gateways wertet einen Zeilenumbruch als Ende
         // des Befehls. Ein mehrzeiliger Wert - etwa eine Fehlermeldung des
         // Betriebssystems oder die Ausgabe von stty - zerlegt die Uebertragung
@@ -3193,7 +3835,120 @@ function bm_mqtt_senden(array $paare, $praefix)
         usleep(BM_MQTT_PAUSE_US);
     }
     socket_close($s);
+    // Was in diesem Satz nicht vorkam, geht beim Wiederkommen wieder hinaus.
+    $merk['werte'] = array_intersect_key($merk['werte'], $paare);
+    if ($voll) {
+        $merk['_voll'] = $jetzt;
+    }
+    if ($ts_gesendet) {
+        $merk['_ts'] = $jetzt;
+    }
+    $mjson = json_encode($merk);
+    if (!is_string($mjson) || !bm_datei_schreiben($mdatei, $mjson, 0644)) {
+        @unlink($mdatei);   // lieber beim naechsten Mal den vollen Satz
+        bm_log_gebremst('mqtt_letzte', 'MQTT: der Merker ' . $mdatei . ' liess sich nicht schreiben - '
+            . 'beim naechsten Takt geht wieder der volle Satz hinaus.');
+    }
     return true;
+}
+
+/**
+ * M6: den Merker des Aenderungsversands verwerfen - der naechste Takt sendet
+ * den vollen Satz (Dienststart, Speichern der Einstellungen, Praefixwechsel).
+ */
+function bm_mqtt_voll_senden()
+{
+    $d = bm_paths()['datadir'] . '/mqtt_letzte.json';
+    if (is_file($d)) {
+        @unlink($d);
+    }
+}
+
+/**
+ * M3 (Durchgang 29.09.2026), Entscheidung Nr. 5: nach dem Speichern abraeumen,
+ * was nicht mehr stehen darf. $alt/$neu sind die Konfiguration vor und nach
+ * dem Speichern. Vor dem Speichern ruft der Handler bm_mqtt_praefix_merken()
+ * auf, damit die Deinstallation ein verlassenes Praefix kennt.
+ *   MQTT aus                -> eigenes (bisheriges) Praefix ganz
+ *   Praefixwechsel          -> altes Praefix ganz
+ *   Speicher entfernt       -> geraetN/* der weggefallenen Nummern
+ *   EVCC aus                -> evcc/*
+ * Geraeumt wird nur, wenn vorher veroeffentlicht wurde (mqtt_ein). Rueckgabe:
+ * Liste von Klartextzeilen fuer die Einmalmeldung.
+ */
+function bm_mqtt_nachziehen(array $alt, array $neu)
+{
+    $aus = array();
+    $geraeumt = false;
+    if (empty($alt['mqtt_ein'])) {
+        return $aus;
+    }
+    $p_alt = bm_mqtt_thema_saeubern((string) $alt['mqtt_topic']);
+    $p_neu = bm_mqtt_thema_saeubern((string) $neu['mqtt_topic']);
+    if (empty($neu['mqtt_ein'])) {
+        list($rc, $t) = bm_mqtt_abraeumen($p_alt, null, 'MQTT aus');
+        $aus[] = sprintf(bm_t('MQTT.GERAEUMT_AUS'), bm_e($p_alt)) . ' ' . bm_e($t);
+        $geraeumt = true;
+    } elseif ($p_alt !== $p_neu) {
+        list($rc, $t) = bm_mqtt_abraeumen($p_alt, null, 'Praefixwechsel');
+        $aus[] = sprintf(bm_t('MQTT.GERAEUMT_PRAEFIX'), bm_e($p_alt), bm_e($p_neu)) . ' ' . bm_e($t);
+        $geraeumt = true;
+    } else {
+        $n_alt = is_array($alt['geraete']) ? count($alt['geraete']) : 0;
+        $n_neu = is_array($neu['geraete']) ? count($neu['geraete']) : 0;
+        $weg = array();
+        for ($i = $n_neu + 1; $i <= $n_alt; $i++) {
+            $weg[] = $i;
+        }
+        $evcc_aus = !empty($alt['evcc_ein']) && empty($neu['evcc_ein']);
+        if ($weg || $evcc_aus) {
+            list($rc, $t) = bm_mqtt_abraeumen($p_alt,
+                array('geraete' => $weg, 'evcc' => $evcc_aus, 'allgemein' => false),
+                'Speicher entfernt/EVCC aus');
+            if ($weg) {
+                $aus[] = sprintf(bm_t('MQTT.GERAEUMT_GERAETE'), implode(', ', $weg)) . ' ' . bm_e($t);
+            }
+            if ($evcc_aus) {
+                $aus[] = bm_t('MQTT.GERAEUMT_EVCC') . ($weg ? '' : ' ' . bm_e($t));
+            }
+            $geraeumt = true;
+        }
+    }
+    if ($geraeumt) {
+        bm_mqtt_voll_senden();
+    }
+    return $aus;
+}
+
+/** M3: beim Praefixwechsel das verlassene Praefix in der Konfiguration merken. */
+function bm_mqtt_praefix_merken(array $alt, array &$neu)
+{
+    $p_alt = bm_mqtt_thema_saeubern((string) $alt['mqtt_topic']);
+    $p_neu = bm_mqtt_thema_saeubern((string) $neu['mqtt_topic']);
+    if ($p_alt !== '' && $p_alt !== $p_neu) {
+        $neu['mqtt_praefix_alt'] = $p_alt;
+    }
+}
+
+/**
+ * M3 (Durchgang 29.09.2026): aus dem Formular-Handler abraeumen, was nach
+ * Entscheidung Nr. 5 nicht mehr stehen darf. Gibt array(rc, text) zurueck;
+ * die Ausgabe von bm_mqtt_leeren() geht ins Protokoll statt auf die Seite.
+ */
+function bm_mqtt_abraeumen($praefix, $auswahl, $anlass)
+{
+    ob_start();
+    $rc = bm_mqtt_leeren(3, 1.0, $praefix, $auswahl);
+    $aus = (string) ob_get_clean();
+    $zeilen = array();
+    foreach (preg_split('/\r?\n/', trim($aus)) as $z) {
+        $z = trim(preg_replace('/^<[A-Z]+>\s*/', '', (string) $z));
+        if ($z !== '') {
+            $zeilen[] = $z;
+        }
+    }
+    bm_log('MQTT abraeumen (' . $anlass . '): ' . implode(' / ', $zeilen));
+    return array($rc, implode(' ', $zeilen));
 }
 
 /**
@@ -3279,9 +4034,13 @@ function bm_mqtt_thema_saeubern($t)
  * EVCC-Geraet. Der Reiter Test rechnet die Paare nur zum Ansehen nach, und
  * eine Pruefung darf nichts schreiben.
  */
-function bm_mqtt_paare(array $abbild, $melden = true)
+function bm_mqtt_paare(array $abbild, $melden = true, $cfg = null)
 {
-    $cfg = bm_config();
+    // $cfg nur fuer die Selbstpruefung (Themenliste gegen Sendecode, O5):
+    // dort wird mit eingeschaltetem EVCC gerechnet, ohne etwas zu speichern.
+    if (!is_array($cfg)) {
+        $cfg = bm_config();
+    }
     $geraete = (isset($abbild['geraete']) && is_array($abbild['geraete']))
         ? $abbild['geraete'] : array();
     $paare = array(
@@ -3871,6 +4630,17 @@ function bm_trockenlauf($nr, $aktion, $watt)
     $z = array();
     $z[] = sprintf(bm_t('TROCKEN.KOPF'), $g['name'], $g['profil'], $aktion, (int) $watt);
     $z[] = '';
+    /* O8 (Durchgang 29.09.2026): "laden 0 W" und "entladen 0 W" gibt der
+     * Dienst als Automatik weiter (bm_befehl_ausfuehren(), 0 Watt heisst Regie
+     * zurueckgeben). Bis 0.9.29 zeigte der Trockenlauf hier die Schritte von
+     * "laden" mit 0 W - eine Schrittfolge, die nie gefahren wird. Die
+     * Ruecknahme haengt an keiner Freigabe (C3), deshalb keine Sperren. */
+    $null_automatik = ($aktion === 'laden' || $aktion === 'entladen') && (int) $watt === 0;
+    if ($null_automatik) {
+        $z[] = bm_t('TROCKEN.NULL_AUTOMATIK');
+        $z[] = '';
+    }
+    if (!$null_automatik) {
     $z[] = bm_t('TROCKEN.SPERREN');
     $z[] = '  ' . (!empty($cfg['steuerung_ein']) ? '[OK]  ' : '[HALT]') . ' '
          . bm_t('TROCKEN.S_GLOBAL');
@@ -3889,12 +4659,13 @@ function bm_trockenlauf($nr, $aktion, $watt)
     } else {
         $z[] = '  [?]   ' . bm_t('TROCKEN.S_FENSTER_UNBEKANNT');
     }
+    }
     if ($g['transport'] === 'pylontech_rs485') {
         $z[] = '  [HALT] ' . bm_t('DIENST.STEUERUNG_SERIELL');
     }
     $z[] = '';
     $st = isset($pr['steuerung']) && is_array($pr['steuerung']) ? $pr['steuerung'] : array();
-    $wirk = $aktion;
+    $wirk = $null_automatik ? 'automatik' : $aktion;
     $wwatt = (int) $watt;
     if ($aktion === 'sperren' && !isset($st['sperren']['schritte'])) {
         $wirk = 'entladen';
@@ -3962,7 +4733,11 @@ function bm_selbsttest_endpunkt($aktion = 'status')
         $text = (string) curl_exec($ch);
         $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $fehler = curl_error($ch);
-        curl_close($ch);
+        // C11: curl_close() tut seit PHP 8.0 nichts mehr und ist in 8.5
+        // verfallen; nur noch unter 7.x rufen.
+        if (PHP_VERSION_ID < 80000) {
+            curl_close($ch);
+        }
         if ($code === 0) {
             return array(-1, 0, $fehler !== '' ? $fehler : bm_t('TEST.A_EP_KEINE_ANTWORT'), $url);
         }
@@ -3971,8 +4746,17 @@ function bm_selbsttest_endpunkt($aktion = 'status')
             'ignore_errors' => true)));
         $text = (string) @file_get_contents($url, false, $ctx);
         $code = 0;
-        if (isset($http_response_header[0])
-            && preg_match('#HTTP/\S+\s+(\d{3})#', $http_response_header[0], $m)) {
+        /* C11: die vordefinierte Variable der Antwortkopfzeilen ist in PHP 8.5
+         * verfallen (php8.5 -l meldete es fuer diese Stelle). Ab 8.4 gibt es
+         * http_get_last_response_headers(); darunter wird die Variable ueber
+         * get_defined_vars() gelesen, ohne ihren Namen im Quelltext zu
+         * nennen. Ausgewertet wird wie bisher die erste Zeile. */
+        $bm_kopf = function_exists('http_get_last_response_headers')
+            ? http_get_last_response_headers()
+            : (isset(get_defined_vars()['http_response_header'])
+               ? get_defined_vars()['http_response_header'] : null);
+        if (is_array($bm_kopf) && isset($bm_kopf[0])
+            && preg_match('#HTTP/\S+\s+(\d{3})#', (string) $bm_kopf[0], $m)) {
             $code = (int) $m[1];
         }
         if ($code === 0) {
@@ -4015,14 +4799,21 @@ function bm_x($s)
 
 function bm_xml_virtual_in_http($kopf, $cmds)
 {
+    /* O11 (Durchgang 29.09.2026): Form der Weissware-Ausfuhr
+     * (XML_Vorlagen_0.9.10/VI_weissware_*.xml, aus Loxone Config exportiert):
+     * HintText an Wurzel und Befehl, <Info templateType="2">, Unit je Befehl.
+     * Regeln/07: "Unit ist Pflicht". Signed, Skalierung und Grenzen bleiben,
+     * wie sie waren. */
     $crlf = "\r\n";
     $o = '<?xml version="1.0" encoding="utf-8"?>' . $crlf;
     $o .= '<VirtualInHttp ';
+    $o .= 'HintText="" ';
     $o .= 'Title="' . bm_x($kopf['title']) . '" ';
     $o .= 'Comment="' . bm_x(isset($kopf['comment']) ? $kopf['comment'] : '') . '" ';
     $o .= 'Address="' . bm_x(isset($kopf['address']) ? $kopf['address'] : '') . '" ';
     $o .= 'PollingTime="' . bm_x(isset($kopf['polling']) ? $kopf['polling'] : '60') . '"';
     $o .= '>' . $crlf;
+    $o .= "\t" . '<Info templateType="2" minVersion="17010727"/>' . $crlf;
     foreach ($cmds as $c) {
         $o .= "\t" . '<VirtualInHttpCmd ';
         $o .= 'Title="' . bm_x($c['title']) . '" ';
@@ -4038,7 +4829,9 @@ function bm_xml_virtual_in_http($kopf, $cmds)
         // Grenzen realistisch, nicht pauschal +/-2147483647: Loxone zieht
         // daraus die Reglergrenzen und die Plausibilitaetspruefung.
         $o .= 'MinVal="' . bm_x(isset($c['min']) ? $c['min'] : '-2147483647') . '" ';
-        $o .= 'MaxVal="' . bm_x(isset($c['max']) ? $c['max'] : '2147483647') . '"';
+        $o .= 'MaxVal="' . bm_x(isset($c['max']) ? $c['max'] : '2147483647') . '" ';
+        $o .= 'Unit="' . bm_x(isset($c['unit']) ? $c['unit'] : '<v.1>') . '" ';
+        $o .= 'HintText=""';
         $o .= '/>' . $crlf;
     }
     $o .= '</VirtualInHttp>' . $crlf;
@@ -4046,46 +4839,61 @@ function bm_xml_virtual_in_http($kopf, $cmds)
 }
 
 /**
+ * O11: ein Kommentar fuer Loxone Config - hoechstens 40 Zeichen (Bauliste
+ * 0.9.30, Hausstandard; nicht selbst gemessen). Gekuerzt wird an einer
+ * Wortgrenze; die ganze Bedeutung steht im Reiter "Einbindung in Loxone".
+ */
+function bm_vorlage_kommentar($text, $hoechstens = 40)
+{
+    $text = trim(preg_replace('/\s+/u', ' ', (string) $text));
+    if (function_exists('mb_strlen') ? mb_strlen($text, 'UTF-8') <= $hoechstens : strlen($text) <= $hoechstens) {
+        return $text;
+    }
+    $kurz = function_exists('mb_substr') ? mb_substr($text, 0, $hoechstens, 'UTF-8') : substr($text, 0, $hoechstens);
+    $leer = strrpos($kurz, ' ');
+    return rtrim($leer !== false && $leer > 10 ? substr($kurz, 0, $leer) : $kurz, " ,.;:-");
+}
+
+/**
  * Virtueller Ausgang.
  *
- * Attributreihenfolge und Auswahl entsprechen den geprueften Mustern aus dem
- * Arbeitsordner (VQ_KEBA_P30_UDP.xml, VQ_GOVEE_*.xml), die aus der laufenden
- * Anlage stammen: Wurzel mit Title, Comment, Address, CloseAfterSend, CmdSep;
- * Kindelement mit Title, Comment (nur wenn gesetzt), CmdOn, CmdOff (nur wenn
- * gesetzt), Analog.
- *
- * BEWUSST NICHT gesetzt: CmdOnMethod und CmdOffMethod. In keinem der
- * geprueften Muster kommen sie vor - beide sind UDP-Ausgaenge. Ob Loxone
- * Config sie bei einem HTTP-Ausgang braucht, ist hier nicht geprueft worden;
- * im Zweifel gilt die Datei, nicht die Erinnerung. Nach dem Import deshalb
- * einmal nachsehen, ob als Methode GET eingetragen ist. Der Hinweis steht
- * auch im Reiter Einbindung in Loxone.
+ * O11 (Durchgang 29.09.2026): Form der Weissware-Ausfuhr
+ * (XML_Vorlagen_0.9.10/VQ_weissware_*.xml, aus Loxone Config exportiert):
+ * HintText, CmdInit, <Info templateType="3">, je Befehl CmdOnMethod und
+ * CmdOffMethod (GET), Repeat und RepeatRate. Bis 0.9.29 fehlten die Methoden
+ * mit der Begruendung, in den UDP-Mustern kaemen sie nicht vor - fuer einen
+ * HTTP-Ausgang liegt mit der Weissware-Ausfuhr jetzt ein Muster vor.
+ * CloseAfterSend und Analog bleiben, wie sie waren.
  */
 function bm_xml_virtual_out($kopf, $cmds)
 {
     $crlf = "\r\n";
     $o = '<?xml version="1.0" encoding="utf-8"?>' . $crlf;
     $o .= '<VirtualOut ';
+    $o .= 'HintText="" ';
     $o .= 'Title="' . bm_x($kopf['title']) . '" ';
     $o .= 'Comment="' . bm_x(isset($kopf['comment']) ? $kopf['comment'] : '') . '" ';
     $o .= 'Address="' . bm_x(isset($kopf['address']) ? $kopf['address'] : '') . '" ';
+    $o .= 'CmdInit="" ';
     $o .= 'CloseAfterSend="true" ';
     $o .= 'CmdSep=""';
     $o .= '>' . $crlf;
+    $o .= "\t" . '<Info templateType="3" minVersion="17010727"/>' . $crlf;
     foreach ($cmds as $c) {
         $o .= "\t" . '<VirtualOutCmd ';
         $o .= 'Title="' . bm_x($c['title']) . '" ';
-        if (isset($c['comment']) && $c['comment'] !== '') {
-            $o .= 'Comment="' . bm_x($c['comment']) . '" ';
-        }
+        $o .= 'Comment="' . bm_x(isset($c['comment']) ? $c['comment'] : '') . '" ';
         // Der Wertplatzhalter in einem Analogbefehl heisst <v.0>. Er wandert
         // maskiert ins Attribut - genau wie im geprueften Govee-Muster, wo aus
         // <v.0> ein &lt;v.0&gt; wird.
+        $o .= 'CmdOnMethod="GET" ';
         $o .= 'CmdOn="' . bm_x(isset($c['on']) ? $c['on'] : '') . '" ';
-        if (isset($c['off']) && $c['off'] !== '') {
-            $o .= 'CmdOff="' . bm_x($c['off']) . '" ';
-        }
-        $o .= 'Analog="' . (empty($c['analog']) ? 'false' : 'true') . '"';
+        $o .= 'CmdOffMethod="GET" ';
+        $o .= 'CmdOff="' . bm_x(isset($c['off']) ? $c['off'] : '') . '" ';
+        $o .= 'Analog="' . (empty($c['analog']) ? 'false' : 'true') . '" ';
+        $o .= 'Repeat="0" ';
+        $o .= 'RepeatRate="0" ';
+        $o .= 'HintText=""';
         $o .= '/>' . $crlf;
     }
     $o .= '</VirtualOut>' . $crlf;
@@ -4205,19 +5013,21 @@ function bm_vorlage_eingaenge($nummer = 1)
     $host = bm_hostname();
     $token = bm_token();
     $g = bm_geraet($nummer);
-    $bez = $g !== null ? $g['name'] : ('Speicher ' . (int) $nummer);
+    $bez = $g !== null ? $g['name'] : sprintf(bm_t('ALLG.SPEICHER_NAME'), (int) $nummer);
     $cmds = array();
     foreach (bm_felder_geliefert($nummer) as $feld => $info) {
         // Der Text laeuft gleich durch bm_x() und wuerde dort ein zweites Mal
         // maskiert. Deshalb erst Auszeichnung entfernen und Entitaeten
         // aufloesen - sonst stuende in Loxone Config wortwoertlich 'l&auml;dt'.
+        // O11: hoechstens 40 Zeichen, die Einheit steht in Unit.
         $bedeutung = trim(strip_tags(html_entity_decode(bm_t($info[1]), ENT_QUOTES, 'UTF-8')));
         $cmds[] = array(
             'title'   => 'BMS_' . (int) $nummer . '_' . $feld,
-            'comment' => $bedeutung . ($info[0] !== '' ? ' [' . $info[0] . ']' : ''),
+            'comment' => bm_vorlage_kommentar($bedeutung),
             'check'   => bm_check($feld),
             'min'     => (string) $info[2],
             'max'     => (string) $info[3],
+            'unit'    => '<v.1>' . ($info[0] !== '' ? ' ' . $info[0] : ''),
         );
     }
     /* Der Zwangszustand gehoert in die Importdatei.
@@ -4241,19 +5051,23 @@ function bm_vorlage_eingaenge($nummer = 1)
      * Trennzeichen setzt, traegt die Reihenfolge diese Last nicht mehr. */
     $cmds[] = array(
         'title'   => 'BMS_' . (int) $nummer . '_SOLLART',
-        'comment' => trim(strip_tags(html_entity_decode(bm_t('BM_FELD.SOLLART'),
+        'comment' => bm_vorlage_kommentar(strip_tags(html_entity_decode(bm_t('BM_FELD.SOLLART'),
                           ENT_QUOTES, 'UTF-8'))),
         'check'   => bm_check('SOLLART'),
         'min'     => '0',
-        'max'     => '3',
+        // O3: 4 = unvollstaendig (bm_sollart()); bis 0.9.29 stand hier 3,
+        // und Loxone kappte die 4 auf 3 = "gesperrt".
+        'max'     => '4',
+        'unit'    => '<v>',
     );
     $cmds[] = array(
         'title'   => 'BMS_' . (int) $nummer . '_SOLLALTER',
-        'comment' => trim(strip_tags(html_entity_decode(bm_t('BM_FELD.SOLLALTER'),
-                          ENT_QUOTES, 'UTF-8'))) . ' [s]',
+        'comment' => bm_vorlage_kommentar(strip_tags(html_entity_decode(bm_t('BM_FELD.SOLLALTER'),
+                          ENT_QUOTES, 'UTF-8'))),
         'check'   => bm_check('SOLLALTER'),
         'min'     => '-1',
         'max'     => '86400',
+        'unit'    => '<v> s',
     );
     $adresse = 'http://' . $host . '/plugins/' . $p['plugin']
              . '/index.php?token=' . $token . '&aktion=status&geraet=' . (int) $nummer;
@@ -4263,8 +5077,7 @@ function bm_vorlage_eingaenge($nummer = 1)
             'title'   => 'BMS ' . (int) $nummer . ' ' . $bez,
             'address' => $adresse,
             'polling' => '60',
-            'comment' => 'Erzeugt vom LoxBerry-Plugin Batterie-Heimspeicher (BMS), '
-                       . date('d.m.Y'),
+            'comment' => sprintf(bm_t('VORLAGE.KOPF'), date('Y-m-d')),
         ), $cmds),
     );
 }
@@ -4276,31 +5089,32 @@ function bm_vorlage_ausgang($nummer = 1)
     $host = bm_hostname();
     $token = bm_token();
     $g = bm_geraet($nummer);
-    $bez = $g !== null ? $g['name'] : ('Speicher ' . (int) $nummer);
+    $bez = $g !== null ? $g['name'] : sprintf(bm_t('ALLG.SPEICHER_NAME'), (int) $nummer);
     $basis = '/plugins/' . $p['plugin'] . '/index.php?token=' . $token;
     $n = (int) $nummer;
+    /* O11: Titel und Kommentare aus der Sprachdatei - bis 0.9.29 stand hier
+     * fest Deutsch, auch in der englischen Vorlage. Kommentare hoechstens
+     * 40 Zeichen; der ganze Satz steht im Reiter "Einbindung in Loxone". */
     $cmds = array(
-        array('title' => 'Laden erzwingen (W)', 'analog' => 1,
-              'comment' => 'Analogwert in Watt. 0 gibt die Regie zurück.',
+        array('title' => bm_t('VORLAGE.VQ_LADEN_T'), 'analog' => 1,
+              'comment' => bm_vorlage_kommentar(bm_t('VORLAGE.VQ_WATT_K')),
               'on' => $basis . '&aktion=laden&geraet=' . $n . '&watt=<v.0>', 'off' => ''),
-        array('title' => 'Entladen erzwingen (W)', 'analog' => 1,
-              'comment' => 'Analogwert in Watt. 0 gibt die Regie zurück.',
+        array('title' => bm_t('VORLAGE.VQ_ENTLADEN_T'), 'analog' => 1,
+              'comment' => bm_vorlage_kommentar(bm_t('VORLAGE.VQ_WATT_K')),
               'on' => $basis . '&aktion=entladen&geraet=' . $n . '&watt=<v.0>', 'off' => ''),
-        array('title' => 'Automatik', 'analog' => 0,
-              'comment' => 'Beendet den Zwang sofort; der Speicher regelt wieder selbst.',
+        array('title' => bm_t('VORLAGE.VQ_AUTO_T'), 'analog' => 0,
+              'comment' => bm_vorlage_kommentar(bm_t('VORLAGE.VQ_AUTO_K')),
               'on' => $basis . '&aktion=automatik&geraet=' . $n, 'off' => ''),
-        array('title' => 'Lebenszeichen', 'analog' => 0,
-              'comment' => 'Hält den Sollwert am Leben. Ohne Lebenszeichen fällt der '
-                         . 'Speicher nach der eingestellten Totmannzeit in die Automatik.',
+        array('title' => bm_t('VORLAGE.VQ_LEBEN_T'), 'analog' => 0,
+              'comment' => bm_vorlage_kommentar(bm_t('VORLAGE.VQ_LEBEN_K')),
               'on' => $basis . '&aktion=lebenszeichen&geraet=' . $n, 'off' => ''),
     );
     return array(
         'VQ_BMS_' . $n . '.xml',
         bm_xml_virtual_out(array(
-            'title'   => 'BMS ' . $n . ' ' . $bez . ' Steuerung',
+            'title'   => 'BMS ' . $n . ' ' . $bez . ' ' . bm_t('VORLAGE.VQ_STEUERUNG'),
             'address' => 'http://' . $host,
-            'comment' => 'Erzeugt vom LoxBerry-Plugin Batterie-Heimspeicher (BMS), '
-                       . date('d.m.Y'),
+            'comment' => sprintf(bm_t('VORLAGE.KOPF'), date('Y-m-d')),
         ), $cmds),
     );
 }
@@ -4451,7 +5265,9 @@ function bm_merkwort()
         fclose($fh);
         @chmod($tmp, 0600);
     }
-    if (@file_put_contents($tmp, $neu) !== false) {
+    // C11: die volle Laenge zaehlt - ein gekuerztes Merkwort galt bis 0.9.29
+    // als geschrieben, und der naechste Aufruf wuerfelte ein neues.
+    if (@file_put_contents($tmp, $neu) === strlen($neu)) {
         @chmod($tmp, 0600);
         if (@rename($tmp, $datei)) {
             @chmod($datei, 0600);

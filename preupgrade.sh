@@ -176,6 +176,10 @@ if [ -x "$DIENST" ]; then
     RC=$?
     if [ $RC -eq 0 ]; then
         echo "<INFO> dienst.sh stop: $AUSGABE"
+    elif [ $RC -eq 3 ]; then
+        # C5/I4: angehalten, aber ein Zwang blieb offen - die <WARNING> dazu
+        # folgt unten mit dem Speichernamen.
+        echo "<INFO> dienst.sh stop: $AUSGABE"
     else
         echo "<FAIL> dienst.sh stop meldete Rueckgabewert $RC: $AUSGABE"
         echo "<FAIL> Ein alter Prozess haelt moeglicherweise noch die Verbindung"
@@ -226,67 +230,142 @@ else
     fi
 fi
 
+# ---------- Offener Zwang nach dem Anhalten (I4, Durchgang 29.09.2026) ----------
+# Liegt nach "dienst.sh stop" noch eine Sollwertdatei, hat der Dienst einen
+# Zwang NICHT zuruecknehmen koennen (Speicher antwortet nicht). Bis 0.9.29
+# ging sie mit dem Datenordner verloren (purge_installation), und der neue
+# Dienst wusste nichts mehr davon (gemessen, Faelle u5, u5b, u6). Jetzt wird
+# sie mitgesichert (unten), und diese Zeile nennt den Speicher.
+PDATA="$BASE/data/plugins/$PFOLDER"
+CF="$BASE/config/plugins/$PFOLDER/batteriebms.json"
+bm_zwang_klartext() {
+    set -- "$PDATA"/soll_geraet*.json
+    [ -e "$1" ] || return 0
+    if command -v php >/dev/null 2>&1; then
+        php -r '$g = json_decode((string) @file_get_contents($argv[2]), true); $t = array();
+            foreach ((array) glob($argv[1] . "/soll_geraet*.json") as $f) {
+                if (!preg_match("/soll_geraet([0-9]{1,3})\.json$/", $f, $m)) { continue; }
+                $n = (int) $m[1];
+                $s = json_decode((string) @file_get_contents($f), true);
+                $name = "";
+                if (is_array($s) && isset($s["anschrift"]["name"]) && is_string($s["anschrift"]["name"])) {
+                    $name = $s["anschrift"]["name"];
+                } elseif (is_array($g) && isset($g["geraete"][$n - 1]["name"]) && is_string($g["geraete"][$n - 1]["name"])) {
+                    $name = $g["geraete"][$n - 1]["name"];
+                }
+                $a = (is_array($s) && isset($s["aktion"]) && is_string($s["aktion"])) ? $s["aktion"] : "?";
+                $name = preg_replace("/[\\x00-\\x1F\\x7F]/", "", $name);
+                $t[] = ($name !== "" ? $name . " " : "") . "(Speicher " . $n . ", " . $a . ")";
+            }
+            echo implode(", ", $t);' "$PDATA" "$CF" 2>/dev/null && return 0
+    fi
+    for f in "$@"; do printf '%s ' "${f##*/}"; done
+}
+ZWANG_OFFEN=$(bm_zwang_klartext)
+if [ -n "$ZWANG_OFFEN" ]; then
+    echo "<WARNING> Zwang NICHT zurueckgenommen: $ZWANG_OFFEN. Der Speicher steht moeglicherweise"
+    echo "<WARNING> noch im Lade- oder Entladezwang - bitte am Geraet pruefen. Der Sollwert wird"
+    echo "<WARNING> gesichert, und der Dienst nach dem Update versucht die Ruecknahme erneut."
+fi
+
 # ---------- Konfiguration sichern ----------
 # B27: bis 0.9.15 wurde der Rueckgabewert von cp nicht geprueft und danach
 # bedingungslos "<OK>" gemeldet. Scheitert das Kopieren (volle Platte,
 # Rechte), ist die gesamte Konfiguration weg - Geraete, Adressen,
 # Aktionstoken - und im Installationsprotokoll steht, alles sei in Ordnung.
+#
+# I2 (Durchgang 29.09.2026): VOR dem Sichern den Inhalt pruefen, wie
+# postinstall.sh vor dem Zurueckspielen (bm_hat_inhalt). Bis 0.9.29
+# ueberschrieb eine beschaedigte Konfiguration die gute Zweitschrift - die
+# einzige heilbare Rueckfallkopie (gemessen, Fall u3). Taugt die
+# Konfiguration nicht, bleibt die Zweitschrift stehen, und das Bruchstueck
+# geht nach .backup.kaputt.
+#
+# I3: die Sicherung wird NEBEN ihrem Platz gebaut (.neu), geprueft und erst
+# dann per mv ersetzt (Regeln/06). Bis 0.9.29 schrieb cp -p unmittelbar auf
+# die bisherige Zweitschrift. Ein Abbruch endet mit exit 2: plugininstall.pl
+# bricht erst bei einem Rueckgabewert groesser 1 VOR purge_installation ab
+# (:856-866); mit exit 1 wurde trotzdem abgeraeumt (Fall u8).
+bm_hat_inhalt() {
+    command -v php >/dev/null 2>&1 || return 1
+    php -r '$d = json_decode((string) @file_get_contents($argv[1]), true);
+            exit(is_array($d) && isset($d["aktionstoken"]) && is_string($d["aktionstoken"])
+                 && preg_match("/^[A-Za-z0-9_.\-]{1,64}\z/", $d["aktionstoken"]) ? 0 : 1);' "$1" 2>/dev/null
+}
 FEHLER=0
-CF="$BASE/config/plugins/$PFOLDER/batteriebms.json"
 BK="$BASE/config/plugins/$PFOLDER.backup.json"
 if [ -f "$CF" ]; then
-    if cp -p "$CF" "$BK"; then
-        chmod 600 "$BK" 2>/dev/null
-        A=$(wc -c < "$CF" 2>/dev/null)
-        B=$(wc -c < "$BK" 2>/dev/null)
-        # Nach INHALT verglichen, nicht nach Groesse (Muster 9 der Nachlese
-        # vom 24.09.2026). Bis 0.9.27 genuegte gleiche Laenge - gelesen,
-        # nicht gemessen.
-        if cmp -s "$CF" "$BK"; then
-            echo "<OK> Konfiguration gesichert ($A Byte)."
+    A=$(wc -c < "$CF" 2>/dev/null)
+    if ! bm_hat_inhalt "$CF"; then
+        if ( umask 077; cp "$CF" "$BK.kaputt" ) 2>/dev/null; then
+            KAPUTT=" Das Bruchstueck liegt unter $BK.kaputt."
         else
-            echo "<FAIL> Die Sicherung der Konfiguration ist unvollstaendig"
-            echo "<FAIL> ($A Byte gelesen, $B Byte geschrieben). Das Update wird"
-            echo "<FAIL> abgebrochen, damit die Einstellungen nicht verlorengehen."
-            FEHLER=1
+            KAPUTT=""
+        fi
+        if [ -f "$BK" ] && bm_hat_inhalt "$BK"; then
+            echo "<WARNING> Die Konfiguration traegt keinen gueltigen Inhalt (kein lesbares JSON mit"
+            echo "<WARNING> Aktionstoken, $A Byte). Die bisherige Zweitschrift bleibt stehen und wird"
+            echo "<WARNING> nach dem Update zurueckgespielt.$KAPUTT"
+        else
+            echo "<WARNING> Die Konfiguration traegt keinen gueltigen Inhalt ($A Byte), und es gibt"
+            echo "<WARNING> keine brauchbare Zweitschrift - nach dem Update muessen die Speicher neu"
+            echo "<WARNING> eingetragen werden.$KAPUTT"
         fi
     else
-        echo "<FAIL> Die Konfiguration liess sich NICHT sichern ($CF)."
-        echo "<FAIL> Das Update wird abgebrochen - der Installer wuerde"
-        echo "<FAIL> config/plugins/$PFOLDER/ sonst gleich abraeumen."
-        FEHLER=1
+        rm -f "$BK.neu"
+        if ( umask 077; cp "$CF" "$BK.neu" ) 2>/dev/null && cmp -s "$CF" "$BK.neu" \
+           && chmod 600 "$BK.neu" 2>/dev/null && mv -fT "$BK.neu" "$BK" 2>/dev/null && cmp -s "$CF" "$BK"; then
+            echo "<OK> Konfiguration gesichert ($A Byte)."
+        else
+            rm -f "$BK.neu"
+            echo "<FAIL> Die Konfiguration liess sich NICHT vollstaendig sichern ($CF)."
+            echo "<FAIL> Die bisherige Zweitschrift bleibt unveraendert. Das Update wird"
+            echo "<FAIL> abgebrochen - der Installer wuerde config/plugins/$PFOLDER/ sonst abraeumen."
+            FEHLER=1
+        fi
     fi
 fi
 
-# ---------- Eigene Profile und Verlauf sichern ----------
-# Beides liegt unter data/plugins/<ordner>/ und wird vom Installer bei JEDEM
+# ---------- Eigene Profile, Verlauf und offene Sollwerte sichern ----------
+# Alles liegt unter data/plugins/<ordner>/ und wird vom Installer bei JEDEM
 # Upgrade abgeraeumt. Bis 0.9.15 stand nur die Konfigurations-JSON auf der
 # Liste: hochgeladene Profile und der ganze Verlauf waren nach einer
 # Aktualisierung weg, und kein Text sagte es dem Anwender. Schlimmer noch,
 # die mitgelieferte Beispieldatei wird neu ausgeliefert - der Ordner sieht
 # hinterher heil aus.
-PDATA="$BASE/data/plugins/$PFOLDER"
+# I4: dazu die offenen Sollwerte und die Nachholauftraege.
 DBK="$BASE/config/plugins/$PFOLDER.backup.daten.tar"
-rm -f "$DBK"
 TEILE=""
 [ -d "$PDATA/profile" ] && TEILE="$TEILE profile"
 [ -d "$PDATA/verlauf" ] && TEILE="$TEILE verlauf"
+for f in "$PDATA"/soll_geraet*.json "$PDATA"/nachhol_geraet*.json; do
+    [ -f "$f" ] && TEILE="$TEILE ${f##*/}"
+done
 if [ -n "$TEILE" ]; then
-    if ( cd "$PDATA" && tar cf "$DBK" $TEILE ) 2>/dev/null; then
-        chmod 600 "$DBK" 2>/dev/null
+    rm -f "$DBK.neu"
+    if ( umask 077; cd "$PDATA" && tar cf "$DBK.neu" $TEILE ) 2>/dev/null \
+       && tar tf "$DBK.neu" >/dev/null 2>&1 && chmod 600 "$DBK.neu" 2>/dev/null \
+       && mv -fT "$DBK.neu" "$DBK" 2>/dev/null && [ -f "$DBK" ]; then
         ZAHL=$(tar tf "$DBK" 2>/dev/null | grep -c '[^/]$')
-        echo "<OK> Eigene Profile und Verlauf gesichert ($ZAHL Datei(en):$TEILE)."
+        echo "<OK> Eigene Profile, Verlauf und offene Sollwerte gesichert ($ZAHL Datei(en):$TEILE)."
     else
-        echo "<FAIL> Profile und Verlauf liessen sich nicht sichern ($DBK)."
+        rm -f "$DBK.neu"
+        echo "<FAIL> Profile, Verlauf und offene Sollwerte liessen sich nicht sichern ($DBK)."
         echo "<FAIL> Sie wuerden beim Update verlorengehen - Abbruch."
         FEHLER=1
     fi
 else
-    echo "<INFO> Keine eigenen Profile und kein Verlauf vorhanden."
+    rm -f "$DBK"
+    echo "<INFO> Keine eigenen Profile, kein Verlauf und kein offener Sollwert vorhanden."
 fi
 
 if [ $FEHLER -ne 0 ]; then
-    exit 1
+    exit 2
+fi
+if [ -n "$ZWANG_OFFEN" ]; then
+    # I4: mit offenem Zwang kein <OK> - die <WARNING> oben ist die Aussage.
+    echo "<INFO> preupgrade beendet - mit offenem Zwang (siehe <WARNING> oben)."
+    exit 0
 fi
 echo "<OK> preupgrade abgeschlossen."
 exit 0

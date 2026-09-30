@@ -10,6 +10,76 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.30
+
+Durchgang vom 30.09.2026 mit vier Prüfern (Code, Oberfläche, Installer,
+MQTT). Gemessen an einer Modbus-Attrappe, nicht an einem echten Speicher.
+Befunde mit Datei:Zeile:
+`Pruefung-Durchgang-2026-09-29/BatterieBMS_BEFUNDE_UND_VERBESSERUNGEN.md`.
+
+**Modbus-Speicher lieferten nie Messwerte.** Seit mindestens 0.9.14 wurde
+jedes Profilfeld übersprungen (`isset` auf einen mit `null` vorbelegten
+Eintrag). Trotzdem stand `OK=1`. Deshalb griff auch das Ladezustandsfenster
+(`soc_min`/`soc_max`) nie: `entladen 800` bei 5 % Ladezustand wurde
+geschrieben. Jetzt kommen die Werte, und der Befehl wird abgewiesen.
+Pylontech war nicht betroffen.
+
+**Zwangsbetrieb hält, was er verspricht**
+
+* Das Ladezustandsfenster gilt auch **während** eines laufenden Zwangs.
+  Verlässt der Ladezustand es, nimmt der Dienst den Zwang zurück und
+  protokolliert das.
+* Die Rücknahme auf Automatik ist **immer** erlaubt, auch wenn die Steuerung
+  oder das Schreiben abgeschaltet ist. Bisher sperrte gerade die naheliegende
+  Notbremse die Rücknahme mit.
+* Der Dienst merkt sich einen offenen Zwang mit der Adresse des Speichers.
+  Wird der Speicher aus der Liste genommen oder ist die Konfiguration kaputt,
+  nimmt er ihn trotzdem zurück. Das Formular verdichtet die Liste nicht, solange
+  ein Zwang offen ist.
+* `dienst.sh stop` wartet je Speicher lange genug. Bleibt ein Zwang stehen,
+  sagt es das mit dem Namen des Speichers und Rückgabewert 3, und der Dienst
+  bleibt als „soll laufen“ vermerkt.
+* Ein Update behält die Spur eines offenen Zwangs und meldet ihn.
+* **Grenze:** Ob Huawei oder BYD einen Zwang nach einer Frist selbst aufheben,
+  ist am echten Gerät nicht gemessen. Der Endpunkt beantwortet `automatik` erst,
+  wenn der Dienst den Speicher einmal gelesen hat.
+
+**Freigaben und Sicherung**
+
+* Beim Zurückspielen und beim Lesen gilt `schreiben` nur als `0` oder `1`.
+  Bis 0.9.29 gab eine Sicherung mit `"schreiben": "nein"` das Schreiben frei,
+  während die Seite „Nein“ zeigte.
+* Das Aktionstoken wird geprüft (1 bis 64 Zeichen aus Buchstaben, Ziffern,
+  Punkt, Bindestrich, Unterstrich). Eine Liste als Token öffnete den Endpunkt
+  nicht mehr.
+* Die Sicherung trägt einen lesbaren Kopf und die eigenen Profile. Fehlt auf
+  der Zielanlage ein Profil, nennt die Abweisung seinen Namen.
+
+**Endpunkt und MQTT**
+
+* `OK=0` ab dem Dreifachen des Takts für alle Zeilen. Ohne Daten antworten auch
+  `liste`, `roh` und `evcc` mit 503. `SOLLART=4` („unvollständig“) liegt jetzt
+  im Bereich der Vorlage.
+* Nur Änderungen gehen hinaus; der volle Satz geht höchstens alle 10 Minuten,
+  das Lebenszeichen höchstens alle 30 s. Gemessen bei 5 s Takt: vorher 403,
+  nachher 35 Datagramme je Minute.
+* Entfernter Speicher, EVCC aus, Präfixwechsel, MQTT aus: Die betroffenen
+  Themen werden abgeräumt. Die Abodatei `mqtt_subscriptions.cfg` führt das
+  Plugin selbst.
+* Scheitert die Rückfrage beim Broker, gehen nicht mehr in jedem Takt leere
+  Werte hinaus; das Protokoll nennt den Grund im Klartext.
+
+**Oberfläche und Installation**
+
+* Jedes Absenden endet mit einer Umleitung. F5 würfelt kein neues Token und
+  setzt keinen zweiten Ladezwang.
+* Falsche Eingaben werden abgewiesen und benannt, statt still verbogen zu
+  werden. Der Reiter Test zeigt „nicht feststellbar“ grau, nie als Kreuz,
+  und hat die Pflichtzeilen (Cron-Eintrag, Formularmerkmal, Reiter).
+* Eine Neuinstallation spielt keine alten Einstellungen mehr ein
+  (`preinstall.sh`, `.alt`). Eine kaputte Konfiguration überschreibt beim
+  Update nicht mehr die heile Zweitschrift.
+
 ## Neu in 0.9.29
 
 Die Rückfrage beim Broker, ob ein früher zurückbehaltener Wert (`ok`,
@@ -426,14 +496,20 @@ und umgekehrt.
 
 ## Einrichtung
 
+0. **MQTT veröffentlichen** – wer über MQTT anbindet, setzt als Erstes im Reiter
+   MQTT den Haken „Werte über das MQTT-Gateway veröffentlichen“. Er ist ab Werk
+   **aus**; ohne ihn sendet das Plugin nichts, auch wenn Dienst und Gateway laufen.
 1. **Einstellungen** – Speicher eintragen, Profil wählen, speichern, dann
    *Dienst starten*.
 2. **Test** – die Selbstprüfung sagt Zeile für Zeile, ob die Einrichtung trägt.
    Jedes Kreuz nennt die Abhilfe mit.
 3. **Test, Rohregister lesen** – bevor Sie einem Profil glauben: Register lesen
    und den Wert gegen die Anzeige des Herstellers halten.
-4. **MQTT** – das Abo im MQTT-Gateway eintragen. *Ohne diesen Eintrag kommt am
-   Miniserver nichts an.*
+4. **MQTT** – das Abo `batteriebms/#` (bzw. das eigene Präfix) trägt das Plugin
+   selbst in `config/plugins/batteriebms/mqtt_subscriptions.cfg` ein, beim
+   Speichern und beim Dienststart. *Unter Gateway V1 kommt ohne dieses Abo am
+   Miniserver nichts an.* Ob Gateway V2 die Themengruppe auch ohne die Datei
+   erkennt, ist nicht gemessen.
 5. **Einbindung in Loxone** – Schritt für Schritt, mit Importdatei und
    Baustein-Liste.
 
@@ -452,6 +528,28 @@ gelten:
 * eine **Totmannschaltung** – bleibt länger als die eingestellte Zeit ein
   Lebenszeichen aus, geht der Speicher von selbst in die Automatik zurück.
   Auch beim Anhalten des Dienstes wird jeder laufende Zwang zurückgenommen.
+* das **Ladefenster auch während eines Zwangs** – erreicht der Speicher während
+  eines Entladezwangs die untere oder während eines Ladezwangs die obere Grenze,
+  nimmt der Dienst den Zwang zurück und schreibt eine Zeile ins Protokoll.
+* **die Rücknahme ist nie gesperrt** – `automatik`, `watt=0`, die
+  Totmannschaltung und das Anhalten geben den Speicher auch dann zurück, wenn
+  eine der beiden Freigaben aus ist. Die Freigaben sperren nur das *Setzen*;
+  auch ein Lebenszeichen wird dann abgewiesen, und die Totmannschaltung beendet
+  den Zwang.
+* **die Adresse gehört zum Zwang** – der Dienst merkt sich zu jedem Zwang die
+  Adresse des Speichers (`soll_geraetN.json`). Solange ein Zwang läuft, weist das
+  Speichern eine Änderung ab, die den Speicher von seiner Nummer verdrängen
+  würde. Fällt er trotzdem aus der Liste, nimmt der Dienst den Zwang über die
+  gespeicherte Adresse zurück oder meldet laut, dass es nicht ging.
+* **Anhalten, Update und Deinstallation** – `dienst.sh stop` wartet je Speicher
+  die doppelte Zeitüberschreitung plus 2 s (mindestens 10 s). Bleibt ein Zwang
+  offen, meldet es „angehalten, aber Zwang an … nicht zurückgenommen“ mit
+  Rückgabewert 3, und `soll_laufen` bleibt stehen. Ein Update sichert offene
+  Sollwerte und spielt sie zurück; Update und Deinstallation melden einen
+  offenen Zwang als `<WARNING>` mit dem Speichernamen und geben dann kein `<OK>`
+  aus. Nach der Deinstallation nimmt niemand mehr einen Zwang zurück.
+* `SOLLART=4` heißt **unvollständig**: eine Schrittfolge brach ab, und auch die
+  Rücknahme scheiterte – am Gerät prüfen.
 * **keine Befehle auf Vorrat** – ohne laufenden Dienst wird nichts eingereiht, und beim
   Dienststart verwirft der Dienst jeden Befehl, der älter als 60 Sekunden ist.
 
@@ -491,6 +589,35 @@ Verbindung zum Gerät – und mehrere Speicher lassen nur eine zu.
 
 Ein **Strich** statt einer Zahl bedeutet: der Speicher hat dieses Feld nicht
 geliefert. Es wird bewusst keine 0 gesendet.
+
+`OK` ist in jeder Zeile (`status`, `liste`, `zellen`, `evcc`, `summe`) 0, sobald
+`ALTER` größer ist als das Dreifache des Abruftakts; `ALTER` wird auf 86400
+gekappt (die Grenze der Vorlage). Ohne Daten antworten `status`, `zellen`,
+`liste`, `summe`, `roh` und `evcc` mit HTTP 503 und einem Grund. Ein Token, das
+nicht aus 16 bis 64 Buchstaben und Ziffern besteht, gilt als keines (403).
+
+## MQTT: was gesendet und was geleert wird
+
+Gesendet wird nur, was sich geändert hat; der volle Satz höchstens alle
+10 Minuten (und nach jedem Dienststart oder Speichern), das Lebenszeichen `ts`
+höchstens alle 30 s. Zurückbehaltene Themen werden **einmal geleert** (leere
+Nutzlast über den UDP-Eingang, danach beim Broker nachgelesen, wo er sich
+fragen lässt):
+
+| Anlass | geleert wird |
+|---|---|
+| Speicher aus der Liste entfernt | `<präfix>/geraetN/…` der weggefallenen Nummern |
+| EVCC abgeschaltet | `<präfix>/evcc/…` |
+| Präfix gewechselt | alle Themen unter dem **alten** Präfix; es wird als `mqtt_praefix_alt` vermerkt |
+| MQTT abgeschaltet | alle Themen unter dem eigenen Präfix |
+| Deinstallation | alle Themen unter dem eigenen Präfix und, falls vermerkt, unter dem zuletzt verlassenen |
+
+Geleert werden die Themen, die je zurückbehalten hinausgingen (Zustände wie
+`sollwert`, `sollart`, `modus`, `bmsalarm` und die Altlasten `ok`, `fehlertext`,
+`alarm`, `alarmtext` der Vorfassungen). Fällt nur das BMS aus, bleiben die
+Zustände stehen, und `ok` wird 0. Lässt sich der Broker nicht befragen, wird ein
+Altwert höchstens einmal je Stunde geleert, und das Protokoll nennt den Grund
+(CONNACK- oder SUBACK-Klartext).
 
 ## Was diese Fassung nicht belegen kann
 

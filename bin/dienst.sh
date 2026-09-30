@@ -415,6 +415,21 @@ marke_gilt() {
 MARKE_TEXT="Eine Aktualisierung dieses Plugins laeuft - es wird jetzt kein Dienst gestartet. postinstall.sh startet ihn am Ende selbst, falls er vorher lief."
 
 starten() {
+    # C7 (Durchgang 29.09.2026): Doppelstart-Sperre, Bauart AudiConnect 0.9.22.
+    # Bis 0.9.29 konnten drei gleichzeitige Starts (Knopf, Waechter,
+    # postinstall.sh) drei Dienste ergeben - alle drei fanden "keiner laeuft"
+    # und starteten (gemessen). Gesperrt wird auf dieses Skript selbst, ohne
+    # Warten (-n): wer die Sperre nicht bekommt, hat nichts zu tun, weil
+    # gerade ein anderer startet. Der Dienst erbt den Deskriptor NICHT (8<&-
+    # beim Start unten), sonst hielte er die Sperre fuer immer. Der Dienst
+    # selbst sperrt zusaetzlich (dienst.lock, bms_dienst.php).
+    if command -v flock >/dev/null 2>&1; then
+        exec 8<"$0"
+        if ! flock -n 8; then
+            echo "ein anderer Start laeuft gerade - nichts zu tun"
+            return 0
+        fi
+    fi
     LAUFEND=$(dienste)
     if [ -n "$LAUFEND" ]; then
         ERSTE=$(printf '%s\n' "$LAUFEND" | head -n 1)
@@ -460,7 +475,7 @@ starten() {
     # dort schreibt allein das Programm selbst. Beim Start gekappt, damit sie
     # nur die Ausgabe EINES Laufes sammelt und nicht unbegrenzt waechst.
     : > "$STARTLOG"
-    nohup php "$SKRIPT" >> "$STARTLOG" 2>&1 &
+    nohup php "$SKRIPT" >> "$STARTLOG" 2>&1 8<&- &
     echo $! > "$PID"
     sleep 1
     if laeuft; then
@@ -472,6 +487,42 @@ starten() {
     return 1
 }
 
+# C5 (Durchgang 29.09.2026): wie lange das Anhalten dauern darf, aus
+# bm_anhalte_frist() - je Speicher (eingerichtet oder mit offenem Zwang)
+# 2 x Zeitueberschreitung + 2 s, mindestens 10 s. Bis 0.9.29 fest 10 s, dann
+# kill -9: bei zwei Speichern, von denen der erste schwieg, wurde der zweite
+# nie zurueckgenommen (gemessen, Fall K). Laesst sich die Frist nicht lesen,
+# gelten 60 s - hier ist ein zu grosser Wert die sichere Richtung (warten),
+# anders als beim Waechter.
+anhalte_frist() {
+    LIB="$LBHOMEDIR/webfrontend/html/plugins/$PNAME/bm_lib.php"
+    F=""
+    if command -v php >/dev/null 2>&1 && [ -f "$LIB" ]; then
+        F=$(LBHOMEDIR="$LBHOMEDIR" php -r 'require $argv[1]; bm_nur_lesen(true); echo bm_anhalte_frist();' "$LIB" 2>/dev/null)
+    fi
+    case "$F" in
+        ''|*[!0-9]*) F=60 ;;
+    esac
+    [ "$F" -ge 10 ] || F=10
+    echo "$F"
+}
+
+# C5: offene Zwaenge nach dem Anhalten - die Namen aus bm_zwang_namen(), sonst
+# die Dateinamen. Leer heisst: keiner offen.
+offene_zwaenge() {
+    set -- "$PDATA"/soll_geraet*.json
+    [ -e "$1" ] || return 0
+    LIB="$LBHOMEDIR/webfrontend/html/plugins/$PNAME/bm_lib.php"
+    N=""
+    if command -v php >/dev/null 2>&1 && [ -f "$LIB" ]; then
+        N=$(LBHOMEDIR="$LBHOMEDIR" php -r 'require $argv[1]; bm_nur_lesen(true); echo bm_zwang_namen();' "$LIB" 2>/dev/null)
+    fi
+    if [ -z "$N" ]; then
+        for f in "$@"; do N="$N${N:+, }${f##*/}"; done
+    fi
+    echo "$N"
+}
+
 anhalten() {
     rm -f "$SOLL"
     # ALLE eigenen Dienste, nicht nur den aus der PID-Datei. Ein Waise ohne
@@ -480,14 +531,25 @@ anhalten() {
     ZIEL=$(dienste)
     if [ -z "$ZIEL" ]; then
         rm -f "$PID"
+        OFFEN=$(offene_zwaenge)
+        if [ -n "$OFFEN" ]; then
+            # C5: ein Zwang ohne laufenden Dienst - die Spur bleibt, der
+            # Waechter startet den Dienst, und der nimmt ihn zurueck.
+            touch "$SOLL" 2>/dev/null
+            echo "laeuft nicht, aber Zwang an $OFFEN nicht zurueckgenommen - soll_laufen bleibt stehen"
+            return 3
+        fi
         echo "laeuft nicht"
         return 0
     fi
     # SIGTERM, damit der Dienst einen laufenden Zwang noch zuruecknehmen kann.
     kill $ZIEL 2>/dev/null
-    for i in 1 2 3 4 5 6 7 8 9 10; do
+    FRIST=$(anhalte_frist)
+    i=0
+    while [ "$i" -lt "$FRIST" ]; do
         [ -n "$(dienste)" ] || break
         sleep 1
+        i=$((i + 1))
     done
     # Vor dem harten Signal wird NEU gesucht, nicht die Liste von vorhin
     # wiederverwendet: zwischen den beiden Signalen kann ein Prozess enden und
@@ -505,6 +567,16 @@ anhalten() {
     if [ -n "$UEBRIG" ]; then
         echo "FEHLER: Dienst laeuft weiter (PID $(printf '%s' "$UEBRIG" | tr '\n' ' '))"
         return 1
+    fi
+    # C5: liegt noch eine Sollwertdatei, ist ein Zwang NICHT zurueckgenommen.
+    # Dann bleibt soll_laufen stehen - der Waechter startet den Dienst wieder,
+    # und dessen Totmannschaltung bzw. Verwaisten-Ruecknahme versucht es
+    # erneut. Bis 0.9.29 meldete "stop" hier "angehalten" mit rc 0.
+    OFFEN=$(offene_zwaenge)
+    if [ -n "$OFFEN" ]; then
+        touch "$SOLL" 2>/dev/null
+        echo "angehalten, aber Zwang an $OFFEN nicht zurueckgenommen - soll_laufen bleibt stehen"
+        return 3
     fi
     echo "angehalten"
     return 0

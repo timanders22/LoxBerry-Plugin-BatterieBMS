@@ -77,6 +77,44 @@ if [ -f "$DIENST" ]; then
     echo "<INFO> dienst.sh stop: $AUSGABE"
 fi
 
+# 1a. Offener Zwang (I4, Durchgang 29.09.2026). Liegt nach dem Anhalten noch
+#     eine Sollwertdatei, hat der Dienst einen Zwang NICHT zuruecknehmen
+#     koennen. Bis 0.9.29 stand hier danach "<OK> Deinstallation
+#     abgeschlossen", und die Protokollzeile kam nicht an (gemessen, Fall d2).
+#     Nach der Deinstallation nimmt ihn niemand mehr zurueck - deshalb die
+#     <WARNING> mit dem Speichernamen und am Ende kein <OK>.
+PDATA="$BASE/data/plugins/$PFOLDER"
+CF="$BASE/config/plugins/$PFOLDER/batteriebms.json"
+bm_zwang_klartext() {
+    set -- "$PDATA"/soll_geraet*.json
+    [ -e "$1" ] || return 0
+    if command -v php >/dev/null 2>&1; then
+        php -r '$g = json_decode((string) @file_get_contents($argv[2]), true); $t = array();
+            foreach ((array) glob($argv[1] . "/soll_geraet*.json") as $f) {
+                if (!preg_match("/soll_geraet([0-9]{1,3})\.json$/", $f, $m)) { continue; }
+                $n = (int) $m[1];
+                $s = json_decode((string) @file_get_contents($f), true);
+                $name = "";
+                if (is_array($s) && isset($s["anschrift"]["name"]) && is_string($s["anschrift"]["name"])) {
+                    $name = $s["anschrift"]["name"];
+                } elseif (is_array($g) && isset($g["geraete"][$n - 1]["name"]) && is_string($g["geraete"][$n - 1]["name"])) {
+                    $name = $g["geraete"][$n - 1]["name"];
+                }
+                $a = (is_array($s) && isset($s["aktion"]) && is_string($s["aktion"])) ? $s["aktion"] : "?";
+                $name = preg_replace("/[\\x00-\\x1F\\x7F]/", "", $name);
+                $t[] = ($name !== "" ? $name . " " : "") . "(Speicher " . $n . ", " . $a . ")";
+            }
+            echo implode(", ", $t);' "$PDATA" "$CF" 2>/dev/null && return 0
+    fi
+    for f in "$@"; do printf '%s ' "${f##*/}"; done
+}
+ZWANG_OFFEN=$(bm_zwang_klartext)
+if [ -n "$ZWANG_OFFEN" ]; then
+    echo "<WARNING> Zwang NICHT zurueckgenommen: $ZWANG_OFFEN. Der Speicher steht moeglicherweise"
+    echo "<WARNING> noch im Lade- oder Entladezwang, und nach der Deinstallation nimmt ihn niemand"
+    echo "<WARNING> mehr zurueck. Bitte am Geraet (App oder Bedienfeld des Speichers) auf Automatik stellen."
+fi
+
 # 1b. Zurueckbehaltene MQTT-Themen der Linie leeren.
 #
 #    Seit 0.9.17 gehen Zustaende retained hinaus. Bis 0.9.27 blieben sie nach
@@ -99,6 +137,22 @@ if command -v php >/dev/null 2>&1 && [ -f "$BM_DIENST_PHP" ]; then
         env "LBHOMEDIR=$BASE" "LBPPLUGINDIR=$PFOLDER" timeout 60 php "$BM_DIENST_PHP" --mqtt-leeren \
             < /dev/null 2>&1 || true
     fi
+    # M3 (Durchgang 29.09.2026): auch das zuletzt verlassene Praefix, falls
+    # die Konfiguration eines vermerkt (mqtt_praefix_alt, beim Praefixwechsel
+    # gesetzt). Gelesen wird nur ein Wert, der ins Themenmuster passt.
+    ALT_PRAEFIX=$(php -r '$d = json_decode((string) @file_get_contents($argv[1]), true);
+        $p = (is_array($d) && isset($d["mqtt_praefix_alt"]) && is_string($d["mqtt_praefix_alt"])) ? $d["mqtt_praefix_alt"] : "";
+        echo preg_match("#^[A-Za-z0-9_\-]([A-Za-z0-9_/\-]{0,62}[A-Za-z0-9_\-])?\z#", $p) ? $p : "";' "$CF" 2>/dev/null)
+    if [ -n "$ALT_PRAEFIX" ]; then
+        echo "<INFO> MQTT: auch das frueher benutzte Praefix $ALT_PRAEFIX/ wird geleert."
+        if [ "$(id -u)" = "0" ] && id loxberry >/dev/null 2>&1; then
+            su -s /bin/bash loxberry -c "$(printf '%q ' env "LBHOMEDIR=$BASE" "LBPPLUGINDIR=$PFOLDER" \
+                timeout 60 php "$BM_DIENST_PHP" --mqtt-leeren "--praefix=$ALT_PRAEFIX")" < /dev/null 2>&1 || true
+        else
+            env "LBHOMEDIR=$BASE" "LBPPLUGINDIR=$PFOLDER" timeout 60 php "$BM_DIENST_PHP" --mqtt-leeren \
+                "--praefix=$ALT_PRAEFIX" < /dev/null 2>&1 || true
+        fi
+    fi
 else
     echo "<INFO> PHP oder bms_dienst.php fehlt - zurueckbehaltene MQTT-Themen wurden nicht geleert."
 fi
@@ -106,9 +160,15 @@ fi
 # 2. Alles entfernen, was NEBEN den Ordnern liegt und deshalb von
 #    purge_installation nicht erfasst wird. Jede Datei einzeln benannt -
 #    kein Muster, damit hier nie versehentlich etwas Fremdes getroffen wird.
+#    I1 (Durchgang 29.09.2026): dazu die .alt-Dateien, die preinstall.sh bei
+#    einer Neuinstallation beiseitelegt, und das Bruchstueck .backup.kaputt
+#    aus preupgrade.sh (I2).
 for DATEI in \
     "$BASE/config/plugins/$PFOLDER.backup.json" \
     "$BASE/config/plugins/$PFOLDER.backup.daten.tar" \
+    "$BASE/config/plugins/$PFOLDER.backup.json.alt" \
+    "$BASE/config/plugins/$PFOLDER.backup.daten.tar.alt" \
+    "$BASE/config/plugins/$PFOLDER.backup.json.kaputt" \
     "$BASE/config/plugins/$PFOLDER.laeuft" \
     "$BASE/data/plugins/$PFOLDER.upgrade_laeuft"
 do
@@ -121,5 +181,10 @@ echo "<INFO> Die Einstellungen sind damit endgueltig fort. Wer sie behalten"
 echo "<INFO> wollte, hat sie vorher ueber 'Einstellungen sichern' als Datei"
 echo "<INFO> heruntergeladen und kann sie in einer neuen Installation ueber"
 echo "<INFO> 'Einstellungen zurueckspielen' wieder einlesen."
+if [ -n "$ZWANG_OFFEN" ]; then
+    # I4: kein <OK> - die <WARNING> oben ist die Aussage.
+    echo "<INFO> Deinstallation beendet - mit offenem Zwang (siehe <WARNING> oben)."
+    exit 0
+fi
 echo "<OK> Deinstallation abgeschlossen."
 exit 0
