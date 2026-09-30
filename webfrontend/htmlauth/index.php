@@ -66,6 +66,8 @@ if (isset($_POST['activetab']) && preg_match($bm_muster, (string) $_POST['active
 
 $bm_meldungen = array();
 $bm_fehler = array();      // gesammelt, nicht ueberschrieben
+$bm_mark = array();       // X-2: beanstandete Felder ('feld' oder 'feld.zeile')
+$bm_eingaben = null;      // X-2: die abgewiesenen Eingaben fuer die Einmalmeldung
 
 /* ---------------------------------------------------------------- *
  * Der Wachposten - EIN Posten, vor allen Handlern.
@@ -189,8 +191,9 @@ if ($bm_post && isset($_POST['profil_export'])) {
  * Token waere nach dem Zurueckspielen wertlos, weil alle Adressen im
  * Miniserver ungueltig wuerden. Der Hinweis steht am Knopf. */
 if ($bm_post && isset($_POST['konfig_export'])) {
-    $bm_roh = @file_get_contents($bm_p['config']);
-    $bm_ex = ($bm_roh === false) ? null : json_decode((string) $bm_roh, true);
+    /* X-3: der Aufbau steht seit dem Verbesserungsbau in bm_ausfuhr_feld() -
+     * dieselbe Ausfuhr beurteilt die Warnung am Knopf. */
+    $bm_ex = bm_ausfuhr_feld();
     if (!is_array($bm_ex)) {
         $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_SICHERUNG_LESEN'), bm_e($bm_p['config']));
         $bm_tab = 'tab-settings';
@@ -201,16 +204,16 @@ if ($bm_post && isset($_POST['konfig_export'])) {
          * ohne sie liess sich auf einer frischen Anlage nicht zurueckspielen
          * (die Zeilen verwiesen auf ein Profil, das es dort nicht gab).
          * Schluessel mit "_" liest das Zurueckspielen nur als Kopf. */
-        $bm_eigene = array();
-        foreach (bm_profile() as $bm_pk => $bm_pr) {
-            if (!empty($bm_pr['datei'])) {
-                unset($bm_pr['herkunft'], $bm_pr['datei']);
-                $bm_eigene[$bm_pk] = $bm_pr;
-            }
+        /* X-3: bestuende ein gespeicherter Wert das eigene Zurueckspielen
+         * nicht, sagt es der Kopf _warnung - nur Namen, nie Werte. Die
+         * Sicherung wird trotzdem vollstaendig geliefert (wie EVCC,
+         * Entscheidung 13); das Zurueckspielen liest "_"-Schluessel nie. */
+        $bm_x3 = bm_rueckspiel_altwerte($bm_ex);
+        if ($bm_x3) {
+            $bm_ex = array('_hinweis' => $bm_ex['_hinweis'],
+                           '_warnung' => sprintf(bm_t('EINST.SICHERUNG_WARNUNG_KOPF'),
+                                                 implode(', ', $bm_x3))) + $bm_ex;
         }
-        $bm_ex = array('_hinweis' => bm_t('EINST.SICHERUNG_KOPF'),
-                       '_stand' => date('c'),
-                       '_profile' => (object) $bm_eigene) + $bm_ex;
         header('Content-Type: application/json; charset=utf-8');
         header('Content-Disposition: attachment; filename="batteriebms_'
              . date('Ymd_His') . '.json"');
@@ -234,75 +237,21 @@ if ($bm_post && isset($_POST['konfig_import'])) {
         if (!is_array($bm_neu) || !isset($bm_neu['geraete'])) {
             $bm_fehler[] = bm_t('EINST.FEHLER_KONFIG_FORM');
         } else {
-            /* O10 (Durchgang 29.09.2026): Schluessel mit "_" sind der Kopf der
-             * Sicherung (_hinweis, _stand, _profile) und keine Einstellungen.
-             * Sie werden vor der Pruefung abgetrennt und nie gespeichert. */
-            $bm_kopf = array();
-            foreach (array_keys($bm_neu) as $bm_k) {
-                if (is_string($bm_k) && strncmp($bm_k, '_', 1) === 0) {
-                    $bm_kopf[$bm_k] = $bm_neu[$bm_k];
-                    unset($bm_neu[$bm_k]);
-                }
-            }
-            /* Fremde Schluessel sind eine BEANSTANDUNG, kein stiller Zusatz.
-             * array_merge nahm bisher alles auf, was in der Datei stand -
-             * auch Schluessel aus einem anderen Plugin oder einer anderen
-             * Fassung. Sie landeten in der Konfiguration, taten dort nichts
-             * und waren an nichts zu erkennen. */
-            $bm_fremd = array_diff(array_keys($bm_neu), array_keys(bm_vorgaben()));
+            /* X-3 (Verbesserungsbau 30.09.2026): die Beurteilung steht in
+             * bm_rueckspiel_pruefen() - EINE Quelle fuer das Zurueckspielen und
+             * die Warnung beim Sichern. Wortgleich aus diesem Handler gezogen:
+             * Kopf "_" abtrennen (O10), fremde Schluessel, jeder Wert (B01),
+             * eigene Profile (O10), Geraetezeilen und Ladezustandsfenster (C10).
+             * Eine halb gueltige Datei aendert weiter GAR NICHTS. */
+            $bm_rp = bm_rueckspiel_pruefen($bm_neu);
+            $bm_neu = $bm_rp['neu'];
             $bm_zusammen = null;
-            $bm_mitprofile = array();
-            if ($bm_fremd) {
+            $bm_mitprofile = $bm_rp['profile'];
+            if ($bm_rp['fremd']) {
                 $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_KONFIG_FREMD'),
-                    bm_e(implode(', ', array_slice($bm_fremd, 0, 8))));
+                    bm_e(implode(', ', array_slice($bm_rp['fremd'], 0, 8))));
             } else {
-                /* JEDER Wert wird beurteilt, nicht nur der Schluessel (B01).
-                 * Bis 0.9.15 wurde die Datei nach der Schluesselpruefung
-                 * unbesehen uebernommen - gemessen ging damit
-                 * intervall = "nicht; eine Zahl" und soc_max = 9999 durch, und
-                 * soc_max = 9999 legt die Ladeschranke des Dienstes still.
-                 * Dieselbe Beurteilung wie im Formular, aus derselben
-                 * Funktion. Alle Beanstandungen werden gesammelt. */
-                $bm_bean = array();
-                foreach ($bm_neu as $bm_k => $bm_v) {
-                    $bm_grund = bm_wert_pruefen((string) $bm_k, $bm_v);
-                    if ($bm_grund !== '') {
-                        $bm_bean[] = bm_e((string) $bm_k) . ': ' . bm_e($bm_grund);
-                    }
-                }
-                /* O10: die mitgesicherten eigenen Profile - dieselbe
-                 * Beurteilung wie beim Hochladen eines Profils. */
-                if (isset($bm_kopf['_profile'])) {
-                    if (!is_array($bm_kopf['_profile'])) {
-                        $bm_bean[] = bm_e('_profile: ' . bm_t('EINST.FEHLER_KONFIG_FORM'));
-                    } else {
-                        foreach ($bm_kopf['_profile'] as $bm_pk => $bm_pr) {
-                            $bm_pk = (string) $bm_pk;
-                            if (!preg_match('/^[a-z0-9_]{1,60}$/', $bm_pk)) {
-                                $bm_bean[] = bm_e('_profile: ' . bm_t('EINST.FEHLER_PROFIL_NAME'));
-                                continue;
-                            }
-                            foreach (bm_profil_pruefen($bm_pr) as $bm_pb) {
-                                $bm_bean[] = bm_e('_profile/' . $bm_pk) . ': ' . $bm_pb;
-                            }
-                            $bm_mitprofile[$bm_pk] = $bm_pr;
-                        }
-                    }
-                }
-                foreach (bm_geraetezeilen_pruefen(
-                             isset($bm_neu['geraete']) ? $bm_neu['geraete'] : array(),
-                             $bm_mitprofile)
-                         as $bm_grund) {
-                    $bm_bean[] = bm_e($bm_grund);
-                }
-                /* C10: das Ladezustandsfenster wie im Formular. Gemessen:
-                 * soc_min 90 / soc_max 10 wurde bis 0.9.29 angenommen, und
-                 * danach war weder Laden noch Entladen je erlaubt. */
-                $bm_smin = array_key_exists('soc_min', $bm_neu) ? $bm_neu['soc_min'] : bm_vorgaben()['soc_min'];
-                $bm_smax = array_key_exists('soc_max', $bm_neu) ? $bm_neu['soc_max'] : bm_vorgaben()['soc_max'];
-                if (is_numeric($bm_smin) && is_numeric($bm_smax) && (int) $bm_smin >= (int) $bm_smax) {
-                    $bm_bean[] = bm_e(bm_t('EINST.FEHLER_SOC_FENSTER'));
-                }
+                $bm_bean = $bm_rp['bean'];
                 /* C4: die Liste darf keinen Speicher mit offenem Zwang von
                  * seiner Nummer verdraengen. */
                 if (!$bm_bean) {
@@ -460,14 +409,19 @@ if ($bm_post && isset($_POST['trockenlauf'])) {
     $bm_ta = is_string($_POST['trockenlauf']) ? $_POST['trockenlauf'] : '';
     if (!preg_match('/^[0-9]{1,2}$/', $bm_tg) || (int) $bm_tg < 1) {
         $bm_fehler[] = bm_t('TROCKEN.FEHLER_GERAET');
+        $bm_mark[] = 'test_geraet';
     } elseif (!preg_match('/^[0-9]{1,5}$/', $bm_tw)) {
         $bm_fehler[] = bm_t('TROCKEN.FEHLER_WATT');
+        $bm_mark[] = 'test_watt';
     } else {
         list($bm_tok, $bm_ttext) = bm_trockenlauf((int) $bm_tg, $bm_ta, (int) $bm_tw);
         $bm_testausgabe = $bm_ttext;
         if (!$bm_tok) {
             $bm_fehler[] = bm_t('TROCKEN.NICHT_MOEGLICH');
         }
+    }
+    if ($bm_mark) {
+        $bm_eingaben = bm_eingaben_sammeln('trocken', $_POST, $bm_mark);   // X-2
     }
     $bm_tab = 'tab-test';
 }
@@ -494,6 +448,7 @@ if ($bm_post && isset($_POST['speichern'])) {
             && is_string($_POST['g_name'][$bm_i]) ? trim($_POST['g_name'][$bm_i]) : '';
         if (!bm_geraetename_taugt($bm_nroh)) {
             $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_NAME'), $bm_i + 1, BM_NAME_HOECHSTENS);
+            $bm_mark[] = 'g_name.' . $bm_i;
             continue;
         }
         $name = $bm_nroh;
@@ -504,6 +459,7 @@ if ($bm_post && isset($_POST['speichern'])) {
         }
         if (!isset($bm_profile[$profil])) {
             $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_PROFIL'), $bm_i + 1);
+            $bm_mark[] = 'g_profil.' . $bm_i;
             continue;
         }
         $pr = $bm_profile[$profil];
@@ -521,6 +477,7 @@ if ($bm_post && isset($_POST['speichern'])) {
             if (!preg_match('#^/dev/[A-Za-z0-9_/\-\.]{1,60}$#', $dev)
                 || strpos($dev, '..') !== false) {
                 $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_DEV'), $bm_i + 1);
+                $bm_mark[] = 'g_dev.' . $bm_i;
                 continue;
             }
         } else {
@@ -529,12 +486,14 @@ if ($bm_post && isset($_POST['speichern'])) {
             }
             if ($ip === '') {
                 $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_IP_FEHLT'), $bm_i + 1);
+                $bm_mark[] = 'g_ip.' . $bm_i;
                 continue;
             }
             // IPv4 oder Rechnername zulassen - beides ist gebraeuchlich.
             if (!preg_match('/^\d{1,3}(\.\d{1,3}){3}$/', $ip)
                 && !preg_match('/^[A-Za-z0-9][A-Za-z0-9\.\-]{1,80}$/', $ip)) {
                 $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_IP'), $bm_i + 1);
+                $bm_mark[] = 'g_ip.' . $bm_i;
                 continue;
             }
         }
@@ -558,6 +517,7 @@ if ($bm_post && isset($_POST['speichern'])) {
             if (!preg_match('/^[0-9]{1,6}$/', $w) || (int) $w < $gr[0] || (int) $w > $gr[1]) {
                 $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_ZAHL_ZEILE'), $bm_i + 1,
                     bm_t('EINST.T_' . strtoupper($f)), $gr[0], $gr[1]);
+                $bm_mark[] = 'g_' . $f . '.' . $bm_i;
                 continue;
             }
             $zeile[$f] = (int) $w;
@@ -566,6 +526,7 @@ if ($bm_post && isset($_POST['speichern'])) {
         if ($w !== '') {
             if (!preg_match('/^[0-9]{1,4}([.,][0-9]{1,2})?$/', $w)) {
                 $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_KAPAZ'), $bm_i + 1);
+                $bm_mark[] = 'g_nennkapaz.' . $bm_i;
             } else {
                 $zeile['nennkapaz'] = (float) str_replace(',', '.', $w);
             }
@@ -591,18 +552,22 @@ if ($bm_post && isset($_POST['speichern'])) {
         $bm_wert = isset($_POST[$bm_feld]) ? trim((string) $_POST[$bm_feld]) : '';
         if (!preg_match('/^[0-9]+$/', $bm_wert)) {
             $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_ZAHL'), bm_t('EINST.L_' . strtoupper($bm_feld)));
+            $bm_mark[] = $bm_feld;
             continue;
         }
         $bm_zahl = (int) $bm_wert;
         if ($bm_zahl < $bm_grenzen[0] || $bm_zahl > $bm_grenzen[1]) {
             $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_BEREICH'),
                 bm_t('EINST.L_' . strtoupper($bm_feld)), $bm_grenzen[0], $bm_grenzen[1]);
+            $bm_mark[] = $bm_feld;
             continue;
         }
         $bm_cfg[$bm_feld] = $bm_zahl;
     }
     if ((int) $bm_cfg['soc_min'] >= (int) $bm_cfg['soc_max']) {
         $bm_fehler[] = bm_t('EINST.FEHLER_SOC_FENSTER');
+        $bm_mark[] = 'soc_min';
+        $bm_mark[] = 'soc_max';
     }
 
     $bm_cfg['steuerung_ein'] = isset($_POST['steuerung_ein']) ? 1 : 0;
@@ -614,11 +579,13 @@ if ($bm_post && isset($_POST['speichern'])) {
         if ($bm_ew === '') { continue; }
         if (!preg_match('/^[0-9]+$/', $bm_ew)) {
             $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_ZAHL'), bm_t('EINST.L_' . strtoupper($bm_ef)));
+            $bm_mark[] = $bm_ef;
             continue;
         }
         if ((int) $bm_ew < $bm_eg[0] || (int) $bm_ew > $bm_eg[1]) {
             $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_BEREICH'),
                 bm_t('EINST.L_' . strtoupper($bm_ef)), $bm_eg[0], $bm_eg[1]);
+            $bm_mark[] = $bm_ef;
             continue;
         }
         $bm_cfg[$bm_ef] = (int) $bm_ew;
@@ -629,6 +596,7 @@ if ($bm_post && isset($_POST['speichern'])) {
     if (!empty($bm_cfg['evcc_ein'])
         && !isset($bm_cfg['geraete'][(int) $bm_cfg['evcc_geraet'] - 1])) {
         $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_EVCC_GERAET'), (int) $bm_cfg['evcc_geraet']);
+        $bm_mark[] = 'evcc_geraet';
     }
 
 
@@ -662,6 +630,9 @@ if ($bm_post && isset($_POST['speichern'])) {
          * sah die Beanstandung zur einen Zeile und nahm an, der Rest sei
          * gespeichert (B35). */
         $bm_fehler[] = bm_t('EINST.FEHLER_NICHTS_GESPEICHERT');
+        // X-2: die eingetippten Werte reisen mit (auch ohne markiertes Feld,
+        // etwa bei einem offenen Zwang, C4).
+        $bm_eingaben = bm_eingaben_sammeln('speichern', $_POST, $bm_mark);
     }
     $bm_tab = 'tab-settings';
 
@@ -691,6 +662,10 @@ if ($bm_post && isset($_POST['save_mqtt'])) {
         ? trim($_POST['mqtt_topic'], " \t") : '';
     if ($bm_mtopic === '' || bm_wert_pruefen('mqtt_topic', $bm_mtopic) !== '') {
         $bm_fehler[] = bm_t('EINST.FEHLER_TOPIC');
+        $bm_mark[] = 'mqtt_topic';
+        // Entscheidung 16: gesagt wird es, gespeichert wurde es schon bisher nicht.
+        $bm_fehler[] = bm_t('EINST.FEHLER_NICHTS_GESPEICHERT');
+        $bm_eingaben = bm_eingaben_sammeln('mqtt', $_POST, $bm_mark);   // X-2
     } else {
         $bm_mcfg['mqtt_topic'] = $bm_mtopic;
     }
@@ -762,6 +737,25 @@ if ($bm_post && isset($_POST['log_leeren'])) {
     $bm_tab = 'tab-log';
 }
 
+/* ---------------- b1: Zwang jetzt ueberall aufheben ----------------
+ * Nur mit Bestaetigungshaken (wie Log leeren, O6). Jede Zeile sagt je
+ * Speicher, ob die Ruecknahme gelang - gruen nur, was der Dienst bestaetigt
+ * hat. */
+if ($bm_post && isset($_POST['zwang_aufheben'])) {
+    if (empty($_POST['zwang_aufheben_ok'])) {
+        $bm_fehler[] = bm_e(bm_t('TEST.FEHLER_ZWANG_HAKEN'));
+    } else {
+        foreach (bm_zwang_ueberall_aufheben() as $bm_zz) {
+            if ((int) $bm_zz[0] === 1) {
+                $bm_meldungen[] = bm_e($bm_zz[1]);
+            } else {
+                $bm_fehler[] = bm_e($bm_zz[1]);
+            }
+        }
+    }
+    $bm_tab = 'tab-test';
+}
+
 /* ---------------- Reiter Test ---------------- */
 if ($bm_post && isset($_POST['test'])) {
     list($bm_stand, $bm_text) = bm_test_aktion((string) $_POST['test']);
@@ -791,7 +785,8 @@ if ($bm_post) {
     if (bm_einmal_schreiben(array('meldungen' => array_values($bm_meldungen),
                                   'fehler' => array_values($bm_fehler),
                                   'test' => (string) $bm_testausgabe,
-                                  'tab' => $bm_tab))) {
+                                  'tab' => $bm_tab,
+                                  'eingaben' => $bm_eingaben))) {
         $bm_ziel = preg_match('/^tab-([a-z]+)$/', $bm_tab, $bm_tm) ? $bm_tm[1] : 'settings';
         header('Location: index.php?form=' . $bm_ziel, true, 303);
         exit;
@@ -807,7 +802,15 @@ if ($bm_post) {
         if (preg_match($bm_muster, $bm_einmal['tab'])) {
             $bm_tab = $bm_einmal['tab'];
         }
+        // X-2: nur nach einer Beanstandung liegt etwas bei.
+        if ($bm_einmal['eingaben'] !== null && bm_eingaben($bm_einmal['eingaben']) !== null) {
+            $bm_meldungen[] = bm_t('EINST.EINGABEN_ZURUECK');
+        }
     }
+}
+
+if ($bm_post && $bm_eingaben !== null && bm_eingaben($bm_eingaben) !== null) {
+    $bm_meldungen[] = bm_t('EINST.EINGABEN_ZURUECK');   // X-2, Rueckfallweg ohne Umleitung
 }
 
 /* ---------------- Laden ---------------- */
@@ -890,6 +893,16 @@ if ($bm_rahmen) {
 .sm-punkt.sm-b-lesen   { background: #6dac20; }
 .sm-punkt.sm-b-technik { background: #546e7a; }
 .sm-punkt.sm-b-aktion  { background: #e0620d; }
+/* Eigene Zutat (b1, Verbesserungsbau 30.09.2026), NICHT aus
+   VORLAGE_hausstandard.css.html: Rot fuer die Notbremse "Zwang jetzt
+   ueberall aufheben" - sie soll sich von den orangen Schaltknoepfen abheben. */
+.sm-wrap .sm-btn.sm-b-gefahr { background: #c62828 !important; }
+.sm-wrap .sm-btn.sm-b-gefahr:hover, .sm-wrap .sm-btn.sm-b-gefahr:focus { background: #a31f1f !important; color: #fff !important; }
+.sm-punkt.sm-b-gefahr { background: #c62828; }
+/* X-2 (Regeln/04): das beanstandete Feld. Eigene Zutat, nicht aus
+   VORLAGE_hausstandard.css.html; Farbe wie in den Schwesterlinien. */
+.sm-wrap .sm-beanstandet { border: 2px solid #c62828 !important; background: #fff5f5 !important; }
+.sm-wrap input[type=checkbox].sm-beanstandet { outline: 2px solid #c62828; outline-offset: 2px; }
 .sm-seite { display: none; padding-top: 4px; }
 .sm-seite.sm-active { display: block; }
 .sm-hinweis { border: 1px solid #cfe3b0; background: #f2f8ea; border-radius: 6px;
@@ -1083,35 +1096,37 @@ for ($bm_i = 0; $bm_i < 6; $bm_i++) {
     $bm_z = isset($bm_roh[$bm_i]) && is_array($bm_roh[$bm_i]) ? $bm_roh[$bm_i] : array();
     // O2/C10: nur Text und Zahl zeigen - eine Liste oder ein Wahrheitswert
     // aus einer von Hand bearbeiteten Datei ergab bis 0.9.29 "Array" bzw. "1".
-    $bm_v = function ($k) use ($bm_z) {
-        return (isset($bm_z[$k]) && (is_string($bm_z[$k]) || is_int($bm_z[$k]) || is_float($bm_z[$k])))
+    $bm_v = function ($k) use ($bm_z, $bm_i) {
+        $bm_gesp = (isset($bm_z[$k]) && (is_string($bm_z[$k]) || is_int($bm_z[$k]) || is_float($bm_z[$k])))
             ? (string) $bm_z[$k] : '';
+        // X-2: nach einer Beanstandung steht hier das Eingetippte dieser Zeile.
+        return bm_eingabe('speichern', $k === 'geraetedatei' ? 'g_dev' : 'g_' . $k, $bm_gesp, $bm_i);
     };
 ?>
 <tr>
 <td><?= $bm_i + 1 ?></td>
-<td><input data-role="none" type="text" name="g_name[]" value="<?= bm_e($bm_v('name')) ?>" size="10"></td>
-<td><select data-role="none" name="g_profil[]">
+<td><input data-role="none" type="text" name="g_name[]" value="<?= bm_e($bm_v('name')) ?>"<?= bm_markierung('speichern', 'g_name', $bm_i) ?> size="10"></td>
+<td><select data-role="none" name="g_profil[]"<?= bm_markierung('speichern', 'g_profil', $bm_i) ?>>
     <option value=""><?= bm_e(bm_t('EINST.PROFIL_KEIN')) ?></option>
 <?php foreach ($bm_profile as $bm_pk => $bm_pr) { ?>
     <option value="<?= bm_e($bm_pk) ?>"<?= $bm_v('profil') === $bm_pk ? ' selected' : '' ?>><?= bm_e($bm_pr['name']) ?><?= $bm_pr['stand'] !== 'dokumentiert' ? ' (!)' : '' ?></option>
 <?php } ?>
 </select></td>
-<td><input data-role="none" type="text" name="g_ip[]" value="<?= bm_e($bm_v('ip')) ?>" size="13"></td>
-<td><input data-role="none" type="text" name="g_port[]" value="<?= bm_e($bm_v('port')) ?>" size="4"></td>
-<td><input data-role="none" type="text" name="g_unit[]" value="<?= bm_e($bm_v('unit')) ?>" size="3"></td>
-<td><input data-role="none" type="text" name="g_dev[]" value="<?= bm_e($bm_v('geraetedatei')) ?>" size="11" list="bm_serielle"></td>
-<td><input data-role="none" type="text" name="g_baud[]" value="<?= bm_e($bm_v('baud')) ?>" size="5"></td>
-<td><input data-role="none" type="text" name="g_nennkapaz[]" value="<?= bm_e($bm_v('nennkapaz')) ?>" size="4"></td>
-<td><input data-role="none" type="text" name="g_max_laden[]" value="<?= bm_e($bm_v('max_laden')) ?>" size="4"></td>
-<td><input data-role="none" type="text" name="g_max_entladen[]" value="<?= bm_e($bm_v('max_entladen')) ?>" size="4"></td>
+<td><input data-role="none" type="text" name="g_ip[]" value="<?= bm_e($bm_v('ip')) ?>"<?= bm_markierung('speichern', 'g_ip', $bm_i) ?> size="13"></td>
+<td><input data-role="none" type="text" name="g_port[]" value="<?= bm_e($bm_v('port')) ?>"<?= bm_markierung('speichern', 'g_port', $bm_i) ?> size="4"></td>
+<td><input data-role="none" type="text" name="g_unit[]" value="<?= bm_e($bm_v('unit')) ?>"<?= bm_markierung('speichern', 'g_unit', $bm_i) ?> size="3"></td>
+<td><input data-role="none" type="text" name="g_dev[]" value="<?= bm_e($bm_v('geraetedatei')) ?>"<?= bm_markierung('speichern', 'g_dev', $bm_i) ?> size="11" list="bm_serielle"></td>
+<td><input data-role="none" type="text" name="g_baud[]" value="<?= bm_e($bm_v('baud')) ?>"<?= bm_markierung('speichern', 'g_baud', $bm_i) ?> size="5"></td>
+<td><input data-role="none" type="text" name="g_nennkapaz[]" value="<?= bm_e($bm_v('nennkapaz')) ?>"<?= bm_markierung('speichern', 'g_nennkapaz', $bm_i) ?> size="4"></td>
+<td><input data-role="none" type="text" name="g_max_laden[]" value="<?= bm_e($bm_v('max_laden')) ?>"<?= bm_markierung('speichern', 'g_max_laden', $bm_i) ?> size="4"></td>
+<td><input data-role="none" type="text" name="g_max_entladen[]" value="<?= bm_e($bm_v('max_entladen')) ?>"<?= bm_markierung('speichern', 'g_max_entladen', $bm_i) ?> size="4"></td>
 <td><select data-role="none" name="g_vorzeichen[]">
-    <option value="1"<?= bm_vorzeichen_wert(isset($bm_z['vorzeichen']) ? $bm_z['vorzeichen'] : 1) !== -1 ? ' selected' : '' ?>><?= bm_e(bm_t('EINST.VZ_NORMAL')) ?></option>
-    <option value="-1"<?= bm_vorzeichen_wert(isset($bm_z['vorzeichen']) ? $bm_z['vorzeichen'] : 1) === -1 ? ' selected' : '' ?>><?= bm_e(bm_t('EINST.VZ_UMGEKEHRT')) ?></option>
+    <option value="1"<?= bm_vorzeichen_wert(bm_eingabe('speichern', 'g_vorzeichen', isset($bm_z['vorzeichen']) ? $bm_z['vorzeichen'] : 1, $bm_i)) !== -1 ? ' selected' : '' ?>><?= bm_e(bm_t('EINST.VZ_NORMAL')) ?></option>
+    <option value="-1"<?= bm_vorzeichen_wert(bm_eingabe('speichern', 'g_vorzeichen', isset($bm_z['vorzeichen']) ? $bm_z['vorzeichen'] : 1, $bm_i)) === -1 ? ' selected' : '' ?>><?= bm_e(bm_t('EINST.VZ_UMGEKEHRT')) ?></option>
 </select></td>
 <td><select data-role="none" name="g_schreiben[]">
-    <option value="0"<?= bm_schreiben_an(isset($bm_z['schreiben']) ? $bm_z['schreiben'] : 0) !== 1 ? ' selected' : '' ?>><?= bm_e(bm_t('ALLG.NEIN')) ?></option>
-    <option value="1"<?= bm_schreiben_an(isset($bm_z['schreiben']) ? $bm_z['schreiben'] : 0) === 1 ? ' selected' : '' ?>><?= bm_e(bm_t('ALLG.JA')) ?></option>
+    <option value="0"<?= bm_schreiben_an(bm_eingabe('speichern', 'g_schreiben', isset($bm_z['schreiben']) ? $bm_z['schreiben'] : 0, $bm_i)) !== 1 ? ' selected' : '' ?>><?= bm_e(bm_t('ALLG.NEIN')) ?></option>
+    <option value="1"<?= bm_schreiben_an(bm_eingabe('speichern', 'g_schreiben', isset($bm_z['schreiben']) ? $bm_z['schreiben'] : 0, $bm_i)) === 1 ? ' selected' : '' ?>><?= bm_e(bm_t('ALLG.JA')) ?></option>
 </select></td>
 </tr>
 <?php } ?>
@@ -1162,36 +1177,36 @@ foreach ($bm_hinweise as $bm_h) {
 <h2><?= bm_e(bm_t('EINST.H_TAKT')) ?></h2>
 <div class="sm-feld">
   <label for="intervall"><?= bm_e(bm_t('EINST.L_INTERVALL')) ?></label>
-  <input data-role="none" type="number" id="intervall" name="intervall" value="<?= (int) $bm_cfg['intervall'] ?>" min="5" max="3600">
+  <input data-role="none" type="number" id="intervall" name="intervall" value="<?= bm_e(bm_eingabe('speichern', 'intervall', (string) (int) $bm_cfg['intervall'])) ?>"<?= bm_markierung('speichern', 'intervall') ?> min="5" max="3600">
   <div class="sm-hilfe"><?= bm_t('EINST.H_INTERVALL') ?></div>
 </div>
 <div class="sm-feld">
   <label for="zelltakt"><?= bm_e(bm_t('EINST.L_ZELLTAKT')) ?></label>
-  <input data-role="none" type="number" id="zelltakt" name="zelltakt" value="<?= (int) $bm_cfg['zelltakt'] ?>" min="30" max="86400">
+  <input data-role="none" type="number" id="zelltakt" name="zelltakt" value="<?= bm_e(bm_eingabe('speichern', 'zelltakt', (string) (int) $bm_cfg['zelltakt'])) ?>"<?= bm_markierung('speichern', 'zelltakt') ?> min="30" max="86400">
   <div class="sm-hilfe"><?= bm_t('EINST.H_ZELLTAKT') ?></div>
 </div>
 <div class="sm-feld">
   <label for="zeitueberschreitung"><?= bm_e(bm_t('EINST.L_ZEITUEBERSCHREITUNG')) ?></label>
-  <input data-role="none" type="number" id="zeitueberschreitung" name="zeitueberschreitung" value="<?= (int) $bm_cfg['zeitueberschreitung'] ?>" min="1" max="30">
+  <input data-role="none" type="number" id="zeitueberschreitung" name="zeitueberschreitung" value="<?= bm_e(bm_eingabe('speichern', 'zeitueberschreitung', (string) (int) $bm_cfg['zeitueberschreitung'])) ?>"<?= bm_markierung('speichern', 'zeitueberschreitung') ?> min="1" max="30">
 </div>
 <div class="sm-feld">
   <label for="drift_warnung"><?= bm_e(bm_t('EINST.L_DRIFT_WARNUNG')) ?></label>
-  <input data-role="none" type="number" id="drift_warnung" name="drift_warnung" value="<?= (int) $bm_cfg['drift_warnung'] ?>" min="1" max="2000">
+  <input data-role="none" type="number" id="drift_warnung" name="drift_warnung" value="<?= bm_e(bm_eingabe('speichern', 'drift_warnung', (string) (int) $bm_cfg['drift_warnung'])) ?>"<?= bm_markierung('speichern', 'drift_warnung') ?> min="1" max="2000">
   <div class="sm-hilfe"><?= bm_t('EINST.H_DRIFT_WARNUNG') ?></div>
 </div>
 <div class="sm-feld">
   <label for="verlauf_tage"><?= bm_e(bm_t('EINST.L_VERLAUF_TAGE')) ?></label>
-  <input data-role="none" type="number" id="verlauf_tage" name="verlauf_tage" value="<?= (int) $bm_cfg['verlauf_tage'] ?>" min="1" max="365">
+  <input data-role="none" type="number" id="verlauf_tage" name="verlauf_tage" value="<?= bm_e(bm_eingabe('speichern', 'verlauf_tage', (string) (int) $bm_cfg['verlauf_tage'])) ?>"<?= bm_markierung('speichern', 'verlauf_tage') ?> min="1" max="365">
 </div>
 
 <div class="sm-feld">
   <label for="temp_max"><?= bm_e(bm_t('EINST.L_TEMP_MAX')) ?></label>
-  <input data-role="none" type="number" id="temp_max" name="temp_max" value="<?= (int) $bm_cfg['temp_max'] ?>" min="0" max="100">
+  <input data-role="none" type="number" id="temp_max" name="temp_max" value="<?= bm_e(bm_eingabe('speichern', 'temp_max', (string) (int) $bm_cfg['temp_max'])) ?>"<?= bm_markierung('speichern', 'temp_max') ?> min="0" max="100">
   <div class="sm-hilfe"><?= bm_t('EINST.H_TEMP_MAX') ?></div>
 </div>
 <div class="sm-feld">
   <label for="temp_min"><?= bm_e(bm_t('EINST.L_TEMP_MIN')) ?></label>
-  <input data-role="none" type="number" id="temp_min" name="temp_min" value="<?= (int) $bm_cfg['temp_min'] ?>" min="0" max="100">
+  <input data-role="none" type="number" id="temp_min" name="temp_min" value="<?= bm_e(bm_eingabe('speichern', 'temp_min', (string) (int) $bm_cfg['temp_min'])) ?>"<?= bm_markierung('speichern', 'temp_min') ?> min="0" max="100">
   <div class="sm-hilfe"><?= bm_t('EINST.H_TEMP_MIN') ?></div>
 </div>
 
@@ -1199,34 +1214,34 @@ foreach ($bm_hinweise as $bm_h) {
 <div class="sm-warnung"><?= bm_t('EINST.STEUERUNG_ERKLAERUNG') ?></div>
 <div class="sm-feld">
   <label style="display:inline-flex;align-items:center;gap:8px;">
-    <input data-role="none" type="checkbox" name="steuerung_ein" value="1" <?= !empty($bm_cfg['steuerung_ein']) ? 'checked' : '' ?>>
+    <input data-role="none" type="checkbox" name="steuerung_ein" value="1" <?= bm_eingabe('speichern', 'steuerung_ein', !empty($bm_cfg['steuerung_ein']) ? '1' : '0') === '1' ? 'checked' : '' ?><?= bm_markierung('speichern', 'steuerung_ein') ?>>
     <?= bm_e(bm_t('EINST.L_STEUERUNG_EIN')) ?>
   </label>
   <div class="sm-hilfe"><?= bm_t('EINST.H_STEUERUNG_EIN') ?></div>
 </div>
 <div class="sm-feld">
   <label for="totmann"><?= bm_e(bm_t('EINST.L_TOTMANN')) ?></label>
-  <input data-role="none" type="number" id="totmann" name="totmann" value="<?= (int) $bm_cfg['totmann'] ?>" min="0" max="3600">
+  <input data-role="none" type="number" id="totmann" name="totmann" value="<?= bm_e(bm_eingabe('speichern', 'totmann', (string) (int) $bm_cfg['totmann'])) ?>"<?= bm_markierung('speichern', 'totmann') ?> min="0" max="3600">
   <div class="sm-hilfe"><?= bm_t('EINST.H_TOTMANN') ?></div>
 </div>
 <div class="sm-feld">
   <label for="soc_min"><?= bm_e(bm_t('EINST.L_SOC_MIN')) ?></label>
-  <input data-role="none" type="number" id="soc_min" name="soc_min" value="<?= (int) $bm_cfg['soc_min'] ?>" min="0" max="100">
+  <input data-role="none" type="number" id="soc_min" name="soc_min" value="<?= bm_e(bm_eingabe('speichern', 'soc_min', (string) (int) $bm_cfg['soc_min'])) ?>"<?= bm_markierung('speichern', 'soc_min') ?> min="0" max="100">
   <div class="sm-hilfe"><?= bm_t('EINST.H_SOC_MIN') ?></div>
 </div>
 <div class="sm-feld">
   <label for="soc_max"><?= bm_e(bm_t('EINST.L_SOC_MAX')) ?></label>
-  <input data-role="none" type="number" id="soc_max" name="soc_max" value="<?= (int) $bm_cfg['soc_max'] ?>" min="0" max="100">
+  <input data-role="none" type="number" id="soc_max" name="soc_max" value="<?= bm_e(bm_eingabe('speichern', 'soc_max', (string) (int) $bm_cfg['soc_max'])) ?>"<?= bm_markierung('speichern', 'soc_max') ?> min="0" max="100">
   <div class="sm-hilfe"><?= bm_t('EINST.H_SOC_MAX') ?></div>
 </div>
 <div class="sm-feld">
   <label for="schreibbremse"><?= bm_e(bm_t('EINST.L_SCHREIBBREMSE')) ?></label>
-  <input data-role="none" type="number" id="schreibbremse" name="schreibbremse" value="<?= (int) $bm_cfg['schreibbremse'] ?>" min="0" max="600">
+  <input data-role="none" type="number" id="schreibbremse" name="schreibbremse" value="<?= bm_e(bm_eingabe('speichern', 'schreibbremse', (string) (int) $bm_cfg['schreibbremse'])) ?>"<?= bm_markierung('speichern', 'schreibbremse') ?> min="0" max="600">
   <div class="sm-hilfe"><?= bm_t('EINST.H_SCHREIBBREMSE') ?></div>
 </div>
 <div class="sm-feld">
   <label for="wartezeit"><?= bm_e(bm_t('EINST.L_WARTEZEIT')) ?></label>
-  <input data-role="none" type="number" id="wartezeit" name="wartezeit" value="<?= (int) $bm_cfg['wartezeit'] ?>" min="0" max="30">
+  <input data-role="none" type="number" id="wartezeit" name="wartezeit" value="<?= bm_e(bm_eingabe('speichern', 'wartezeit', (string) (int) $bm_cfg['wartezeit'])) ?>"<?= bm_markierung('speichern', 'wartezeit') ?> min="0" max="30">
   <div class="sm-hilfe"><?= bm_t('EINST.H_WARTEZEIT') ?></div>
 </div>
 
@@ -1237,18 +1252,18 @@ foreach ($bm_hinweise as $bm_h) {
 <div class="sm-step"><?= bm_t('EINST.EVCC_ERKLAERUNG') ?></div>
 <div class="sm-feld">
   <label style="display:inline-flex;align-items:center;gap:8px;">
-    <input data-role="none" type="checkbox" name="evcc_ein" value="1" <?= !empty($bm_cfg['evcc_ein']) ? 'checked' : '' ?>>
+    <input data-role="none" type="checkbox" name="evcc_ein" value="1" <?= bm_eingabe('speichern', 'evcc_ein', !empty($bm_cfg['evcc_ein']) ? '1' : '0') === '1' ? 'checked' : '' ?><?= bm_markierung('speichern', 'evcc_ein') ?>>
     <?= bm_e(bm_t('EINST.L_EVCC_EIN')) ?>
   </label>
 </div>
 <div class="sm-feld">
   <label for="evcc_geraet"><?= bm_e(bm_t('EINST.L_EVCC_GERAET')) ?></label>
-  <input data-role="none" type="number" id="evcc_geraet" name="evcc_geraet" value="<?= (int) $bm_cfg['evcc_geraet'] ?>" min="1" max="99">
+  <input data-role="none" type="number" id="evcc_geraet" name="evcc_geraet" value="<?= bm_e(bm_eingabe('speichern', 'evcc_geraet', (string) (int) $bm_cfg['evcc_geraet'])) ?>"<?= bm_markierung('speichern', 'evcc_geraet') ?> min="1" max="99">
   <span class="sm-hilfe"><?= bm_t('EINST.H_EVCC_GERAET') ?></span>
 </div>
 <div class="sm-feld">
   <label for="evcc_ladewatt"><?= bm_e(bm_t('EINST.L_EVCC_LADEWATT')) ?></label>
-  <input data-role="none" type="number" id="evcc_ladewatt" name="evcc_ladewatt" value="<?= (int) $bm_cfg['evcc_ladewatt'] ?>" min="0" max="30000" step="100">
+  <input data-role="none" type="number" id="evcc_ladewatt" name="evcc_ladewatt" value="<?= bm_e(bm_eingabe('speichern', 'evcc_ladewatt', (string) (int) $bm_cfg['evcc_ladewatt'])) ?>"<?= bm_markierung('speichern', 'evcc_ladewatt') ?> min="0" max="30000" step="100">
   <span class="sm-hilfe"><?= bm_t('EINST.H_EVCC_LADEWATT') ?></span>
 </div>
 <div class="sm-warnung"><?= bm_t('EINST.EVCC_VORZEICHEN') ?></div>
@@ -1260,6 +1275,11 @@ foreach ($bm_hinweise as $bm_h) {
 
 <h2><?= bm_e(bm_t('EINST.H_SICHERUNG')) ?></h2>
 <p class="sm-hilfe"><?= bm_t('EINST.SICHERUNG_ERKLAERUNG') ?></p>
+<?php /* X-3: dieselbe Pruefung wie das Zurueckspielen; nur Namen, nie Werte. */
+$bm_x3 = bm_rueckspiel_altwerte();
+if ($bm_x3) { ?>
+<div class="sm-warnung"><?= sprintf(bm_e(bm_t('EINST.SICHERUNG_WARNUNG')), bm_e(implode(', ', $bm_x3))) ?></div>
+<?php } ?>
 <div class="sm-knopfreihe">
   <form action="index.php" method="post">
     <?php echo bm_fmt(); ?>
@@ -1335,13 +1355,13 @@ foreach ($bm_hinweise as $bm_h) {
 <input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
 <div class="sm-feld">
   <label style="display:inline-flex;align-items:center;gap:8px;">
-    <input data-role="none" type="checkbox" name="mqtt_ein" value="1" <?= !empty($bm_cfg['mqtt_ein']) ? 'checked' : '' ?>>
+    <input data-role="none" type="checkbox" name="mqtt_ein" value="1" <?= bm_eingabe('mqtt', 'mqtt_ein', !empty($bm_cfg['mqtt_ein']) ? '1' : '0') === '1' ? 'checked' : '' ?><?= bm_markierung('mqtt', 'mqtt_ein') ?>>
     <?= bm_e(bm_t('EINST.L_MQTT_EIN')) ?>
   </label>
 </div>
 <div class="sm-feld">
   <label for="mqtt_topic"><?= bm_e(bm_t('EINST.L_MQTT_TOPIC')) ?></label>
-  <input data-role="none" type="text" id="mqtt_topic" name="mqtt_topic" value="<?= bm_e($bm_cfg['mqtt_topic']) ?>" placeholder="batteriebms">
+  <input data-role="none" type="text" id="mqtt_topic" name="mqtt_topic" value="<?= bm_e(bm_eingabe('mqtt', 'mqtt_topic', (string) $bm_cfg['mqtt_topic'])) ?>"<?= bm_markierung('mqtt', 'mqtt_topic') ?> placeholder="batteriebms">
 </div>
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= bm_e(bm_t('ALLG.SPEICHERN')) ?></button>
@@ -1674,6 +1694,7 @@ function bm_bausteine()
 <span><i class="sm-punkt sm-b-lesen"></i> <?= bm_t('LEGENDE.LESEN') ?></span>
 <span><i class="sm-punkt sm-b-technik"></i> <?= bm_t('LEGENDE.TECHNIK') ?></span>
 <span><i class="sm-punkt sm-b-aktion"></i> <?= bm_t('LEGENDE.AKTION') ?></span>
+<span><i class="sm-punkt sm-b-gefahr"></i> <?= bm_t('LEGENDE.GEFAHR') ?></span>
 </div>
 <h2><?= bm_e(bm_t('TEST.H_SELBSTPRUEFUNG')) ?></h2>
 <p class="sm-hilfe"><?= bm_t('TEST.EINLEITUNG') ?></p>
@@ -1772,11 +1793,11 @@ function bm_bausteine()
 <input data-role="none" type="hidden" name="activetab" value="tab-test">
 <div class="sm-feld">
   <label for="tl_geraet"><?= bm_e(bm_t('TEST.L_GERAET')) ?></label>
-  <input data-role="none" type="number" id="tl_geraet" name="test_geraet" value="1" min="1" max="6">
+  <input data-role="none" type="number" id="tl_geraet" name="test_geraet" value="<?= bm_e(bm_eingabe('trocken', 'test_geraet', '1')) ?>"<?= bm_markierung('trocken', 'test_geraet') ?> min="1" max="6">
 </div>
 <div class="sm-feld">
   <label for="tl_watt"><?= bm_e(bm_t('TEST.L_WATT')) ?></label>
-  <input data-role="none" type="number" id="tl_watt" name="test_watt" value="500" min="0" max="30000">
+  <input data-role="none" type="number" id="tl_watt" name="test_watt" value="<?= bm_e(bm_eingabe('trocken', 'test_watt', '500')) ?>"<?= bm_markierung('trocken', 'test_watt') ?> min="0" max="30000">
 </div>
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="trockenlauf" value="laden"><?= bm_e(bm_t('TEST.K_TROCKEN_LADEN')) ?></button>
@@ -1836,6 +1857,22 @@ if (is_file($bm_mdatei)) {
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="automatik"><?= bm_e(bm_t('TEST.K_AUTOMATIK')) ?></button>
 </div>
 </form>
+
+<h3><?= bm_e(bm_t('TEST.H_ZWANG_AUFHEBEN')) ?></h3>
+<div class="sm-warnung"><?= bm_t('TEST.ZWANG_ERKLAERUNG') ?></div>
+<?php $bm_zoffen = bm_zwang_offen(); ?>
+<p class="sm-hilfe"><?= $bm_zoffen ? sprintf(bm_e(bm_t('TEST.ZWANG_OFFEN_JETZT')), bm_e(bm_zwang_namen($bm_zoffen)))
+    : bm_e(bm_t('TEST.ZWANG_KEINER')) ?></p>
+<div class="sm-knopfreihe">
+  <form action="index.php" method="post">
+    <?php echo bm_fmt(); ?>
+    <input data-role="none" type="hidden" name="activetab" value="tab-test">
+    <label style="display:inline-flex;align-items:center;gap:6px;margin-right:10px;font-size:0.9em;">
+      <input data-role="none" type="checkbox" name="zwang_aufheben_ok" value="1"> <?= bm_e(bm_t('TEST.L_ZWANG_HAKEN')) ?>
+    </label>
+    <button data-role="none" class="sm-btn sm-b-gefahr" type="submit" name="zwang_aufheben" value="1"><?= bm_e(bm_t('TEST.K_ZWANG_AUFHEBEN')) ?></button>
+  </form>
+</div>
 
 <div class="sm-warnung"><b><?= bm_e(bm_t('TEST.H_UNGEPRUEFT')) ?></b><br><?= bm_t('TEST.UNGEPRUEFT') ?></div>
 </div>

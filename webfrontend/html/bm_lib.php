@@ -1013,7 +1013,121 @@ function bm_einmal_lesen()
     }
     $aus['test'] = (isset($d['test']) && is_string($d['test'])) ? $d['test'] : '';
     $aus['tab'] = (isset($d['tab']) && is_string($d['tab'])) ? $d['tab'] : '';
+    // X-2: die abgewiesenen Eingaben eines Formulars (bm_eingaben_sammeln()).
+    $aus['eingaben'] = (isset($d['eingaben']) && is_array($d['eingaben'])) ? $d['eingaben'] : null;
     return $aus;
+}
+
+/* ==================================================================
+ * X-2 (Regeln/04, Hausregel seit 30.09.2026): nach einer Beanstandung
+ * stehen die eingetippten Werte wieder im Formular.
+ *
+ * Seit der Umleitung nach jedem POST (O1) zeigte der GET nach einer
+ * Beanstandung die GESPEICHERTEN Werte - wer drei Felder richtig und eines
+ * falsch eingab, tippte alle vier neu. Jetzt reisen die Felder des einen
+ * beanstandeten Formulars mit der Einmalmeldung (0600, Datenordner,
+ * hoechstens 120 s, beim GET gelesen und geloescht) und werden beim GET
+ * eingefuellt; das beanstandete Feld traegt die Klasse sm-beanstandet.
+ * Nur nach einer Beanstandung - nach erfolgreichem Speichern zeigt der GET
+ * die gespeicherten Werte. Ein Wert, der kein UTF-8 ist oder laenger als
+ * 256 Byte, reist nicht mit (dann steht der gespeicherte Wert da).
+ * Geheimnisse stehen in keinem dieser Formulare.
+ * ================================================================== */
+function bm_eingabe_felder($form)
+{
+    $leer = array('skalar' => array(), 'haken' => array(), 'zeilen' => array());
+    $felder = array(
+        'speichern' => array(
+            'skalar' => array('intervall', 'zelltakt', 'zeitueberschreitung', 'drift_warnung',
+                              'verlauf_tage', 'temp_max', 'temp_min', 'totmann', 'soc_min', 'soc_max',
+                              'schreibbremse', 'wartezeit', 'evcc_geraet', 'evcc_ladewatt'),
+            'haken'  => array('steuerung_ein', 'evcc_ein'),
+            'zeilen' => array('g_name', 'g_profil', 'g_ip', 'g_port', 'g_unit', 'g_dev', 'g_baud',
+                              'g_nennkapaz', 'g_max_laden', 'g_max_entladen', 'g_vorzeichen',
+                              'g_schreiben')),
+        'mqtt'      => array('skalar' => array('mqtt_topic'), 'haken' => array('mqtt_ein'),
+                             'zeilen' => array()),
+        'trocken'   => array('skalar' => array('test_geraet', 'test_watt'), 'haken' => array(),
+                             'zeilen' => array()),
+    );
+    return isset($felder[$form]) ? $felder[$form] : $leer;
+}
+
+/** X-2: nur Text, hoechstens 256 Byte, gueltiges UTF-8 - sonst null. */
+function bm_eingabe_text($w)
+{
+    return (is_string($w) && strlen($w) <= 256 && preg_match('//u', $w) === 1) ? $w : null;
+}
+
+/** X-2: die Felder des beanstandeten Formulars fuer die Einmalmeldung.
+ *  $falsch: beanstandete Felder, 'feld' oder 'feld.zeile' (0-basiert). */
+function bm_eingaben_sammeln($form, array $post, array $falsch)
+{
+    $f = bm_eingabe_felder($form);
+    $werte = array();
+    foreach ($f['skalar'] as $k) {
+        $t = isset($post[$k]) ? bm_eingabe_text($post[$k]) : null;
+        if ($t !== null) {
+            $werte[$k] = $t;
+        }
+    }
+    foreach ($f['haken'] as $k) {
+        $werte[$k] = isset($post[$k]) ? '1' : '0';
+    }
+    foreach ($f['zeilen'] as $k) {
+        $liste = (isset($post[$k]) && is_array($post[$k])) ? array_values($post[$k]) : array();
+        $werte[$k] = array();
+        for ($i = 0; $i < 6; $i++) {
+            $t = isset($liste[$i]) ? bm_eingabe_text($liste[$i]) : null;
+            $werte[$k][$i] = ($t === null) ? '' : $t;
+        }
+    }
+    $mark = array();
+    foreach ($falsch as $m) {
+        if (is_string($m) && !in_array($m, $mark, true)) {
+            $mark[] = $m;
+        }
+    }
+    return array('form' => (string) $form, 'werte' => $werte, 'falsch' => $mark);
+}
+
+/** X-2: beim GET die mitgereisten Eingaben setzen (Argument) bzw. abfragen
+ *  (ohne Argument). Was nicht die erwartete Form hat, gilt als keine. */
+function bm_eingaben($setzen = null)
+{
+    static $e = null;
+    if ($setzen !== null) {
+        $e = (is_array($setzen) && isset($setzen['form'], $setzen['werte'], $setzen['falsch'])
+              && is_string($setzen['form']) && is_array($setzen['werte'])
+              && is_array($setzen['falsch'])) ? $setzen : null;
+    }
+    return $e;
+}
+
+/** X-2: der Wert eines Feldes - eingetippt (nach einer Beanstandung dieses
+ *  Formulars) oder gespeichert. $zeile: Zeile der Speichertabelle. */
+function bm_eingabe($form, $feld, $gespeichert, $zeile = null)
+{
+    $e = bm_eingaben();
+    if ($e === null || $e['form'] !== $form || !isset($e['werte'][$feld])) {
+        return $gespeichert;
+    }
+    $w = $e['werte'][$feld];
+    if ($zeile !== null) {
+        $w = (is_array($w) && isset($w[(int) $zeile])) ? $w[(int) $zeile] : null;
+    }
+    return is_string($w) ? $w : $gespeichert;
+}
+
+/** X-2: Klasse fuer das beanstandete Feld (rot umrandet), sonst leer. */
+function bm_markierung($form, $feld, $zeile = null)
+{
+    $e = bm_eingaben();
+    if ($e === null || $e['form'] !== $form) {
+        return '';
+    }
+    $n = ($zeile === null) ? (string) $feld : $feld . '.' . (int) $zeile;
+    return in_array($n, $e['falsch'], true) ? ' class="sm-beanstandet" aria-invalid="true"' : '';
 }
 
 function bm_json_lesen($pfad)
@@ -1359,6 +1473,141 @@ function bm_geraetezeilen_pruefen($liste, array $zusatzprofile = array())
         }
     }
     return $bean;
+}
+
+/**
+ * X-3 (Verbesserungsbau 30.09.2026): die Beurteilung einer zurueckgespielten
+ * Sicherung - EINE Quelle fuer das Zurueckspielen (Handler konfig_import)
+ * und die Warnung beim Sichern (bm_rueckspiel_altwerte()). Wortgleich aus
+ * dem Handler herausgezogen: Kopf "_" abtrennen (O10), fremde Schluessel,
+ * jeder Wert (B01), die mitgesicherten eigenen Profile (O10), die
+ * Geraetezeilen (C10) und das Ladezustandsfenster (C10). Der offene Zwang
+ * (C4) bleibt im Handler: er ist ein Zustand der Anlage, kein Wert der
+ * Datei.
+ *
+ * Rueckgabe: neu (ohne Kopf), kopf, fremd (Schluessel), bean (Beanstandungen,
+ * fuer HTML maskiert), namen (betroffene Schluessel, ohne Werte), profile
+ * (die mitgesicherten eigenen Profile).
+ */
+function bm_rueckspiel_pruefen(array $neu)
+{
+    $kopf = array();
+    foreach (array_keys($neu) as $k) {
+        if (is_string($k) && strncmp($k, '_', 1) === 0) {
+            $kopf[$k] = $neu[$k];
+            unset($neu[$k]);
+        }
+    }
+    $aus = array('neu' => $neu, 'kopf' => $kopf, 'fremd' => array(), 'bean' => array(),
+                 'namen' => array(), 'profile' => array());
+    /* Fremde Schluessel sind eine BEANSTANDUNG, kein stiller Zusatz. */
+    $fremd = array_values(array_diff(array_keys($neu), array_keys(bm_vorgaben())));
+    if ($fremd) {
+        $aus['fremd'] = $fremd;
+        foreach ($fremd as $k) {
+            $aus['namen'][] = (string) $k;
+        }
+        return $aus;
+    }
+    /* JEDER Wert wird beurteilt, nicht nur der Schluessel (B01) - dieselbe
+     * Beurteilung wie im Formular, aus derselben Funktion. */
+    foreach ($neu as $k => $v) {
+        $grund = bm_wert_pruefen((string) $k, $v);
+        if ($grund !== '') {
+            $aus['bean'][] = bm_e((string) $k) . ': ' . bm_e($grund);
+            $aus['namen'][] = (string) $k;
+        }
+    }
+    /* O10: die mitgesicherten eigenen Profile - dieselbe Beurteilung wie
+     * beim Hochladen eines Profils. */
+    if (isset($kopf['_profile'])) {
+        if (!is_array($kopf['_profile'])) {
+            $aus['bean'][] = bm_e('_profile: ' . bm_t('EINST.FEHLER_KONFIG_FORM'));
+            $aus['namen'][] = '_profile';
+        } else {
+            foreach ($kopf['_profile'] as $pk => $pr) {
+                $pk = (string) $pk;
+                if (!preg_match('/^[a-z0-9_]{1,60}$/', $pk)) {
+                    $aus['bean'][] = bm_e('_profile: ' . bm_t('EINST.FEHLER_PROFIL_NAME'));
+                    $aus['namen'][] = '_profile';
+                    continue;
+                }
+                foreach (bm_profil_pruefen($pr) as $pb) {
+                    $aus['bean'][] = bm_e('_profile/' . $pk) . ': ' . $pb;
+                    $aus['namen'][] = '_profile/' . $pk;
+                }
+                $aus['profile'][$pk] = $pr;
+            }
+        }
+    }
+    foreach (bm_geraetezeilen_pruefen(isset($neu['geraete']) ? $neu['geraete'] : array(),
+                                      $aus['profile']) as $grund) {
+        $aus['bean'][] = bm_e($grund);
+        $aus['namen'][] = 'geraete';
+    }
+    /* C10: das Ladezustandsfenster wie im Formular. */
+    $smin = array_key_exists('soc_min', $neu) ? $neu['soc_min'] : bm_vorgaben()['soc_min'];
+    $smax = array_key_exists('soc_max', $neu) ? $neu['soc_max'] : bm_vorgaben()['soc_max'];
+    if (is_numeric($smin) && is_numeric($smax) && (int) $smin >= (int) $smax) {
+        $aus['bean'][] = bm_e(bm_t('EINST.FEHLER_SOC_FENSTER'));
+        $aus['namen'][] = 'soc_min';
+        $aus['namen'][] = 'soc_max';
+    }
+    $aus['namen'] = array_values(array_unique($aus['namen']));
+    return $aus;
+}
+
+/**
+ * X-3: die Ausfuhr der Einstellungen, wie der Knopf "Einstellungen sichern"
+ * sie liefert - Kopf (_hinweis, _stand, _profile mit den eigenen Profilen,
+ * O10) und die Konfigurationsdatei, wie sie auf der Platte steht. null, wenn
+ * die Datei nicht lesbar oder kein JSON ist.
+ */
+function bm_ausfuhr_feld()
+{
+    $p = bm_paths();
+    $roh = @file_get_contents($p['config']);
+    $ex = ($roh === false) ? null : json_decode((string) $roh, true);
+    if (!is_array($ex)) {
+        return null;
+    }
+    $eigene = array();
+    foreach (bm_profile() as $pk => $pr) {
+        if (!empty($pr['datei'])) {
+            unset($pr['herkunft'], $pr['datei']);
+            $eigene[$pk] = $pr;
+        }
+    }
+    return array('_hinweis' => bm_t('EINST.SICHERUNG_KOPF'),
+                 '_stand' => date('c'),
+                 '_profile' => (object) $eigene) + $ex;
+}
+
+/**
+ * X-3: welche gespeicherten Werte wuerde das eigene Zurueckspielen
+ * abweisen? Die Ausfuhr geht einmal durch json_encode/json_decode - genau so
+ * kommt sie beim Zurueckspielen an - und dann durch bm_rueckspiel_pruefen().
+ * Rueckgabe: Liste der Schluessel (nur Namen, nie Werte), leer = besteht.
+ */
+function bm_rueckspiel_altwerte($ex = null)
+{
+    if ($ex === null) {
+        $ex = bm_ausfuhr_feld();
+    }
+    if (!is_array($ex)) {
+        return array();
+    }
+    $js = json_encode($ex, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $rund = is_string($js) ? json_decode($js, true) : null;
+    if (!is_array($rund)) {
+        return array('json');
+    }
+    $rp = bm_rueckspiel_pruefen($rund);
+    $namen = $rp['namen'];
+    if (!isset($rp['neu']['geraete']) && !in_array('geraete', $namen, true)) {
+        $namen[] = 'geraete';     // wie im Handler: ohne geraete FEHLER_KONFIG_FORM
+    }
+    return $namen;
 }
 
 function bm_geraete()
@@ -2234,16 +2483,35 @@ function bm_serielle_empfehlung($pfad)
  */
 function bm_befehl_absetzen($befehl, $wartezeit = null)
 {
-    if (bm_dienst_pid() === 0) {
-        return array(0, bm_t('TEST.M_DIENST_LAEUFT_NICHT'));
-    }
-    $p = bm_paths();
     $cfg = bm_config();
     if ($wartezeit === null) {
         $wartezeit = (int) $cfg['wartezeit'];
     }
     $wartezeit = max(0, min(30, (int) $wartezeit));
+    list($ok, $kennung) = bm_befehl_ablegen($befehl);
+    if (!$ok) {
+        return array(0, $kennung);
+    }
+    $a = bm_befehl_antworten(array($kennung), $wartezeit);
+    return isset($a[$kennung]) ? $a[$kennung]
+        : array(2, sprintf(bm_t('DIENST.KEINE_ANTWORT'), $wartezeit));
+}
 
+/**
+ * b1 (Verbesserungsbau 30.09.2026): der erste Teil von bm_befehl_absetzen() -
+ * einen Befehl in die Warteschlange legen, ohne auf die Antwort zu warten.
+ * Getrennt, damit "Zwang jetzt ueberall aufheben" alle Speicher auf einmal
+ * einreihen und danach gemeinsam warten kann, statt je Speicher die volle
+ * Wartezeit nacheinander. Dieselbe Sperre ohne laufenden Dienst, dieselbe
+ * Ablage, derselbe Dienstweg wie der Endpunkt.
+ * Rueckgabe array(1, Kennung) oder array(0, Meldung).
+ */
+function bm_befehl_ablegen($befehl)
+{
+    if (bm_dienst_pid() === 0) {
+        return array(0, bm_t('TEST.M_DIENST_LAEUFT_NICHT'));
+    }
+    $p = bm_paths();
     $ordner = $p['datadir'] . '/befehle';
     if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) {
         return array(0, sprintf(bm_t('DIENST.ORDNER_WARTESCHLANGE'), $ordner));
@@ -2260,17 +2528,90 @@ function bm_befehl_absetzen($befehl, $wartezeit = null)
         @unlink($tmp);
         return array(0, sprintf(bm_t('DIENST.BEFEHL_NICHT_ABGELEGT'), $datei));
     }
-    $antwort = $p['datadir'] . '/antworten/' . $kennung . '.json';
-    for ($i = 0; $i < $wartezeit * 10; $i++) {
-        if (is_file($antwort)) {
-            $a = bm_json_lesen($antwort);
-            @unlink($antwort);
-            return array((int) (isset($a['ok']) ? $a['ok'] : 0),
-                         (string) (isset($a['meldung']) ? $a['meldung'] : ''));
+    return array(1, $kennung);
+}
+
+/**
+ * b1: der zweite Teil von bm_befehl_absetzen() - auf die Antworten des
+ * Dienstes zu mehreren Kennungen warten, hoechstens $wartezeit Sekunden
+ * zusammen. Rueckgabe array(Kennung => array(ok, Meldung)) nur fuer die,
+ * die geantwortet haben; wer fehlt, hat in der Wartezeit nicht geantwortet.
+ */
+function bm_befehl_antworten(array $kennungen, $wartezeit)
+{
+    $p = bm_paths();
+    $aus = array();
+    $offen = array_values($kennungen);
+    for ($i = 0; $i < $wartezeit * 10 && $offen; $i++) {
+        foreach ($offen as $j => $kennung) {
+            $antwort = $p['datadir'] . '/antworten/' . $kennung . '.json';
+            if (is_file($antwort)) {
+                $a = bm_json_lesen($antwort);
+                @unlink($antwort);
+                $aus[$kennung] = array((int) (isset($a['ok']) ? $a['ok'] : 0),
+                                       (string) (isset($a['meldung']) ? $a['meldung'] : ''));
+                unset($offen[$j]);
+            }
         }
-        usleep(100000);
+        if ($offen) {
+            usleep(100000);
+        }
     }
-    return array(2, sprintf(bm_t('DIENST.KEINE_ANTWORT'), $wartezeit));
+    return $aus;
+}
+
+/**
+ * b1: "Zwang jetzt ueberall aufheben" - jeden eingerichteten Speicher auf
+ * Automatik stellen, ueber denselben Weg wie ?aktion=automatik am Endpunkt
+ * (Warteschlange, Dienst, bm_steuern(..., 'automatik')). Die Ruecknahme
+ * haengt an keiner Freigabe (C3); ohne laufenden Dienst wird nichts
+ * eingereiht - wie am Endpunkt (dort 503). Gewartet wird gemeinsam, so
+ * lange wie das Anhalten des Dienstes je Speicher Zeit laesst
+ * (bm_anhalte_frist()), hoechstens 30 s.
+ * Rueckgabe: Liste von array(ok, Text) - ok 1 zurueckgenommen, 0 nicht.
+ */
+function bm_zwang_ueberall_aufheben()
+{
+    $cfg = bm_config();
+    $geraete = bm_geraete();
+    if (!$geraete) {
+        return array(array(0, bm_t('TEST.ZWANG_KEIN_SPEICHER')));
+    }
+    if (bm_dienst_pid() === 0) {
+        return array(array(0, bm_t('TEST.M_DIENST_LAEUFT_NICHT')));
+    }
+    $zeilen = array();
+    $kenn = array();
+    foreach ($geraete as $nr => $g) {
+        list($ok, $k) = bm_befehl_ablegen(array('aktion' => 'automatik', 'geraet' => (int) $nr,
+                                                'quelle' => 'Oberflaeche'));
+        if ($ok) {
+            $kenn[(int) $nr] = $k;
+        } else {
+            $zeilen[] = array(0, sprintf(bm_t('TEST.ZWANG_ERG_FEHL'),
+                bm_text_sauber((string) $g['name'], 64), (int) $nr, $k));
+        }
+    }
+    $warte = min(30, max((int) $cfg['wartezeit'], bm_anhalte_frist($cfg)));
+    $antw = bm_befehl_antworten($kenn, $warte);
+    foreach ($kenn as $nr => $k) {
+        $name = bm_text_sauber((string) $geraete[$nr]['name'], 64);
+        if (!isset($antw[$k])) {
+            $zeilen[] = array(0, sprintf(bm_t('TEST.ZWANG_ERG_OFFEN'), $name, (int) $nr, $warte));
+        } elseif ((int) $antw[$k][0] === 1) {
+            $zeilen[] = array(1, sprintf(bm_t('TEST.ZWANG_ERG_OK'), $name, (int) $nr, $antw[$k][1]));
+        } else {
+            $zeilen[] = array(0, sprintf(bm_t('TEST.ZWANG_ERG_FEHL'), $name, (int) $nr, $antw[$k][1]));
+        }
+    }
+    /* Ein Zwang unter einer Nummer, die nicht mehr in der Liste steht, hat
+     * keine Endpunkt-Nummer mehr; ihn nimmt der Dienst selbst ueber die
+     * gemerkte Adresse zurueck (bm_zwang_verwaist(), C4). */
+    $fremd = array_diff_key(bm_zwang_offen(), $geraete);
+    if ($fremd) {
+        $zeilen[] = array(0, sprintf(bm_t('TEST.ZWANG_VERWAIST_HINWEIS'), bm_zwang_namen($fremd)));
+    }
+    return $zeilen;
 }
 
 /* ---------------- Verlauf ---------------- */

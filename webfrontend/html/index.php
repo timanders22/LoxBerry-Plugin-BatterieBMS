@@ -18,7 +18,9 @@
  * Schaltend (nur wenn zugelassen):
  *   laden          &watt=W  [&geraet=N]   Laden erzwingen; watt=0 gibt die Regie zurueck
  *   entladen       &watt=W  [&geraet=N]   Entladen erzwingen
- *   automatik               [&geraet=N]   Zwang sofort beenden
+ *   automatik               [&geraet=N]   Zwang sofort beenden - auch vor dem ersten
+ *                                         Lesen (a2, Entscheidungen Nr. 16 und 18;
+ *                                         ebenso watt=0 und batteriemodus=1)
  *   lebenszeichen           [&geraet=N]   Sollwert am Leben halten (Totmannschaltung)
  *   sperren                 [&geraet=N]   nicht entladen (erzwungenes Entladen mit 0 W)
  *   abruf                                 sofort abrufen statt auf den Takt zu warten
@@ -339,7 +341,29 @@ if ($bm_aktion === 'liste') {
     exit;
 }
 
-if ($bm_g === null) {
+/* a2 (Entscheidung Nr. 16 vom 30.09.2026): 'automatik' wird auch dann
+ * angenommen und eingereiht, wenn der Speicher noch nicht im Abbild steht -
+ * etwa gleich nach dem Dienststart, bevor der erste Abruf fertig ist, oder
+ * nach dem Eintragen eines Speichers bis zum naechsten Takt. Bis 0.9.31
+ * bekam auch die Ruecknahme dort 503; wer nach einem Neustart als Erstes
+ * den Zwang beenden wollte, musste warten. Voraussetzung: die Nummer ist
+ * in den Einstellungen eingerichtet (der Dienst schreibt ueber
+ * bm_geraet(), nicht ueber das Abbild).
+ * Entscheidung Nr. 18 (01.10.2026): dasselbe fuer die beiden anderen
+ * Ruecknahmen - laden/entladen mit watt=0 und batteriemodus=1 (EVCC
+ * "normal"; jede Eingabe, die bm_evcc_modus() auf automatik abbildet).
+ * EVCC schickt batteriemodus=1, nicht automatik. Alles andere bleibt bei
+ * 503 (setzen braucht einen gelesenen Ladezustand). Ohne laufenden Dienst
+ * bleibt es bei DIENST_LAEUFT_NICHT weiter unten. */
+$bm_rueck_vorab = ($bm_aktion === 'automatik')
+    || (($bm_aktion === 'laden' || $bm_aktion === 'entladen')
+        && $bm_watt !== '' && (int) $bm_watt === 0)
+    || ($bm_aktion === 'batteriemodus' && isset($_GET['modus']) && is_string($_GET['modus'])
+        && bm_evcc_modus($_GET['modus']) === 'automatik');
+$bm_vorab = ($bm_g === null && $bm_rueck_vorab
+    && (int) $bm_nr >= 1 && bm_geraet((int) $bm_nr) !== null);
+
+if ($bm_g === null && !$bm_vorab) {
     /* Keine Daten zu dieser Nummer: HTTP 503, nicht 200 (B51, 17.09.2026).
      *
      * Regeln/07, 'Faellt die Quelle ganz aus, liefert der Endpunkt HTTP 503':

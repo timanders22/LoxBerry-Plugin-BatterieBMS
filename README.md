@@ -10,6 +10,27 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.31
+
+Verbesserungen aus dem Durchgang vom 30.09.2026 (Verbesserungsliste
+`Pruefung-Durchgang-2026-09-29/VERBESSERUNGEN_OFFEN.md`). Gemessen an einer
+Modbus-Attrappe unter PHP 7.4, 8.3 und 8.5; nicht am Gerät.
+
+* **Benachrichtigung, wenn ein Zwang hängen bleibt:** Scheitert nach Ablauf der
+  Totmannzeit die Rücknahme, legt das Plugin eine LoxBerry-Benachrichtigung ab –
+  einmal je Zwang. Bei Totmannzeit 0 kommt keine.
+* **Rücknahmen gehen auch vor dem ersten Lesen:** `automatik`, `batteriemodus=1`
+  (auch `normal`) und `laden`/`entladen` mit `watt=0` werden nach einem Neustart
+  sofort angenommen und eingereiht – etwa wenn EVCC einen Zwang aufheben will.
+  Alle anderen schaltenden Befehle antworten bis zum ersten Lesen weiter mit 503.
+* **Notbremse im Reiter Test:** roter Knopf „Zwang jetzt überall aufheben“ mit
+  Bestätigungshaken; je Speicher eine Ergebniszeile.
+* Nach einer Beanstandung stehen die eingetippten Werte wieder im Formular, das
+  Feld ist rot umrandet; gespeichert wird nichts. „Einstellungen sichern“ warnt
+  gelb, wenn ein gespeicherter Wert das Zurückspielen nicht bestünde.
+* Berichtigt: Das Token besteht aus 1–64 Zeichen (Buchstaben, Ziffern, Punkt,
+  Bindestrich, Unterstrich).
+
 ## Neu in 0.9.30
 
 Durchgang vom 30.09.2026 mit vier Prüfern (Code, Oberfläche, Installer,
@@ -552,6 +573,15 @@ gelten:
   Rücknahme scheiterte – am Gerät prüfen.
 * **keine Befehle auf Vorrat** – ohne laufenden Dienst wird nichts eingereiht, und beim
   Dienststart verwirft der Dienst jeden Befehl, der älter als 60 Sekunden ist.
+* **Benachrichtigung bei offenem Zwang** – scheitert nach Ablauf der Totmannzeit die
+  Rücknahme, legt der Dienst zusätzlich zur Protokollzeile eine
+  LoxBerry-Benachrichtigung ab (`bin/bm_notify.php`, `notify_ext()`), höchstens eine je
+  Zwang – vom Setzen bis zur gelungenen Rücknahme (Merker
+  `zwang_gemeldet_geraetN.json` neben der Sollwertdatei). Ebenso für einen Zwang, dessen
+  Speicher nicht mehr in der Liste steht. Totmannzeit 0: keine Frist, keine Meldung.
+* **Notbremse** – Reiter Test, „Zwang jetzt überall aufheben“ (rot, nur mit Haken): jeder
+  eingerichtete Speicher geht über den Dienst in die Automatik, derselbe Weg wie
+  `aktion=automatik`; die Antwort sagt je Speicher, ob es gelang.
 
 `watt=0` ist etwas anderes als „laden mit 0 Watt": es beendet den Zwang.
 
@@ -593,8 +623,13 @@ geliefert. Es wird bewusst keine 0 gesendet.
 `OK` ist in jeder Zeile (`status`, `liste`, `zellen`, `evcc`, `summe`) 0, sobald
 `ALTER` größer ist als das Dreifache des Abruftakts; `ALTER` wird auf 86400
 gekappt (die Grenze der Vorlage). Ohne Daten antworten `status`, `zellen`,
-`liste`, `summe`, `roh` und `evcc` mit HTTP 503 und einem Grund. Ein Token, das
-nicht aus 16 bis 64 Buchstaben und Ziffern besteht, gilt als keines (403).
+`liste`, `summe`, `roh` und `evcc` mit HTTP 503 und einem Grund. Die drei
+Rücknahmen – `automatik`, `laden`/`entladen` mit `watt=0` und `batteriemodus=1` –
+werden auch vor dem ersten Abruf angenommen und eingereiht, sobald der Speicher in
+den Einstellungen steht; alle anderen schaltenden Befehle antworten dann weiter mit
+503. Ein Token, das nicht aus 1 bis 64 Zeichen (Buchstaben, Ziffern, Punkt,
+Bindestrich, Unterstrich) besteht, gilt als keines (403). *(Berichtigt: bis hier
+stand „16 bis 64 Buchstaben und Ziffern“ – das Muster gilt so seit 0.9.30.)*
 
 ## MQTT: was gesendet und was geleert wird
 

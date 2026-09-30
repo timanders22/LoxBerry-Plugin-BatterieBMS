@@ -857,6 +857,9 @@ function bm_zwang_verwaist(array $geraete, $immer = false)
                 . '): der Speicher steht nicht mehr unter dieser Nummer in der Liste, und der '
                 . 'Zwang liess sich NICHT zuruecknehmen. ' . $meld . ' Die Sollwertdatei bleibt '
                 . 'liegen; es wird erneut versucht. BITTE AM GERAET PRUEFEN.', 900);
+            // a1: ueber der Totmannfrist auch als LoxBerry-Benachrichtigung.
+            bm_zwang_melden($nr, $name, $soll,
+                time() - (int) (isset($soll['ts']) ? $soll['ts'] : time()), $meld);
         }
     }
     return $offen ? sprintf(bm_t('DIENST.ZWANG_VERWAIST'), implode(', ', $offen)) : '';
@@ -866,6 +869,102 @@ function bm_soll_loeschen($nr)
 {
     @unlink(bm_soll_datei($nr));
     bm_nachhol_loeschen($nr);
+    // a1: der Zwang ist vorbei - ein neuer darf wieder melden.
+    @unlink(bm_zwang_merker_datei($nr));
+}
+
+/* ------------------------------------------------------------------
+ * a1 (Verbesserungsbau 30.09.2026): Benachrichtigung bei offenem Zwang
+ *
+ * Steht ein Zwang laenger als die Totmannfrist ohne Lebenszeichen und
+ * scheitert die Ruecknahme in die Automatik, stand das bis 0.9.31 nur im
+ * Protokoll (bm_log_gebremst(), hoechstens alle 15 min). Wer nicht ins
+ * Protokoll sieht, erfuhr nicht, dass der Speicher womoeglich im Zwang
+ * steht. Jetzt geht zusaetzlich EINE LoxBerry-Benachrichtigung hinaus
+ * (roter Punkt am Plugin-Symbol) - hoechstens eine je Zwang: der Merker
+ * zwang_gemeldet_geraetN.json lebt so lange wie die Sollwertdatei
+ * soll_geraetN.json und faellt mit ihr (bm_soll_loeschen(),
+ * bm_zwang_merker_aufraeumen()). Ein Zwang ist also alles vom Setzen bis
+ * zur gelungenen Ruecknahme, auch wenn Lebenszeichen ihn zwischendurch
+ * auffrischen. Totmannzeit 0 (abgeschaltet) meldet nie - dann gibt es
+ * keine Frist.
+ *
+ * Weg wie AudiConnect (bin/au_notify.php): bin/bm_notify.php laedt
+ * loxberry_log.php selbst und ruft notify_ext() (Regeln/03). Scheitert
+ * das Ablegen, steht es im Protokoll, und nach 15 min wird es noch einmal
+ * versucht - der Merker gilt erst nach einem gelungenen Ablegen.
+ * ------------------------------------------------------------------ */
+function bm_zwang_merker_datei($nr)
+{
+    return bm_paths()['datadir'] . '/zwang_gemeldet_geraet' . (int) $nr . '.json';
+}
+
+/** a1: Merker ohne Sollwertdatei wegraeumen - der Zwang ist auf einem
+ *  anderen Weg zu Ende gegangen (Update, Hand, verwaister Zwang). */
+function bm_zwang_merker_aufraeumen()
+{
+    foreach ((array) glob(bm_paths()['datadir'] . '/zwang_gemeldet_geraet*.json') as $datei) {
+        if (preg_match('/zwang_gemeldet_geraet([0-9]{1,3})\.json$/', $datei, $m)
+            && !is_file(bm_soll_datei((int) $m[1]))) {
+            @unlink($datei);
+        }
+    }
+}
+
+/**
+ * a1: eine Meldung in den LoxBerry-Benachrichtigungsbereich legen, ueber
+ * bin/bm_notify.php. Rueckgabe array(abgelegt, Ausgabe des Skripts).
+ * Hoechstens 20 s (timeout), damit ein haengendes SDK den Takt nicht
+ * anhaelt.
+ */
+function bm_benachrichtigen($schwere, $text)
+{
+    $skript = __DIR__ . '/bm_notify.php';
+    if (!is_file($skript)) {
+        return array(false, 'bm_notify.php fehlt');
+    }
+    $php = (defined('PHP_BINARY') && PHP_BINARY !== '') ? PHP_BINARY : 'php';
+    $befehl = escapeshellarg($php) . ' ' . escapeshellarg($skript) . ' ' . (int) $schwere
+        . ' ' . escapeshellarg((string) $text) . ' ' . escapeshellarg((string) bm_paths()['plugin']);
+    if (bm_command_da('timeout')) {
+        $befehl = 'timeout 20 ' . $befehl;
+    }
+    $aus = array();
+    $rc = 1;
+    @exec($befehl . ' 2>&1', $aus, $rc);
+    return array($rc === 0, bm_text_sauber(implode(' ', $aus), 200));
+}
+
+/**
+ * a1: den offenen Zwang an Nummer $nr melden - einmal je Zwang.
+ * $alter: Sekunden seit dem letzten Lebenszeichen; gemeldet wird nur
+ * ueber der Totmannfrist. $grund: warum die Ruecknahme scheiterte.
+ */
+function bm_zwang_melden($nr, $name, array $soll, $alter, $grund)
+{
+    $tot = (int) bm_config()['totmann'];
+    if ($tot <= 0 || (int) $alter <= $tot || !isset($soll['aktion'])) {
+        return false;
+    }
+    $datei = bm_zwang_merker_datei($nr);
+    $merker = bm_json_lesen($datei);
+    if (is_array($merker) && !empty($merker['gemeldet'])) {
+        return false;       // schon gemeldet - hoechstens eine je Zwang
+    }
+    if (is_array($merker) && isset($merker['versuch']) && time() - (int) $merker['versuch'] < 900) {
+        return false;       // Ablegen gescheitert - erst nach 15 min erneut
+    }
+    $zwang = bm_text_sauber((string) $soll['aktion'], 20) . ':'
+        . (int) (isset($soll['watt']) ? $soll['watt'] : 0);
+    $text = sprintf(bm_t('DIENST.ZWANG_MELDUNG'), bm_text_sauber((string) $name, 64), (int) $nr,
+        $zwang, (int) $alter, bm_text_sauber((string) $grund, 200));
+    list($ok, $aus) = bm_benachrichtigen(3, $text);
+    bm_json_schreiben($datei, array('gemeldet' => $ok ? 1 : 0, 'versuch' => time(), 'zwang' => $zwang));
+    bm_log($name . ': offener Zwang ' . $zwang . ' seit ' . (int) $alter . ' s - '
+        . ($ok ? 'LoxBerry-Benachrichtigung abgelegt (einmal je Zwang).'
+               : 'die LoxBerry-Benachrichtigung liess sich NICHT ablegen (' . $aus
+                 . '). Neuer Versuch in 15 min.'));
+    return $ok;
 }
 
 /** C4: nach einer gelungenen Ruecknahme an Speicher $g die Sollwertdatei
@@ -1234,6 +1333,8 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
                         . 'Zwang steht moeglicherweise noch am Geraet. ' . $meldung
                         . ' Es wird im naechsten Durchlauf erneut versucht.', 900);
                     $eintrag['sollwert_ruecknahme'] = 'gescheitert';
+                    // a1: einmal je Zwang auch als LoxBerry-Benachrichtigung.
+                    bm_zwang_melden($nr, $g['name'], $soll, $alterSoll, $meldung);
                 }
             }
         } else {
@@ -1270,6 +1371,7 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
      * Anschrift zurueckgenommen, nicht erst nach der Totmannzeit. Geht das
      * nicht, wird es laut gemeldet - Protokoll und Zustand (Reiter
      * Einstellungen, "Letzte Stoerung") -, und die Datei bleibt liegen. */
+    bm_zwang_merker_aufraeumen();   // a1
     $verwaist = bm_zwang_verwaist($geraete);
     if ($verwaist !== '') {
         $stoerung = $verwaist;
