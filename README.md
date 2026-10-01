@@ -10,6 +10,25 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.32
+
+Verbesserungen aus dem Durchgang (Verbesserungsliste
+`Pruefung-Durchgang-2026-09-29/VERBESSERUNGEN_OFFEN.md`, Entscheidungen 16 und 19).
+Gemessen an einer Speicher-Attrappe unter PHP 7.4, 8.3 und 8.5; nicht am Speicher.
+
+* **Befehlsbremse:** Derselbe Sollwert (laden/entladen mit Watt, sperren,
+  batteriemodus 2/3) geht innerhalb von 60 s nach dem letzten Schreiben nicht
+  erneut an den Speicher; die Antwort trägt `;UNVERAENDERT=1`, ein 429 gibt es
+  nicht. Der Sollwert wird dabei weiter aufgefrischt (Totmannschaltung), ein in
+  der Schreibbremse wartender anderer Wert entfällt. Rücknahmen (automatik,
+  Watt 0, batteriemodus 1) und der Reiter Test werden nie unterdrückt; die
+  Schreibbremse bleibt.
+* **Nach einer Beanstandung wird nichts gespeichert:** Steuer- und
+  Anführungszeichen in Adresse und Port, ungültige Auswahlwerte (Vorzeichen,
+  Schreiben), halbe Speicherzeilen und leere EVCC-Felder werden beanstandet statt
+  still bereinigt; die Eingaben kommen markiert zurück. Eine Zeile entfällt nur,
+  wenn sie ganz leer ist.
+
 ## Neu in 0.9.31
 
 Verbesserungen aus dem Durchgang vom 30.09.2026 (Verbesserungsliste
@@ -521,7 +540,13 @@ und umgekehrt.
    MQTT den Haken „Werte über das MQTT-Gateway veröffentlichen“. Er ist ab Werk
    **aus**; ohne ihn sendet das Plugin nichts, auch wenn Dienst und Gateway laufen.
 1. **Einstellungen** – Speicher eintragen, Profil wählen, speichern, dann
-   *Dienst starten*.
+   *Dienst starten*. Leere Felder einer Zeile nehmen die Vorgabe des Profils. Eine
+   Zeile entfällt nur, wenn sie ganz leer ist (Schreiben „Nein“, Vorzeichen normal);
+   steht ohne Profil, Name und Adresse noch etwas darin, wird beanstandet und nichts
+   gespeichert. Steuer- oder Anführungszeichen in einem Feld werden abgewiesen, nicht
+   still entfernt. Ein leeres Feld *Welcher Speicher ist der Hausspeicher* oder
+   *Leistung für „aus dem Netz laden“* wird beanstandet, statt still den alten Wert
+   zu behalten.
 2. **Test** – die Selbstprüfung sagt Zeile für Zeile, ob die Einrichtung trägt.
    Jedes Kreuz nennt die Abhilfe mit.
 3. **Test, Rohregister lesen** – bevor Sie einem Profil glauben: Register lesen
@@ -546,6 +571,17 @@ gelten:
   Ladezwang abgewiesen, unterhalb ein Entladezwang;
 * eine **Schreibbremse** – Mindestabstand zwischen zwei Befehlen an dasselbe
   Gerät;
+* eine **Gleichwert-Unterdrückung** – derselbe Sollwert vom Endpunkt (`laden` oder
+  `entladen` mit `watt` über 0, `sperren`, `batteriemodus` 2 und 3) geht innerhalb von
+  60 Sekunden nach dem letzten Schreiben nicht erneut an den Speicher. Die Antwort ist
+  `SET;OK=1;…` mit `;UNVERAENDERT=1` am Ende; der Sollwert wird trotzdem aufgefrischt
+  (Totmannschaltung), und ein in der Schreibbremse wartender anderer Wert entfällt.
+  Verglichen wird mit dem Zwang, der wirklich steht (`soll_geraetN.json`): hat
+  dazwischen die Totmannschaltung, das Ladefenster, der Reiter Test oder eine
+  Rücknahme etwas geändert, geht der Befehl hinaus. Ein anderer Wert geht wie bisher
+  (Schreibbremse). Rücknahmen (`automatik`, `watt=0`, `batteriemodus=1`) und Befehle aus
+  dem Reiter Test werden nie unterdrückt. Der Dienst merkt sich den Wert nur im
+  Speicher; nach einem Dienststart geht die erste Wiederholung hinaus;
 * eine **Totmannschaltung** – bleibt länger als die eingestellte Zeit ein
   Lebenszeichen aus, geht der Speicher von selbst in die Automatik zurück.
   Auch beim Anhalten des Dienstes wird jeder laufende Zwang zurückgenommen.
@@ -611,6 +647,10 @@ gelten:
 Das Token wird beim ersten Öffnen der Oberfläche erzeugt und mit `hash_equals`
 verglichen, also in gleichbleibender Zeit. Unbekannte Aktionen und Werte mit
 unerlaubten Zeichen werden abgewiesen, nicht zurechtgebogen.
+
+Derselbe Sollwert innerhalb von 60 Sekunden geht nicht erneut an den Speicher; die
+Antwortzeile trägt dann hinten `;UNVERAENDERT=1` (HTTP 200, `OK=1`). Ein zusätzliches
+429 gibt es nicht. Einzelheiten unter *Steuerung*.
 
 Der Endpunkt spricht **nie** selbst mit einem Speicher: lesende Aufrufe
 beantwortet er aus dem Zwischenspeicher, schaltende legt er in einer

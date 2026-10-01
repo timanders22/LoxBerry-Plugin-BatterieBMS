@@ -1445,8 +1445,9 @@ function bm_geraetezeilen_pruefen($liste, array $zusatzprofile = array())
         /* Geprueft wird der Wert, der gespeichert wird - nicht eine
          * getrimmte Kopie. Bis 0.9.25 ging "192.168.1.5\n" aus einer
          * Sicherung hier durch und stand danach roh in der Konfiguration
-         * (gemessen 24.09.2026). Das Formular speichert ueber bm_saeubern()
-         * ohnehin ohne Rand; eine eigene Sicherung trifft das also nicht. */
+         * (gemessen 24.09.2026). Das Formular speichert ohnehin ohne Rand
+         * (trim in $hol(), Handler "Einstellungen speichern"); eine eigene
+         * Sicherung trifft das also nicht. */
         $dev = (isset($g['geraetedatei']) && is_string($g['geraetedatei'])) ? $g['geraetedatei'] : '';
         if ($dev !== '' && ($dev !== trim($dev) || !bm_geraetedatei_taugt($dev))) {
             $bean[] = sprintf(bm_t('EINST.FEHLER_DEV'), $nr);
@@ -2548,8 +2549,10 @@ function bm_befehl_antworten(array $kennungen, $wartezeit)
             if (is_file($antwort)) {
                 $a = bm_json_lesen($antwort);
                 @unlink($antwort);
+                // X-7: drittes Feld 1 = unveraendert, nichts gesendet.
                 $aus[$kennung] = array((int) (isset($a['ok']) ? $a['ok'] : 0),
-                                       (string) (isset($a['meldung']) ? $a['meldung'] : ''));
+                                       (string) (isset($a['meldung']) ? $a['meldung'] : ''),
+                                       empty($a['unveraendert']) ? 0 : 1);
                 unset($offen[$j]);
             }
         }

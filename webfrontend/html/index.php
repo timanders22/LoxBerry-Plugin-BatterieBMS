@@ -23,6 +23,11 @@
  *                                         ebenso watt=0 und batteriemodus=1)
  *   lebenszeichen           [&geraet=N]   Sollwert am Leben halten (Totmannschaltung)
  *   sperren                 [&geraet=N]   nicht entladen (erzwungenes Entladen mit 0 W)
+ *
+ *   Derselbe Sollwert (laden/entladen mit watt > 0, sperren, batteriemodus
+ *   2/3) innerhalb von 60 s geht nicht erneut an den Speicher: OK=1 und
+ *   hinten ;UNVERAENDERT=1 (X-7, Entscheidung Nr. 19). Ruecknahmen gehen
+ *   immer hinaus.
  *   abruf                                 sofort abrufen statt auf den Takt zu warten
  *
  * Fuer EVCC:
@@ -529,9 +534,23 @@ if (bm_dienst_pid() === 0) {
     exit;
 }
 
-list($bm_erg, $bm_meldung) = bm_befehl_absetzen($bm_befehl);
+/* X-7 Gleichwert-Unterdrueckung (B-Nachzug 01.10.2026, Entscheidung Nr. 19):
+ * Sollwerte - laden/entladen mit watt > 0, sperren und damit batteriemodus
+ * 2/3 - tragen das Merkmal "gleichwert". Der Dienst schickt denselben Wert
+ * innerhalb von 60 s nicht erneut an den Speicher, frischt den Sollwert
+ * aber auf (bm_gleichwert_seit() in bin/bms_dienst.php). Ruecknahmen
+ * (automatik, watt=0, batteriemodus=1) tragen es nie; die Annahme vor dem
+ * ersten Lesen (a2, Nr. 16/18) bleibt unberuehrt. Die Antwort traegt dann
+ * hinten ;UNVERAENDERT=1 - neue Felder immer hinten (siehe oben). */
+if ($bm_aktion === 'sperren'
+    || (($bm_aktion === 'laden' || $bm_aktion === 'entladen') && (int) $bm_watt > 0)) {
+    $bm_befehl['gleichwert'] = 1;
+}
+$bm_antwort = bm_befehl_absetzen($bm_befehl);
+list($bm_erg, $bm_meldung) = $bm_antwort;
 if ($bm_erg === 0) {
     http_response_code(500);
 }
-printf("SET;OK=%d;AKTION=%s;GERAET=%d;MELDUNG=%s\n", $bm_erg, $bm_aktion, (int) $bm_nr,
-    str_replace(array("\r", "\n", ';'), ' ', $bm_meldung));
+printf("SET;OK=%d;AKTION=%s;GERAET=%d;MELDUNG=%s%s\n", $bm_erg, $bm_aktion, (int) $bm_nr,
+    str_replace(array("\r", "\n", ';'), ' ', $bm_meldung),
+    !empty($bm_antwort[2]) ? ';UNVERAENDERT=1' : '');

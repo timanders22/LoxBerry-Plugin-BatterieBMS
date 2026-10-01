@@ -130,13 +130,9 @@ function bm_datei_annehmen($feld, $hoechstens)
     return array('name' => (string) $f['name'], 'inhalt' => (string) $inhalt);
 }
 
-/** Nur Steuerzeichen, Anfuehrungszeichen und Leerraum entfernen.
- *  Ein hartes preg_replace auf eine Positivliste zerstoert eingefuegte Werte -
- *  belegt am ACTi-Plugin am 26.07.2026, wo aus einer Adresse Zeichensalat wurde. */
-function bm_saeubern($wert)
-{
-    return trim(preg_replace('/[\x00-\x1F\x7F"\']/', '', (string) $wert));
-}
+/* bm_saeubern() (Steuer- und Anfuehrungszeichen still entfernen) ist mit
+ * dem B-Nachzug vom 01.10.2026 entfallen: Nr. 19, abweisen statt
+ * zurechtbiegen - siehe $hol() im Handler "Einstellungen speichern". */
 
 /* ---------------- Vorlage herunterladen ---------------- */
 /* O7 (Durchgang 29.09.2026): eine Speichernummer ausserhalb 1-6 wird
@@ -435,9 +431,23 @@ if ($bm_post && isset($_POST['speichern'])) {
      * GEMELDET, nicht verschluckt und nicht zurechtgebogen. */
     $bm_neu = array();
     for ($bm_i = 0; $bm_i < 6; $bm_i++) {
+        /* Nr. 19 (B-Nachzug 01.10.2026): abweisen statt still
+         * zurechtbiegen. Bis 0.9.32 entfernte bm_saeubern() hier Steuerzeichen
+         * und Anfuehrungszeichen still (aus 192.168.1."5 wurde 192.168.1.5),
+         * und ein Feld statt Text wurde zu "Array" - als Rechnername gueltig
+         * und gespeichert. Jetzt liefert $hol() fuer beides "\x00", und die
+         * Vorpruefung unten weist die Zeile ab. Nur Leerraum am Rand faellt
+         * still weg. */
         $hol = function ($feld) use ($bm_i) {
             $a = isset($_POST[$feld]) ? (array) $_POST[$feld] : array();
-            return isset($a[$bm_i]) ? bm_saeubern($a[$bm_i]) : '';
+            if (!isset($a[$bm_i])) {
+                return '';
+            }
+            if (!is_string($a[$bm_i])) {
+                return "\x00";
+            }
+            $w = trim($a[$bm_i]);
+            return preg_match('/[\x00-\x1F\x7F"\']/', $w) ? "\x00" : $w;
         };
         $profil = $hol('g_profil');
         /* O7 (Durchgang 29.09.2026): Anfuehrungszeichen oder Steuerzeichen im
@@ -452,9 +462,49 @@ if ($bm_post && isset($_POST['speichern'])) {
             continue;
         }
         $name = $bm_nroh;
+        // Nr. 19, N1: jedes Feld der Zeile mit unzulaessigem Inhalt beanstanden.
+        $bm_unzul = array();
+        foreach (array('g_profil', 'g_ip', 'g_port', 'g_unit', 'g_dev', 'g_baud', 'g_nennkapaz',
+                       'g_max_laden', 'g_max_entladen', 'g_vorzeichen', 'g_schreiben') as $bm_zf) {
+            if ($hol($bm_zf) === "\x00") {
+                $bm_unzul[] = $bm_zf;
+                $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_ZEICHEN_ZEILE'), $bm_i + 1,
+                    bm_t('EINST.T_' . strtoupper(substr($bm_zf, 2))));
+                $bm_mark[] = $bm_zf . '.' . $bm_i;
+            }
+        }
+        if ($bm_unzul) {
+            continue;
+        }
         $ip = $hol('g_ip');
         $dev = $hol('g_dev');
         if ($profil === '' && $name === '' && $ip === '' && $dev === '') {
+            /* Nr. 19, N2: die Zeile entfaellt nur, wenn auch sonst nichts in
+             * ihr steht. Bis 0.9.32 wurde eine Zeile ohne Profil, Name, Adresse
+             * und Geraetedatei samt Port, Leistungsgrenzen oder "Schreiben: Ja"
+             * still verworfen - und "Gespeichert" gemeldet. */
+            $bm_rest = array();
+            foreach (array('g_port', 'g_unit', 'g_baud', 'g_nennkapaz', 'g_max_laden',
+                           'g_max_entladen') as $bm_zf) {
+                if ($hol($bm_zf) !== '') {
+                    $bm_rest[] = $bm_zf;
+                }
+            }
+            if ($hol('g_schreiben') === '1') {
+                $bm_rest[] = 'g_schreiben';
+            }
+            if ($hol('g_vorzeichen') === '-1') {
+                $bm_rest[] = 'g_vorzeichen';
+            }
+            if ($bm_rest) {
+                $bm_namen = array();
+                foreach ($bm_rest as $bm_zf) {
+                    $bm_namen[] = bm_t('EINST.T_' . strtoupper(substr($bm_zf, 2)));
+                    $bm_mark[] = $bm_zf . '.' . $bm_i;
+                }
+                $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_ZEILE_REST'), $bm_i + 1, implode(', ', $bm_namen));
+                $bm_mark[] = 'g_profil.' . $bm_i;
+            }
             continue;   // leere Zeile
         }
         if (!isset($bm_profile[$profil])) {
@@ -495,6 +545,19 @@ if ($bm_post && isset($_POST['speichern'])) {
                 $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_IP'), $bm_i + 1);
                 $bm_mark[] = 'g_ip.' . $bm_i;
                 continue;
+            }
+        }
+        /* Nr. 19, N3: bis 0.9.32 wurde aus jedem anderen Wert still
+         * "Schreiben: Nein" bzw. "Vorzeichen: normal". Leer heisst: das Feld
+         * kam nicht mit (kein Formular dieses Plugins) - dann gilt wie bisher
+         * die Vorgabe. */
+        foreach (array('g_schreiben' => array('', '0', '1'), 'g_vorzeichen' => array('', '1', '-1'))
+                 as $bm_zf => $bm_erl) {
+            if (!in_array($hol($bm_zf), $bm_erl, true)) {
+                $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_AUSWAHL_ZEILE'), $bm_i + 1,
+                    bm_t('EINST.T_' . strtoupper(substr($bm_zf, 2))));
+                $bm_mark[] = $bm_zf . '.' . $bm_i;
+                continue 2;
             }
         }
         $zeile = array(
@@ -575,8 +638,15 @@ if ($bm_post && isset($_POST['speichern'])) {
 
     foreach (array('evcc_geraet' => array(1, 99), 'evcc_ladewatt' => array(0, 30000))
              as $bm_ef => $bm_eg) {
-        $bm_ew = isset($_POST[$bm_ef]) ? trim((string) $_POST[$bm_ef]) : '';
-        if ($bm_ew === '') { continue; }
+        /* Nr. 19, N4: bis 0.9.32 behielt ein LEERES Feld still den alten Wert
+         * ("if ($bm_ew === '') continue"). Beide Felder stehen immer im
+         * Formular; leer ist jetzt eine Beanstandung wie ein falscher Wert.
+         * Fehlt das Feld ganz (kein Formular dieses Plugins), bleibt der
+         * Wert. Ein Feld statt Text wird beanstandet, ohne PHP-Warnung. */
+        if (!isset($_POST[$bm_ef])) {
+            continue;
+        }
+        $bm_ew = is_string($_POST[$bm_ef]) ? trim($_POST[$bm_ef]) : "\x00";
         if (!preg_match('/^[0-9]+$/', $bm_ew)) {
             $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_ZAHL'), bm_t('EINST.L_' . strtoupper($bm_ef)));
             $bm_mark[] = $bm_ef;
@@ -1120,11 +1190,11 @@ for ($bm_i = 0; $bm_i < 6; $bm_i++) {
 <td><input data-role="none" type="text" name="g_nennkapaz[]" value="<?= bm_e($bm_v('nennkapaz')) ?>"<?= bm_markierung('speichern', 'g_nennkapaz', $bm_i) ?> size="4"></td>
 <td><input data-role="none" type="text" name="g_max_laden[]" value="<?= bm_e($bm_v('max_laden')) ?>"<?= bm_markierung('speichern', 'g_max_laden', $bm_i) ?> size="4"></td>
 <td><input data-role="none" type="text" name="g_max_entladen[]" value="<?= bm_e($bm_v('max_entladen')) ?>"<?= bm_markierung('speichern', 'g_max_entladen', $bm_i) ?> size="4"></td>
-<td><select data-role="none" name="g_vorzeichen[]">
+<td><select data-role="none" name="g_vorzeichen[]"<?= bm_markierung('speichern', 'g_vorzeichen', $bm_i) ?>>
     <option value="1"<?= bm_vorzeichen_wert(bm_eingabe('speichern', 'g_vorzeichen', isset($bm_z['vorzeichen']) ? $bm_z['vorzeichen'] : 1, $bm_i)) !== -1 ? ' selected' : '' ?>><?= bm_e(bm_t('EINST.VZ_NORMAL')) ?></option>
     <option value="-1"<?= bm_vorzeichen_wert(bm_eingabe('speichern', 'g_vorzeichen', isset($bm_z['vorzeichen']) ? $bm_z['vorzeichen'] : 1, $bm_i)) === -1 ? ' selected' : '' ?>><?= bm_e(bm_t('EINST.VZ_UMGEKEHRT')) ?></option>
 </select></td>
-<td><select data-role="none" name="g_schreiben[]">
+<td><select data-role="none" name="g_schreiben[]"<?= bm_markierung('speichern', 'g_schreiben', $bm_i) ?>>
     <option value="0"<?= bm_schreiben_an(bm_eingabe('speichern', 'g_schreiben', isset($bm_z['schreiben']) ? $bm_z['schreiben'] : 0, $bm_i)) !== 1 ? ' selected' : '' ?>><?= bm_e(bm_t('ALLG.NEIN')) ?></option>
     <option value="1"<?= bm_schreiben_an(bm_eingabe('speichern', 'g_schreiben', isset($bm_z['schreiben']) ? $bm_z['schreiben'] : 0, $bm_i)) === 1 ? ' selected' : '' ?>><?= bm_e(bm_t('ALLG.JA')) ?></option>
 </select></td>

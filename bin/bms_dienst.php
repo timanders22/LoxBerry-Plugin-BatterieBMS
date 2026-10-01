@@ -1276,6 +1276,7 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
             }
             if ($fenster !== '') {
                 list($okF, $meldF) = bm_steuern($g, $pr, 'automatik', 0);
+                bm_gleichwert_nachher($nr, 'automatik', 0, false);   // X-7
                 if ($okF) {
                     bm_soll_loeschen($nr);
                     bm_log($g['name'] . ': der Ladezustand hat das Fenster verlassen, der Zwang '
@@ -1303,6 +1304,7 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
             $tot = max(0, (int) $cfg['totmann']);
             if ($tot > 0 && $alterSoll > $tot) {
                 list($ok, $meldung) = bm_steuern($g, $pr, 'automatik', 0);
+                bm_gleichwert_nachher($nr, 'automatik', 0, false);   // X-7
                 /* NUR bei Erfolg loeschen (B07, 04.09.2026).
                  *
                  * Bis 0.9.15 wurde $ok gebunden und nie gelesen: die
@@ -1708,10 +1710,16 @@ function bm_warteschlange(&$letzteSchreibzeit)
             bm_log('Warteschlange im Lauf: ' . $grund);
             continue;
         }
-        list($ok, $meldung) = bm_befehl_ausfuehren($befehl, $letzteSchreibzeit, $sofortAbruf);
-        bm_json_schreiben($antworten . '/' . $kennung . '.json',
-                          array('ok' => $ok, 'meldung' => $meldung));
-        bm_log('Befehl ' . $befehl['aktion'] . ': ' . ($ok ? 'erledigt' : 'abgelehnt')
+        $erg = bm_befehl_ausfuehren($befehl, $letzteSchreibzeit, $sofortAbruf);
+        list($ok, $meldung) = $erg;
+        $antwort = array('ok' => $ok, 'meldung' => $meldung);
+        // X-7: derselbe Sollwert ging vor weniger als 60 s schon hinaus.
+        if (!empty($erg[2])) {
+            $antwort['unveraendert'] = 1;
+        }
+        bm_json_schreiben($antworten . '/' . $kennung . '.json', $antwort);
+        bm_log('Befehl ' . $befehl['aktion'] . ': '
+            . (!empty($erg[2]) ? 'unveraendert, nicht gesendet' : ($ok ? 'erledigt' : 'abgelehnt'))
             . ' - ' . $meldung);
     }
     // Herrenlose Antworten wegraeumen: der Fragende ist laengst weg.
@@ -1721,6 +1729,104 @@ function bm_warteschlange(&$letzteSchreibzeit)
         }
     }
     return $sofortAbruf;
+}
+
+/* ------------------------------------------------------------------
+ * X-7 Gleichwert-Unterdrueckung (B-Nachzug 01.10.2026, Entscheidung Nr. 19)
+ *
+ * Ein Sollwert vom Endpunkt - laden/entladen mit watt > 0, sperren, und
+ * batteriemodus 2/3, das der Endpunkt darauf uebersetzt - geht mit DEMSELBEN
+ * Wert innerhalb von 60 s nicht erneut an den Speicher: Antwort OK=1 mit
+ * UNVERAENDERT=1. Bis 0.9.32 schrieb jede Wiederholung die ganze
+ * Schrittfolge erneut, bei laufender Schreibbremse ueber die Nachholmappe
+ * eben spaeter. Die Schreibbremse (Mindestabstand) bleibt; die
+ * Unterdrueckung kommt VOR ihr. Ein anderer Wert geht wie bisher - ein
+ * zusaetzliches 429 gibt es nicht.
+ *
+ * Warum hier und nicht im Endpunkt (anders als EVCC und Heimkino): der
+ * Endpunkt spricht nie mit dem Speicher, der Dienst ist der einzige
+ * Schreiber. Nur hier
+ *  - wird mit dem Zwang verglichen, der WIRKLICH steht (soll_geraetN.json):
+ *    haben dazwischen Totmannschaltung, Ladefenster, Reiter Test, Notbremse
+ *    oder eine Ruecknahme etwas geaendert, geht der Befehl hinaus;
+ *  - frischt eine Wiederholung den Sollwert weiter auf wie bisher - wer den
+ *    Zwang durch Wiederholen am Leben haelt, verliert ihn nicht an die
+ *    Totmannschaltung (die kann kuerzer als 60 s eingestellt sein);
+ *  - verwirft der gleiche Wert einen anderen, der in der Nachholmappe
+ *    wartet: der juengste Wunsch ist der, der schon steht.
+ * Der Merker lebt nur in diesem Prozess, und davon laeuft hoechstens einer
+ * (flock auf dienst.lock, siehe Dateiende): es gibt keinen zweiten Schreiber
+ * und keine Datei, die ein Kind erben koennte. Nach einem Dienststart ist er
+ * leer, die erste Wiederholung geht dann hinaus - im Zweifel senden, nie
+ * still verschlucken. Ruecknahmen (automatik, watt=0, batteriemodus=1) und
+ * Befehle aus dem Reiter Test werden nie unterdrueckt.
+ * ------------------------------------------------------------------ */
+define('BM_GLEICHWERT_FENSTER', 60);
+
+/** Der Merker: Speichernummer => array('w' => 'laden:500', 't' => Sendezeit). */
+function &bm_gleichwert_merker()
+{
+    static $m = array();
+    return $m;
+}
+
+/** Nach einer Schreibfolge an Nummer $nr: ein gelungener Sollwert wird
+ *  gemerkt, alles andere (Ruecknahme, gescheitert) vergessen. */
+function bm_gleichwert_nachher($nr, $aktion, $watt, $ok)
+{
+    $m = &bm_gleichwert_merker();
+    if ($ok && ($aktion === 'sperren'
+            || (($aktion === 'laden' || $aktion === 'entladen') && (int) $watt > 0))) {
+        $m[(int) $nr] = array('w' => $aktion . ':' . (int) $watt, 't' => time());
+    } else {
+        unset($m[(int) $nr]);
+    }
+}
+
+/**
+ * Sekunden seit DEMSELBEN Sollwert an Nummer $nr, sonst -1. Unterdrueckt
+ * wird nur, wenn alles zusammentrifft:
+ *  - der Merker traegt genau diesen Wert, gesendet vor weniger als 60 s;
+ *  - die Sollwertdatei steht auf genau diesem Wert und gehoert diesem
+ *    Speicher (bm_soll_gehoert());
+ *  - beide Freigaben sind an - sonst weist der gewoehnliche Weg ab, wie
+ *    bisher.
+ */
+function bm_gleichwert_seit($nr, array $g, $aktion, $watt)
+{
+    $m = &bm_gleichwert_merker();
+    $nr = (int) $nr;
+    if (!isset($m[$nr]) || $m[$nr]['w'] !== $aktion . ':' . (int) $watt) {
+        return -1;
+    }
+    $seit = time() - (int) $m[$nr]['t'];
+    if ($seit < 0 || $seit >= BM_GLEICHWERT_FENSTER) {
+        return -1;
+    }
+    $cfg = bm_config();
+    if (empty($cfg['steuerung_ein']) || empty($g['schreiben'])) {
+        return -1;
+    }
+    $soll = bm_soll_lesen($nr);
+    if (!is_array($soll) || !isset($soll['aktion'], $soll['watt'])
+        || (string) $soll['aktion'] !== $aktion || (int) $soll['watt'] !== (int) $watt
+        || !bm_soll_gehoert($soll, $g)) {
+        return -1;
+    }
+    return $seit;
+}
+
+/** Den unterdrueckten Befehl beantworten: Sollwert auffrischen (wie bisher
+ *  jede Wiederholung), einen wartenden anderen Wert der Nachholmappe
+ *  verwerfen. Rueckgabe array(1, Meldung, 1) - das dritte Feld heisst
+ *  "unveraendert, nichts gesendet". */
+function bm_gleichwert_antwort($nr, array $g, array $pr, $aktion, $watt, $seit)
+{
+    $soll = bm_soll_lesen($nr);
+    bm_soll_schreiben($nr, (string) $soll['aktion'], (int) $soll['watt'],
+        isset($soll['quelle']) ? (string) $soll['quelle'] : '', bm_soll_zusatz_alt($soll, $g, $pr));
+    bm_nachhol_loeschen($nr);
+    return array(1, sprintf(bm_t('DIENST.UNVERAENDERT'), $aktion . ':' . (int) $watt, (int) $seit), 1);
 }
 
 function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
@@ -1773,6 +1879,7 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
 
     if ($aktion === 'automatik') {
         list($ok, $meldung) = bm_steuern($g, $pr, 'automatik', 0);
+        bm_gleichwert_nachher($nr, 'automatik', 0, $ok);   // X-7
         if ($ok) {
             bm_soll_loeschen_fuer($nr, $g);
             $sofortAbruf = true;
@@ -1811,7 +1918,15 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
          * nicht leerer machen, als er ist. Eine Grenzpruefung haette hier nur
          * die Wirkung, dass ein fast leerer Speicher nicht angehalten werden
          * koennte, und das ist genau verkehrt herum. */
+        // X-7: dieselbe Sperre vom Endpunkt innerhalb von 60 s geht nicht erneut hinaus.
+        if (!empty($befehl['gleichwert'])) {
+            $seit = bm_gleichwert_seit($nr, $g, 'sperren', 0);
+            if ($seit >= 0) {
+                return bm_gleichwert_antwort($nr, $g, $pr, 'sperren', 0, $seit);
+            }
+        }
         list($ok, $meldung) = bm_steuern($g, $pr, 'sperren', 0);
+        bm_gleichwert_nachher($nr, 'sperren', 0, $ok);   // X-7
         if ($ok) {
             bm_soll_schreiben($nr, 'sperren', 0, $bm_quelle, bm_soll_zusatz($g, $pr));
             $sofortAbruf = true;
@@ -1831,6 +1946,7 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
     // 0 Watt laden' und wird deshalb ausdruecklich so behandelt.
     if ($watt === 0) {
         list($ok, $meldung) = bm_steuern($g, $pr, 'automatik', 0);
+        bm_gleichwert_nachher($nr, 'automatik', 0, $ok);   // X-7
         if ($ok) {
             bm_soll_loeschen_fuer($nr, $g);
             $sofortAbruf = true;
@@ -1854,6 +1970,17 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
         }
         if ($aktion === 'entladen' && $soc <= (int) $cfg['soc_min']) {
             return array(0, sprintf(bm_t('DIENST.SOC_ZU_NIEDRIG'), $soc, (int) $cfg['soc_min']));
+        }
+    }
+
+    /* X-7: derselbe Sollwert vom Endpunkt innerhalb von 60 s geht nicht
+     * erneut hinaus - auch nicht ueber die Nachholmappe. Erst nach den
+     * Pruefungen oben (Grenze, Ladefenster weisen weiter ab), VOR der
+     * Schreibbremse, die fuer einen anderen Wert bleibt. */
+    if (!empty($befehl['gleichwert'])) {
+        $seit = bm_gleichwert_seit($nr, $g, $aktion, $watt);
+        if ($seit >= 0) {
+            return bm_gleichwert_antwort($nr, $g, $pr, $aktion, $watt, $seit);
         }
     }
 
@@ -1883,6 +2010,7 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
     }
 
     list($ok, $meldung) = bm_steuern($g, $pr, $aktion, $watt);
+    bm_gleichwert_nachher($nr, $aktion, $watt, $ok);   // X-7
     if ($ok) {
         $letzteSchreibzeit[$nr] = time();
         // C4: die Anschrift und die Ruecknahmeschritte reisen mit.
