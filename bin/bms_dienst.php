@@ -2694,6 +2694,119 @@ function bm_selbsttest()
         $fehler++;
     }
 
+    /* Energie-1 C1: die reinen Teile der Schreiber-Wache (ohne Datei, ohne
+     * Netz). Beispiele "kennung@adresse" werden mit $bm_at zusammengesetzt -
+     * ein Literal dieser Form haelt das Freigabetor fuer eine E-Mail-Adresse. */
+    $bm_at = '@';
+    $bm_wt = array();
+    $bm_wv = bm_vorgaben();
+    $bm_wt['Vorgaben: melden an, sperren aus, Fenster 15, LoxBerry-Meldung aus, Liste leer, Fuehrung beide']
+        = array($bm_wv['wache_ein'], $bm_wv['wache_sperren_ein'], $bm_wv['wache_fenster_min'],
+                $bm_wv['wache_lb_melden'], $bm_wv['wache_erlaubt'], $bm_wv['fuehrung'])
+          === array(1, 0, 15, 0, '', 'beide');
+    $bm_wt['Kennungen: loxone, evcc_2-x gueltig; leer, mit Punkt, 33 Zeichen, Liste nicht'] = array(
+        bm_wache_kennung_gueltig('loxone'), bm_wache_kennung_gueltig('evcc_2-x'),
+        bm_wache_kennung_gueltig(''), bm_wache_kennung_gueltig('lox.one'),
+        bm_wache_kennung_gueltig(str_repeat('x', 33)), bm_wache_kennung_gueltig(array('loxone')))
+        === array(true, true, false, false, false, false);
+    list($bm_le, $bm_lf) = bm_wache_liste('loxone, 192.168.1.5;evcc' . $bm_at . '127.0.0.1');
+    $bm_wt['Liste mit drei Formen (Kennung, Adresse, Kennung und Adresse)'] = (count($bm_le) === 3 && $bm_lf === array());
+    list(, $bm_lf2) = bm_wache_liste('loxone,lox.one,' . "\xC3\xA4");
+    $bm_wt['Liste mit zwei unzulaessigen Teilen'] = (count($bm_lf2) === 2);
+    $bm_wt['Liste mit 17 Eintraegen abgewiesen'] = (count(bm_wache_liste(implode(',',
+        array_map(function ($i) { return 'k' . $i; }, range(1, 17))))[1]) === 1);
+    $bm_wt['erlaubt nach Kennung, Adresse, Paar'] = array(
+        bm_wache_erlaubt($bm_le, 'loxone', '192.168.1.9'), bm_wache_erlaubt($bm_le, '', '192.168.1.5'),
+        bm_wache_erlaubt($bm_le, 'evcc', '127.0.0.1'), bm_wache_erlaubt($bm_le, 'evcc', '10.0.0.1'),
+        bm_wache_erlaubt($bm_le, '', '127.0.0.1')) === array(true, true, true, false, false);
+    $bm_wt['IPv6 in langer Schreibweise ist dieselbe Adresse']
+        = bm_wache_erlaubt(bm_wache_liste('0:0:0:0:0:0:0:1')[0], '', '::1') === true;
+    $bm_wt['Rollen: von=loxone, von=EVCC, ohne Kennung (Endpunkt / batteriemodus), andere'] = array(
+        bm_wache_rolle('loxone', true), bm_wache_rolle('EVCC', false), bm_wache_rolle('', false),
+        bm_wache_rolle('', true), bm_wache_rolle('awattar', false))
+        === array('loxone', 'evcc', 'loxone', 'evcc', 'andere');
+    $bm_w0 = bm_wache_einstellungen(array());
+    $bm_ws = array('wache_sperren_ein' => 1) + $bm_w0;
+    $bm_wt['Sperren aus - nie abweisen, auch mit Fuehrung Loxone']
+        = bm_wache_sperre_urteil(array('fuehrung' => 'loxone') + $bm_w0, 'evcc', '127.0.0.1', 'evcc')
+          === array(false, true, '', '');
+    $bm_wt['Sperren an, Fuehrung beide, Liste leer - wirkt nicht']
+        = bm_wache_sperre_urteil($bm_ws, 'x', '127.0.0.1', 'andere') === array(false, true, 'LISTE', '');
+    $bm_wt['Sperren an, Fuehrung Loxone: EVCC abgewiesen (FUEHRUNG), Loxone erlaubt, andere abgewiesen'] = array(
+        bm_wache_sperre_urteil(array('fuehrung' => 'loxone') + $bm_ws, 'evcc', '127.0.0.1', 'evcc'),
+        bm_wache_sperre_urteil(array('fuehrung' => 'loxone') + $bm_ws, '', '192.168.1.7', 'loxone'),
+        bm_wache_sperre_urteil(array('fuehrung' => 'loxone') + $bm_ws, 'awattar', '127.0.0.1', 'andere'))
+        === array(array(true, false, '', 'FUEHRUNG'), array(true, true, '', ''), array(true, false, '', 'FUEHRUNG'));
+    $bm_wt['Sperren an, Fuehrung EVCC: Loxone abgewiesen, EVCC erlaubt'] = array(
+        bm_wache_sperre_urteil(array('fuehrung' => 'evcc') + $bm_ws, 'loxone', '192.168.1.7', 'loxone')[1],
+        bm_wache_sperre_urteil(array('fuehrung' => 'evcc') + $bm_ws, '', '192.168.1.8', 'evcc')[1])
+        === array(false, true);
+    $bm_wt['Sperren an, Liste loxone: fremd abgewiesen (LISTE), ohne Kennung nur ueber die Adresse'] = array(
+        bm_wache_sperre_urteil(array('wache_erlaubt' => 'loxone') + $bm_ws, 'awattar', '127.0.0.1', 'andere'),
+        bm_wache_sperre_urteil(array('wache_erlaubt' => 'loxone') + $bm_ws, '', '192.168.1.7', 'loxone')[1],
+        bm_wache_sperre_urteil(array('wache_erlaubt' => 'loxone,192.168.1.7') + $bm_ws, '', '192.168.1.7', 'loxone')[1])
+        === array(array(true, false, '', 'LISTE'), false, true);
+    $bm_wt['von Hand verdorbene Einstellungen gelten mit der Vorgabe, die Liste als unbrauchbar']
+        = bm_wache_einstellungen(array('wache_fenster_min' => 0, 'wache_erlaubt' => array('x'),
+            'wache_sperren_ein' => '1', 'wache_ein' => 'ja', 'fuehrung' => 'Loxone'))
+          === array('wache_ein' => 1, 'wache_fenster_min' => 15, 'wache_lb_melden' => 0, 'wache_sperren_ein' => 1,
+                    'wache_erlaubt' => '', 'fuehrung' => 'beide', 'liste_kaputt' => true);
+    $bm_wt['unbrauchbare Liste: die Sperre wirkt nicht, auch mit Fuehrung']
+        = bm_wache_sperre_urteil(bm_wache_einstellungen(array('wache_sperren_ein' => 1, 'fuehrung' => 'loxone',
+            'wache_erlaubt' => 'loxone,lox.one')), 'evcc', '127.0.0.1', 'evcc') === array(false, true, 'LISTE', '');
+    // Fortschreiben: ein Schreiber, dann ein zweiter, gebremst, Runde zurueck, neue Runde.
+    list($bm_m, $bm_f, $bm_me, $bm_n) = bm_wache_fortschreiben(array(), 'loxone', '192.168.1.7', 'loxone', 'laden 500 W', false, 1000, 900);
+    $bm_wt['ein Schreiber - nichts melden'] = array(count($bm_f), $bm_me, $bm_n) === array(1, false, false);
+    list($bm_m, $bm_f, $bm_me) = bm_wache_fortschreiben($bm_m, 'loxone', '192.168.1.7', 'loxone', 'lebenszeichen', false, 1030, 900);
+    $bm_wt['derselbe Schreiber zaehlt hoch'] = array(count($bm_f), $bm_f[0]['n'], $bm_me) === array(1, 2, false);
+    list($bm_m, $bm_f, $bm_me, $bm_n) = bm_wache_fortschreiben($bm_m, 'evcc', '127.0.0.1', 'evcc', 'sperren', false, 1060, 900);
+    $bm_wt['zweiter Schreiber - neue Runde, melden'] = array(count($bm_f), $bm_me, $bm_n, $bm_f[0]['von'], $bm_f[0]['rolle'])
+        === array(2, true, true, 'evcc', 'evcc');
+    list($bm_m, $bm_f, $bm_me, $bm_n) = bm_wache_fortschreiben($bm_m, 'evcc', '127.0.0.1', 'evcc', 'sperren', true, 1120, 900);
+    $bm_wt['dieselbe Runde im Fenster - nicht noch einmal, abgewiesen gezaehlt']
+        = array($bm_me, $bm_n, $bm_f[0]['abgewiesen']) === array(false, false, 1);
+    list($bm_m, $bm_f, $bm_me, $bm_n) = bm_wache_fortschreiben($bm_m, 'loxone', '192.168.1.7', 'loxone', 'laden 500 W', false, 1960, 900);
+    $bm_wt['dieselbe Runde nach einem Fenster - wieder melden, nicht neu'] = array(count($bm_f), $bm_me, $bm_n) === array(2, true, false);
+    list($bm_m, $bm_f, $bm_me) = bm_wache_fortschreiben($bm_m, 'loxone', '192.168.1.7', 'loxone', 'laden 500 W', false, 3000, 900);
+    $bm_wt['zweiter faellt aus dem Fenster - ein Schreiber, Runde leer']
+        = array(count($bm_f), $bm_me, $bm_m['runde'], count($bm_m['schreiber'])) === array(1, false, '', 2);
+    list($bm_m, $bm_f, $bm_me, $bm_n) = bm_wache_fortschreiben($bm_m, '', '127.0.0.1', 'evcc', 'ruecknahme', false, 3010, 900);
+    $bm_wt['neuer zweiter (ohne Kennung, Ruecknahme) - wieder neu']
+        = array(count($bm_f), $bm_me, $bm_n, $bm_f[0]['art']) === array(2, true, true, 'ruecknahme');
+    list($bm_m) = bm_wache_fortschreiben($bm_m, 'loxone', '192.168.1.7', 'loxone', 'laden 500 W', false, 3010 + 86401, 900);
+    $bm_wt['nach 24 h bleibt nur der neue Eintrag'] = count($bm_m['schreiber']) === 1;
+    $bm_m = array();
+    for ($bm_i = 1; $bm_i <= 25; $bm_i++) {
+        list($bm_m) = bm_wache_fortschreiben($bm_m, 'k' . $bm_i, '10.0.0.1', 'andere', 'laden 100 W', false, 5000 + $bm_i, 900);
+    }
+    $bm_wt['hoechstens 20 Schreiber, die neuesten bleiben'] = array(count($bm_m['schreiber']),
+        isset($bm_m['schreiber']['k25' . $bm_at . '10.0.0.1']), isset($bm_m['schreiber']['k5' . $bm_at . '10.0.0.1']))
+        === array(20, true, false);
+    $bm_wt['Kreuzpruefung: Sperren ohne Fuehrung und ohne Liste ist ein Mangel, mit Fuehrung oder Liste nicht'] = array(
+        bm_wache_kreuzmangel(array('wache_sperren_ein' => 1, 'wache_erlaubt' => '', 'fuehrung' => 'beide')),
+        bm_wache_kreuzmangel(array('wache_sperren_ein' => 1, 'wache_erlaubt' => '', 'fuehrung' => 'loxone')),
+        bm_wache_kreuzmangel(array('wache_sperren_ein' => 1, 'wache_erlaubt' => 'loxone', 'fuehrung' => 'beide')),
+        bm_wache_kreuzmangel(array('wache_sperren_ein' => 0, 'wache_erlaubt' => '', 'fuehrung' => 'beide')))
+        === array(true, false, false, false);
+    $bm_wt['Werte pruefen (Formular und Zurueckspielen)'] = array(
+        bm_wert_pruefen('wache_fenster_min', 15), bm_wert_pruefen('wache_fenster_min', 120),
+        bm_wert_pruefen('wache_fenster_min', 0) !== '', bm_wert_pruefen('wache_fenster_min', '15.5') !== '',
+        bm_wert_pruefen('wache_ein', 2) !== '', bm_wert_pruefen('wache_ein', array(1)) !== '',
+        bm_wert_pruefen('wache_erlaubt', 'loxone, 192.168.1.5'), bm_wert_pruefen('wache_erlaubt', 'loxone,lox.one') !== '',
+        bm_wert_pruefen('wache_erlaubt', array('loxone')) !== '', bm_wert_pruefen('fuehrung', 'evcc'),
+        bm_wert_pruefen('fuehrung', 'EVCC') !== '', bm_wert_pruefen('fuehrung', array('evcc')) !== '')
+        === array('', '', true, true, true, true, '', true, true, '', true, true);
+    $bm_rk = bm_rueckspiel_pruefen(array('geraete' => array(), 'wache_sperren_ein' => 1, 'wache_erlaubt' => '', 'fuehrung' => 'beide'));
+    $bm_rk2 = bm_rueckspiel_pruefen(array('geraete' => array(), 'wache_sperren_ein' => 1, 'wache_erlaubt' => '', 'fuehrung' => 'loxone'));
+    $bm_wt['Zurueckspielen: Sperren ohne Fuehrung und Liste abgewiesen, mit Fuehrung angenommen'] = array(
+        in_array('wache_sperren_ein', $bm_rk['namen'], true), $bm_rk2['namen']) === array(true, array());
+    foreach ($bm_wt as $bm_wn => $bm_wok) {
+        $zeilen[] = ($bm_wok === true ? '[OK]   ' : '[FEHL] ') . 'Schreiber-Wache: ' . $bm_wn;
+        if ($bm_wok !== true) {
+            $fehler++;
+        }
+    }
+
     $zeilen[] = '';
     $zeilen[] = 'Nicht geprueft, weil dafuer ein Speicher noetig ist:';
     $zeilen[] = '  - ob die Registeradressen des gewaehlten Profils zu DIESER Firmware passen';

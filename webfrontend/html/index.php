@@ -28,6 +28,17 @@
  *   2/3) innerhalb von 60 s geht nicht erneut an den Speicher: OK=1 und
  *   hinten ;UNVERAENDERT=1 (X-7, Entscheidung Nr. 19). Ruecknahmen gehen
  *   immer hinaus.
+ *
+ *   SCHREIBER-WACHE (Energie-1 C1, Entscheidung Nr. 25): schaltende Befehle
+ *   tragen optional &von=<kennung> (die Vorlage setzt von=loxone, die
+ *   EVCC-Adresse von=evcc); gemerkt wird Kennung@Absender. Mehr als ein
+ *   Schreiber im Fenster (ab Werk 15 min): Protokoll, Reiter Test, Antwort
+ *   hinten ;SCHREIBER=n - abgewiesen wird nichts. Nur mit "Fremde Schreiber
+ *   abweisen" (ab Werk aus) bekommt ein Sollwert, dessen Rolle nicht fuehrt
+ *   (Einstellung Fuehrung) oder dessen Schreiber nicht in der Liste steht,
+ *   HTTP 409 GRUND=FREMDSCHREIBER und wird nicht eingereiht; Ruecknahmen nie.
+ *   Merker nicht nutzbar: der Befehl geht trotzdem, hinten ;WACHE=MERKER.
+ *   Eine ungueltige Kennung: HTTP 400 ERR=VON.
  *   abruf                                 sofort abrufen statt auf den Takt zu warten
  *
  * Fuer EVCC:
@@ -184,6 +195,23 @@ function bm_param($name, $muster, $vorgabe = '')
 
 $bm_nr   = bm_param('geraet', '/^[0-9]{1,2}$/', '1');
 $bm_watt = bm_param('watt', '/^[0-9]{1,5}$/', '');
+
+/* Energie-1 C1: &von=<kennung> (Schreiber-Wache). Fehlt es: '' (ohne Kennung).
+ * Eine Kennung, die nicht ins Muster passt (auch leer), wird abgewiesen wie
+ * jeder andere falsche Parameter - abweisen statt zurechtbiegen (Nr. 19); ein
+ * Tippfehler faellt beim Einrichten auf. Der Wert selbst kommt nicht ins
+ * Protokoll. */
+$bm_von = '';
+if (isset($_GET['von'])) {
+    if (!bm_wache_kennung_gueltig($_GET['von'])) {
+        http_response_code(400);
+        echo "FEHLER;OK=0;ERR=VON\n";
+        echo "Die Kennung in von passt nicht ins Muster: 1 bis 32 Zeichen aus A-Z, a-z, 0-9, _ und -.\n";
+        bm_ep_log('VON', is_string($_GET['von']) ? strlen($_GET['von']) . ' Zeichen' : 'kein Text');
+        exit;
+    }
+    $bm_von = $_GET['von'];
+}
 
 /** Ein Strich statt einer erfundenen 0. Loxone behaelt dann den letzten Wert. */
 function bm_w($v)
@@ -523,9 +551,72 @@ if ($bm_aktion !== 'abruf' && !$bm_ruecknahme && empty($bm_cfg['steuerung_ein'])
     exit;
 }
 
+/**
+ * Schreiber-Wache (Energie-1 C1, Entscheidung Nr. 25; Kopf der Funktionen in
+ * bm_lib.php): merken und melden, und nur mit "Fremde Schreiber abweisen"
+ * einen Sollwert mit 409 abweisen, bevor er eingereiht wird. Ruecknahmen nie.
+ * Rueckgabe: Zusatz fuer die Antwortzeile - ;SCHREIBER=n ab zwei Schreibern
+ * im Fenster, ;WACHE=MERKER, wenn das Merken nicht ging (der Befehl geht
+ * trotzdem). Neue Felder immer hinten (siehe "DIE REIHENFOLGE DER FELDER").
+ */
+function bm_ep_wache($nr, $von, $evcc_weg, $aktion, $ruecknahme, $watt)
+{
+    $w = bm_wache_einstellungen(bm_config());
+    $ip = bm_wache_absender();
+    $rolle = bm_wache_rolle($von, $evcc_weg);
+    list($aktiv, $erlaubt, $fehler, $grund) = bm_wache_sperre_urteil($w, $von, $ip, $rolle);
+    if ($fehler !== '') {
+        bm_log_gebremst('wache_liste', 'Schreiber-Wache: "Fremde Schreiber abweisen" ist eingeschaltet, '
+            . 'aber weder eine Fuehrung gewaehlt noch eine brauchbare Liste erlaubter Schreiber da - die '
+            . 'Sperre wirkt NICHT, bis das im Reiter Einstellungen berichtigt ist.', 3600);
+    }
+    $abweisen = $aktiv && !$erlaubt && !$ruecknahme;
+    $art = $ruecknahme ? 'ruecknahme'
+        : ($aktion . (($aktion === 'laden' || $aktion === 'entladen') ? ' ' . (int) $watt . ' W' : ''));
+    $wer = ($von !== '' ? $von : 'ohne Kennung') . '@' . ($ip !== '' ? $ip : '?');
+    $zusatz = '';
+    if ((int) $w['wache_ein'] === 1) {
+        $m = bm_wache_merken((int) $nr, $von, $ip, $rolle, $art, $abweisen, $w);
+        if ($m['anzahl'] > 1) {
+            $zusatz .= ';SCHREIBER=' . (int) $m['anzahl'];
+        }
+        if (!$m['merker']) {
+            $zusatz .= ';WACHE=MERKER';
+        }
+        if (!$ruecknahme && !bm_wache_fuehrt($w['fuehrung'], $rolle)) {
+            bm_log_gebremst('wache_fuehrung_' . (int) $nr . '_' . $rolle, 'Schreiber-Wache, Speicher '
+                . (int) $nr . ': ' . $art . ' von ' . $wer . ' (Rolle ' . bm_wache_rollenname($rolle)
+                . '), eingestellt ist "Fuehrung: ' . bm_wache_rollenname($w['fuehrung']) . '" - '
+                . ($abweisen ? 'abgewiesen (409).' : ((int) $w['wache_sperren_ein'] === 1
+                    ? 'nicht abgewiesen (die Sperre wirkt nicht, siehe die Zeile dazu).'
+                    : 'nicht abgewiesen (Sperren aus).')),
+                60 * (int) $w['wache_fenster_min']);
+        }
+    }
+    if ($abweisen) {
+        http_response_code(409);
+        printf("SET;OK=0;GRUND=FREMDSCHREIBER;AKTION=%s;GERAET=%d%s\n", $aktion, (int) $nr, $zusatz);
+        echo ($grund === 'FUEHRUNG')
+            ? 'Die Fuehrung steht auf ' . bm_wache_rollenname($w['fuehrung']) . '; dieser Sollwert hat die Rolle '
+              . bm_wache_rollenname($rolle) . ". Nichts eingereiht (Reiter Einstellungen, Schreiber-Wache).\n"
+            : "Dieser Schreiber steht nicht in der Liste der erlaubten Schreiber. Nichts eingereiht "
+              . "(Reiter Einstellungen, Schreiber-Wache).\n";
+        bm_ep_log('FREMDSCHREIBER', $art . ', ' . $wer . ', ' . $grund);
+        exit;
+    }
+    return $zusatz;
+}
+
 /* Erst jetzt, unmittelbar vor dem Absetzen: laeuft der Dienst ueberhaupt?
  * Nicht stillschweigend einreihen - ohne laufenden Dienst passiert nichts,
  * und Loxone haelt den Zwang sonst faelschlich fuer gesetzt. */
+/* Energie-1 C1: die Schreiber-Wache - nach der Freigabe (eine abgeschaltete
+ * Steuerung bleibt 403), vor dem Dienst und vor dem Einreihen. abruf schreibt
+ * nichts und geht vorbei. */
+$bm_wz = ($bm_aktion === 'abruf') ? ''
+    : bm_ep_wache($bm_nr, $bm_von, $bm_war_modus, $bm_aktion, $bm_ruecknahme,
+                  isset($bm_befehl['watt']) ? $bm_befehl['watt'] : 0);
+
 if (bm_dienst_pid() === 0) {
     http_response_code(503);
     echo "SET;OK=0;GRUND=DIENST_LAEUFT_NICHT\n";
@@ -551,6 +642,6 @@ list($bm_erg, $bm_meldung) = $bm_antwort;
 if ($bm_erg === 0) {
     http_response_code(500);
 }
-printf("SET;OK=%d;AKTION=%s;GERAET=%d;MELDUNG=%s%s\n", $bm_erg, $bm_aktion, (int) $bm_nr,
+printf("SET;OK=%d;AKTION=%s;GERAET=%d;MELDUNG=%s%s%s\n", $bm_erg, $bm_aktion, (int) $bm_nr,
     str_replace(array("\r", "\n", ';'), ' ', $bm_meldung),
-    !empty($bm_antwort[2]) ? ';UNVERAENDERT=1' : '');
+    !empty($bm_antwort[2]) ? ';UNVERAENDERT=1' : '', $bm_wz);

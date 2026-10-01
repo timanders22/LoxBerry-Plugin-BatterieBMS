@@ -460,7 +460,105 @@ function bm_pruefungen()
                   bm_e($th_fehlt ? implode(', ', $th_fehlt) : '-'),
                   bm_e($th_zuviel ? implode(', ', $th_zuviel) : '-')));
 
+    /* Energie-1 C1 (Entscheidung Nr. 25): die Schreiber-Wache. Ueber eine leere
+     * Menge wird nicht geurteilt (grau); ein Schreiber im Fenster ist ein Haken,
+     * mehrere ein Hinweis; ein Merker, der sich nicht lesen laesst, und ein
+     * Sollwert gegen die eingestellte Fuehrung sind ein Kreuz. Die Einstellungen
+     * kommen frisch aus der Datei ($cfg), nicht aus einer X-2-Rueckfuellung. */
+    $bm_ww = bm_wache_einstellungen($cfg);
+    $bm_wfs = 60 * $bm_ww['wache_fenster_min'];
+    $bm_wnamen = function (array $l) {
+        $t = array();
+        foreach ($l as $x) {
+            $t[] = ($x['von'] !== '' ? $x['von'] : bm_t('TEST.W_OHNE_KENNUNG')) . '@' . ($x['ip'] !== '' ? $x['ip'] : '?')
+                 . ' (' . bm_wache_rolle_t($x['rolle']) . ', ' . (int) $x['n'] . 'x)';
+        }
+        return implode(', ', $t);
+    };
+    if ($bm_ww['wache_ein'] !== 1) {
+        $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_WACHE'), bm_t('TEST.A_WACHE_AUS'));
+    } elseif (!$geraete) {
+        $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_WACHE'), bm_t('TEST.A_WACHE_KEIN_SPEICHER'));
+    } else {
+        foreach ($geraete as $bm_wn => $bm_wg) {
+            $bm_wf = sprintf(bm_t('TEST.F_WACHE_GERAET'), (int) $bm_wn, bm_e($bm_wg['name']));
+            list($bm_wz, $bm_wl) = bm_wache_lesen($bm_wn);
+            if ($bm_wz === 'merker') {
+                $zeilen[] = bm_pruefzeile(0, $bm_wf, sprintf(bm_t('TEST.A_WACHE_MERKER'),
+                    bm_e(bm_wache_datei($bm_wn))));
+                continue;
+            }
+            if ($bm_wz === 'leer') {
+                $zeilen[] = bm_pruefzeile(-1, $bm_wf, bm_t('TEST.A_WACHE_LEER'));
+                continue;
+            }
+            $bm_wim = array();
+            $bm_wgegen = array();
+            foreach ($bm_wl as $bm_wx) {
+                if (abs(time() - $bm_wx['zuletzt']) < $bm_wfs) {
+                    $bm_wim[] = $bm_wx;
+                }
+                if ($bm_wx['art'] !== 'ruecknahme' && !bm_wache_fuehrt($bm_ww['fuehrung'], $bm_wx['rolle'])) {
+                    $bm_wgegen[] = $bm_wx;
+                }
+            }
+            if (count($bm_wim) > 1) {
+                $zeilen[] = bm_pruefzeile(-1, $bm_wf, sprintf(bm_t('TEST.A_WACHE_MEHRERE'), count($bm_wim),
+                    $bm_ww['wache_fenster_min'], bm_e($bm_wnamen($bm_wim))));
+            } elseif (count($bm_wim) === 1) {
+                $zeilen[] = bm_pruefzeile(1, $bm_wf, sprintf(bm_t('TEST.A_WACHE_EINER'),
+                    $bm_ww['wache_fenster_min'], bm_e($bm_wnamen($bm_wim))));
+            } else {
+                $zeilen[] = bm_pruefzeile(count($bm_wl) > 1 ? -1 : 1, $bm_wf, sprintf(bm_t('TEST.A_WACHE_RUHE'),
+                    $bm_ww['wache_fenster_min'], count($bm_wl)));
+            }
+            if ($bm_wgegen) {
+                $zeilen[] = bm_pruefzeile(0, $bm_wf, sprintf(bm_t('TEST.A_WACHE_GEGEN_FUEHRUNG'),
+                    bm_e(bm_wache_rolle_t($bm_ww['fuehrung'])), bm_e($bm_wnamen($bm_wgegen))));
+            }
+        }
+    }
+    $bm_wu = bm_wache_sperre_urteil($bm_ww, '', '', 'loxone');
+    if ($bm_ww['wache_sperren_ein'] !== 1) {
+        $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_WACHE_SPERREN'), bm_t('TEST.A_WACHE_SPERREN_AUS'));
+    } elseif ($bm_wu[2] !== '') {
+        $zeilen[] = bm_pruefzeile(0, bm_t('TEST.F_WACHE_SPERREN'), bm_t('TEST.A_WACHE_SPERREN_WIRKUNGSLOS'));
+    } else {
+        $zeilen[] = bm_pruefzeile(1, bm_t('TEST.F_WACHE_SPERREN'), sprintf(bm_t('TEST.A_WACHE_SPERREN_AN'),
+            bm_e(bm_wache_rolle_t($bm_ww['fuehrung'])),
+            bm_e($bm_ww['wache_erlaubt'] !== '' ? $bm_ww['wache_erlaubt'] : '-')));
+    }
+    $zeilen[] = bm_pruefzeile($bm_ww['fuehrung'] === 'beide' ? -1 : 1, bm_t('TEST.F_FUEHRUNG'),
+        bm_t('TEST.A_FUEHRUNG_' . strtoupper($bm_ww['fuehrung'])));
+
     return $zeilen;
+}
+
+/** Energie-1 C1: eine Rolle oder Fuehrung in der Sprache der Oberflaeche. */
+function bm_wache_rolle_t($r)
+{
+    return in_array($r, array('beide', 'loxone', 'evcc'), true)
+        ? bm_t('EINST.FUEHRUNG_' . strtoupper($r)) : bm_t('TEST.W_ROLLE_ANDERE');
+}
+
+/** Energie-1 C1: die Schreiber aller eingerichteten Speicher fuer die Tabelle
+ *  im Reiter Test, je Speicher neueste zuerst. 'fenster': im eingestellten
+ *  Zeitfenster gesehen. */
+function bm_wache_uebersicht()
+{
+    $w = bm_wache_einstellungen(bm_config());
+    $fs = 60 * (int) $w['wache_fenster_min'];
+    $aus = array();
+    foreach (bm_geraete() as $nr => $g) {
+        list(, $liste) = bm_wache_lesen($nr);
+        foreach ($liste as $x) {
+            $x['nr'] = (int) $nr;
+            $x['name'] = (string) $g['name'];
+            $x['fenster'] = abs(time() - $x['zuletzt']) < $fs;
+            $aus[] = $x;
+        }
+    }
+    return $aus;
 }
 
 /**

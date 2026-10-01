@@ -669,6 +669,48 @@ if ($bm_post && isset($_POST['speichern'])) {
         $bm_mark[] = 'evcc_geraet';
     }
 
+    /* Energie-1 C1 (Entscheidung Nr. 25): die Schreiber-Wache. Dieselbe
+     * Beurteilung wie das Zurueckspielen (bm_wert_pruefen(),
+     * bm_wache_kreuzmangel()); beanstandet heisst nichts gespeichert (Nr. 16),
+     * die Eingabe steht wieder im Formular (X-2). Nur Leerraum am Rand faellt
+     * still weg (Nr. 19). Fehlt ein Textfeld ganz (kein Formular dieses
+     * Plugins), bleibt sein Wert. */
+    $bm_cfg['wache_ein'] = isset($_POST['wache_ein']) ? 1 : 0;
+    $bm_cfg['wache_lb_melden'] = isset($_POST['wache_lb_melden']) ? 1 : 0;
+    $bm_cfg['wache_sperren_ein'] = isset($_POST['wache_sperren_ein']) ? 1 : 0;
+    $bm_wfehl = false;
+    if (isset($_POST['wache_fenster_min'])) {
+        $bm_ww = is_string($_POST['wache_fenster_min']) ? trim($_POST['wache_fenster_min']) : "\x00";
+        if (!preg_match('/^[0-9]+$/', $bm_ww)) {
+            $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_ZAHL'), bm_t('EINST.L_WACHE_FENSTER'));
+            $bm_mark[] = 'wache_fenster_min';
+        } elseif ((int) $bm_ww < 1 || (int) $bm_ww > 120) {
+            $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_BEREICH'), bm_t('EINST.L_WACHE_FENSTER'), 1, 120);
+            $bm_mark[] = 'wache_fenster_min';
+        } else {
+            $bm_cfg['wache_fenster_min'] = (int) $bm_ww;
+        }
+    }
+    foreach (array('wache_erlaubt', 'fuehrung') as $bm_wk) {
+        if (!isset($_POST[$bm_wk])) {
+            continue;
+        }
+        $bm_ww = is_string($_POST[$bm_wk]) ? trim($_POST[$bm_wk]) : array();
+        $bm_wg = bm_wert_pruefen($bm_wk, $bm_ww);
+        if ($bm_wg !== '') {
+            $bm_fehler[] = bm_e($bm_wg);
+            $bm_mark[] = $bm_wk;
+            $bm_wfehl = true;
+        } else {
+            $bm_cfg[$bm_wk] = $bm_ww;
+        }
+    }
+    if (!$bm_wfehl && bm_wache_kreuzmangel($bm_cfg)) {
+        $bm_fehler[] = bm_t('EINST.FEHLER_WACHE_LEER');
+        $bm_mark[] = 'wache_sperren_ein';
+        $bm_mark[] = 'wache_erlaubt';
+    }
+
 
     /* C4 (Durchgang 29.09.2026): solange ein Zwang offen ist, darf das
      * Speichern keinen Speicher von seiner Nummer verdraengen (Zeile
@@ -1338,6 +1380,54 @@ foreach ($bm_hinweise as $bm_h) {
 </div>
 <div class="sm-warnung"><?= bm_t('EINST.EVCC_VORZEICHEN') ?></div>
 
+<?php /* Energie-1 C1 (Entscheidung Nr. 25): Schreiber-Wache und Fuehrung. Die
+       * gespeicherten Werte ueber bm_wache_einstellungen() - eine von Hand
+       * verdorbene Datei erzeugt hier keine PHP-Warnung. */
+$bm_wd = bm_wache_einstellungen($bm_cfg); ?>
+<h2><?= bm_e(bm_t('EINST.H_WACHE')) ?></h2>
+<div class="sm-step"><?= bm_t('EINST.WACHE_ERKLAERUNG') ?></div>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;">
+    <input data-role="none" type="checkbox" name="wache_ein" value="1" <?= bm_eingabe('speichern', 'wache_ein', $bm_wd['wache_ein'] === 1 ? '1' : '0') === '1' ? 'checked' : '' ?><?= bm_markierung('speichern', 'wache_ein') ?>>
+    <?= bm_e(bm_t('EINST.L_WACHE_EIN')) ?>
+  </label>
+  <div class="sm-hilfe"><?= bm_t('EINST.H_WACHE_EIN') ?></div>
+</div>
+<div class="sm-feld">
+  <label for="wache_fenster_min"><?= bm_e(bm_t('EINST.L_WACHE_FENSTER')) ?></label>
+  <input data-role="none" type="number" id="wache_fenster_min" name="wache_fenster_min" value="<?= bm_e(bm_eingabe('speichern', 'wache_fenster_min', (string) $bm_wd['wache_fenster_min'])) ?>"<?= bm_markierung('speichern', 'wache_fenster_min') ?> min="1" max="120">
+  <div class="sm-hilfe"><?= bm_t('EINST.H_WACHE_FENSTER') ?></div>
+</div>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;">
+    <input data-role="none" type="checkbox" name="wache_lb_melden" value="1" <?= bm_eingabe('speichern', 'wache_lb_melden', $bm_wd['wache_lb_melden'] === 1 ? '1' : '0') === '1' ? 'checked' : '' ?><?= bm_markierung('speichern', 'wache_lb_melden') ?>>
+    <?= bm_e(bm_t('EINST.L_WACHE_LB')) ?>
+  </label>
+  <div class="sm-hilfe"><?= bm_t('EINST.H_WACHE_LB') ?></div>
+</div>
+<div class="sm-feld">
+  <label for="fuehrung"><?= bm_e(bm_t('EINST.L_FUEHRUNG')) ?></label>
+  <select data-role="none" id="fuehrung" name="fuehrung"<?= bm_markierung('speichern', 'fuehrung') ?>>
+<?php $bm_fu = bm_eingabe('speichern', 'fuehrung', $bm_wd['fuehrung']);
+foreach (array('beide', 'loxone', 'evcc') as $bm_fo) { ?>
+    <option value="<?= $bm_fo ?>"<?= $bm_fu === $bm_fo ? ' selected' : '' ?>><?= bm_e(bm_t('EINST.FUEHRUNG_' . strtoupper($bm_fo))) ?></option>
+<?php } ?>
+  </select>
+  <div class="sm-hilfe"><?= bm_t('EINST.H_FUEHRUNG') ?></div>
+</div>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;">
+    <input data-role="none" type="checkbox" name="wache_sperren_ein" value="1" <?= bm_eingabe('speichern', 'wache_sperren_ein', $bm_wd['wache_sperren_ein'] === 1 ? '1' : '0') === '1' ? 'checked' : '' ?><?= bm_markierung('speichern', 'wache_sperren_ein') ?>>
+    <?= bm_e(bm_t('EINST.L_WACHE_SPERREN')) ?>
+  </label>
+  <div class="sm-hilfe"><?= bm_t('EINST.H_WACHE_SPERREN') ?></div>
+</div>
+<div class="sm-feld">
+  <label for="wache_erlaubt"><?= bm_e(bm_t('EINST.L_WACHE_ERLAUBT')) ?></label>
+  <input data-role="none" type="text" id="wache_erlaubt" name="wache_erlaubt" value="<?= bm_e(bm_eingabe('speichern', 'wache_erlaubt', $bm_wd['wache_erlaubt'])) ?>"<?= bm_markierung('speichern', 'wache_erlaubt') ?> maxlength="512" placeholder="loxone, 192.168.178.10">
+  <div class="sm-hilfe"><?= bm_t('EINST.H_WACHE_ERLAUBT') ?></div>
+</div>
+
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= bm_e(bm_t('ALLG.SPEICHERN')) ?></button>
 </div>
@@ -1596,21 +1686,23 @@ if (!bm_felder_gemessen(1)) { ?>
 <tr><th><?= bm_e(bm_t('ALLG.EIGENSCHAFT')) ?></th><th><?= bm_e(bm_t('ALLG.WERT')) ?></th></tr>
 <tr><td><?= bm_e(bm_t('LOX.T_VA_ADRESSE')) ?></td><td><span class="sm-mono">http://<?= bm_e($bm_host) ?></span></td></tr>
 <tr><td><?= bm_e(bm_t('LOX.T_VA_LADEN')) ?></td>
-    <td><span class="sm-mono">/plugins/<?= bm_e($bm_p['plugin']) ?>/index.php?token=<?= bm_e($bm_token) ?>&amp;aktion=laden&amp;geraet=1&amp;watt=&lt;v.0&gt;</span></td></tr>
+    <td><span class="sm-mono">/plugins/<?= bm_e($bm_p['plugin']) ?>/index.php?token=<?= bm_e($bm_token) ?>&amp;aktion=laden&amp;geraet=1&amp;watt=&lt;v.0&gt;&amp;von=loxone</span></td></tr>
 <tr><td><?= bm_e(bm_t('LOX.T_VA_ENTLADEN')) ?></td>
-    <td><span class="sm-mono">/plugins/<?= bm_e($bm_p['plugin']) ?>/index.php?token=<?= bm_e($bm_token) ?>&amp;aktion=entladen&amp;geraet=1&amp;watt=&lt;v.0&gt;</span></td></tr>
+    <td><span class="sm-mono">/plugins/<?= bm_e($bm_p['plugin']) ?>/index.php?token=<?= bm_e($bm_token) ?>&amp;aktion=entladen&amp;geraet=1&amp;watt=&lt;v.0&gt;&amp;von=loxone</span></td></tr>
 <tr><td><?= bm_e(bm_t('LOX.T_VA_AUTOMATIK')) ?></td>
-    <td><span class="sm-mono">/plugins/<?= bm_e($bm_p['plugin']) ?>/index.php?token=<?= bm_e($bm_token) ?>&amp;aktion=automatik&amp;geraet=1</span></td></tr>
+    <td><span class="sm-mono">/plugins/<?= bm_e($bm_p['plugin']) ?>/index.php?token=<?= bm_e($bm_token) ?>&amp;aktion=automatik&amp;geraet=1&amp;von=loxone</span></td></tr>
 <tr><td><?= bm_e(bm_t('LOX.T_VA_LEBEN')) ?></td>
-    <td><span class="sm-mono">/plugins/<?= bm_e($bm_p['plugin']) ?>/index.php?token=<?= bm_e($bm_token) ?>&amp;aktion=lebenszeichen&amp;geraet=1</span></td></tr>
+    <td><span class="sm-mono">/plugins/<?= bm_e($bm_p['plugin']) ?>/index.php?token=<?= bm_e($bm_token) ?>&amp;aktion=lebenszeichen&amp;geraet=1&amp;von=loxone</span></td></tr>
 <tr><td><?= bm_e(bm_t('LOX.T_VA_SPERREN')) ?></td>
-    <td><span class="sm-mono">/plugins/<?= bm_e($bm_p['plugin']) ?>/index.php?token=<?= bm_e($bm_token) ?>&amp;aktion=sperren&amp;geraet=1</span></td></tr>
+    <td><span class="sm-mono">/plugins/<?= bm_e($bm_p['plugin']) ?>/index.php?token=<?= bm_e($bm_token) ?>&amp;aktion=sperren&amp;geraet=1&amp;von=loxone</span></td></tr>
 <tr><td><?= bm_e(bm_t('LOX.T_VA_ABRUF')) ?></td>
     <td><span class="sm-mono">/plugins/<?= bm_e($bm_p['plugin']) ?>/index.php?token=<?= bm_e($bm_token) ?>&amp;aktion=abruf</span></td></tr>
 <tr><td><?= bm_e(bm_t('LOX.T_VA_MODUS')) ?></td>
-    <td><span class="sm-mono">/plugins/<?= bm_e($bm_p['plugin']) ?>/index.php?token=<?= bm_e($bm_token) ?>&amp;aktion=batteriemodus&amp;modus=&lt;v.0&gt;&amp;geraet=1</span></td></tr>
+    <td><span class="sm-mono">/plugins/<?= bm_e($bm_p['plugin']) ?>/index.php?token=<?= bm_e($bm_token) ?>&amp;aktion=batteriemodus&amp;modus=&lt;v.0&gt;&amp;geraet=1&amp;von=evcc</span></td></tr>
 </table>
 <div class="sm-warnung"><?= bm_t('LOX.S4_WARNUNG') ?></div>
+<?php /* Energie-1 C1: woran die Schreiber-Wache den Miniserver erkennt. */ ?>
+<div class="sm-hinweis"><?= bm_t('LOX.VON_HINWEIS') ?></div>
 </div>
 
 <div class="sm-step"><b><?= bm_e(bm_t('LOX.S5_TITEL')) ?></b><br>
@@ -1778,6 +1870,34 @@ function bm_bausteine()
 ?></td><td><?= $bm_z['frage'] ?></td><td><?= $bm_z['antwort'] ?></td></tr>
 <?php } ?>
 </table>
+
+<?php /* Energie-1 C1 (Entscheidung Nr. 25): die Schreiber der letzten 24 Stunden
+       * (bm_wache_uebersicht() in bm_test.php; Einstellungen frisch aus der Datei). */
+$bm_wue = bm_wache_uebersicht(); ?>
+<h3><?= bm_e(bm_t('TEST.H_WACHE_TABELLE')) ?></h3>
+<p class="sm-hilfe"><?= bm_t('TEST.WACHE_TABELLE_HINWEIS') ?></p>
+<?php if (!$bm_wue) { ?>
+<p class="sm-hilfe"><?= bm_e(bm_t('TEST.WACHE_TABELLE_LEER')) ?></p>
+<?php } else { ?>
+<div class="sm-breit"><table class="sm-tbl">
+<tr><th><?= bm_e(bm_t('ALLG.SPEICHER_EINZ')) ?></th><th><?= bm_e(bm_t('TEST.T_W_KENNUNG')) ?></th>
+    <th><?= bm_e(bm_t('TEST.T_W_ABSENDER')) ?></th><th><?= bm_e(bm_t('TEST.T_W_ROLLE')) ?></th>
+    <th><?= bm_e(bm_t('TEST.T_W_ART')) ?></th><th><?= bm_e(bm_t('TEST.T_W_ZUERST')) ?></th>
+    <th><?= bm_e(bm_t('TEST.T_W_ZULETZT')) ?></th><th><?= bm_e(bm_t('TEST.T_W_ANZAHL')) ?></th>
+    <th><?= bm_e(bm_t('TEST.T_W_ABGEWIESEN')) ?></th><th><?= bm_e(bm_t('TEST.T_W_FENSTER')) ?></th></tr>
+<?php foreach ($bm_wue as $bm_wr) { ?>
+<tr><td><?= (int) $bm_wr['nr'] ?> <?= bm_e($bm_wr['name']) ?></td>
+    <td><span class="sm-mono"><?= $bm_wr['von'] !== '' ? bm_e($bm_wr['von']) : bm_e(bm_t('TEST.W_OHNE_KENNUNG')) ?></span></td>
+    <td><span class="sm-mono"><?= bm_e($bm_wr['ip'] !== '' ? $bm_wr['ip'] : '?') ?></span></td>
+    <td><?= bm_e(bm_wache_rolle_t($bm_wr['rolle'])) ?></td>
+    <td><span class="sm-mono"><?= bm_e($bm_wr['art']) ?></span></td>
+    <td><?= bm_e(date('d.m. H:i:s', $bm_wr['erst'])) ?></td>
+    <td><?= bm_e(date('d.m. H:i:s', $bm_wr['zuletzt'])) ?></td>
+    <td><?= (int) $bm_wr['n'] ?></td><td><?= (int) $bm_wr['abgewiesen'] ?></td>
+    <td><?= bm_e(bm_t($bm_wr['fenster'] ? 'ALLG.JA' : 'ALLG.NEIN')) ?></td></tr>
+<?php } ?>
+</table></div>
+<?php } ?>
 
 <?php foreach ($bm_werte as $bm_nr => $bm_w) {
     if (empty($bm_w['module'])) { continue; } ?>

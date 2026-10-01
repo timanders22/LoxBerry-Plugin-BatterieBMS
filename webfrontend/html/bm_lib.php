@@ -724,6 +724,16 @@ function bm_vorgaben()
          * Praefix war je in Gebrauch. Kein Schalter, keine Wirkung auf den
          * Betrieb - nur ein Vermerk. */
         'mqtt_praefix_alt' => '',
+        /* Energie-1 C1 (Entscheidung Nr. 25): die Schreiber-Wache meldet ab
+         * Werk (aendert am Haus nichts) und sperrt ab Werk nicht. Fuehrung ab
+         * Werk "beide": Loxone und EVCC duerfen schalten, wie bis 0.9.33.
+         * Kopf der Funktionen: "Schreiber-Wache" weiter unten. */
+        'wache_ein'         => 1,       // mehrere Schreiber im Fenster melden
+        'wache_fenster_min' => 15,      // Fenster in Minuten (1..120)
+        'wache_lb_melden'   => 0,       // neue Runde zusaetzlich als LoxBerry-Meldung
+        'wache_sperren_ein' => 0,       // fremde Schreiber mit 409 abweisen
+        'wache_erlaubt'     => '',      // erlaubte Schreiber: Kennung, Adresse oder beides
+        'fuehrung'          => 'beide', // beide | loxone | evcc
     );
 }
 
@@ -753,6 +763,7 @@ function bm_wert_grenzen()
         'temp_min'            => array(0, 100),
         'evcc_geraet'         => array(1, 99),
         'evcc_ladewatt'       => array(0, 30000),
+        'wache_fenster_min'   => array(1, 120),    // Energie-1 C1
     );
 }
 
@@ -820,6 +831,21 @@ function bm_wert_pruefen($schluessel, $wert)
             }
             return ($wert === '' || bm_token_gueltig($wert))
                 ? '' : bm_t('EINST.FEHLER_TOKEN_MUSTER');
+        case 'wache_ein':
+        case 'wache_sperren_ein':
+        case 'wache_lb_melden':
+            /* Energie-1 C1: eine Liste ist keine 0/1 - ohne die Warnung, die
+             * (string) auf einer Liste unter PHP 8 ausgaebe. */
+            return bm_wache_wert_ok($schluessel, $wert) ? '' : sprintf(bm_t('EINST.FEHLER_ZAHL'), $schluessel);
+        case 'wache_erlaubt':
+            // Energie-1 C1: dieselbe Zerlegung wie der Endpunkt (bm_wache_liste()).
+            if (!is_string($wert) || strlen($wert) > 512) {
+                return bm_t('EINST.FEHLER_WACHE_LISTE_FORM');
+            }
+            list(, $bm_wf) = bm_wache_liste($wert);
+            return $bm_wf ? sprintf(bm_t('EINST.FEHLER_WACHE_LISTE'), implode(', ', array_slice($bm_wf, 0, 4))) : '';
+        case 'fuehrung':
+            return bm_wache_wert_ok('fuehrung', $wert) ? '' : bm_t('EINST.FEHLER_FUEHRUNG');
         case 'geraete':
             return is_array($wert) ? '' : sprintf(bm_t('EINST.FEHLER_ZAHL'), $schluessel);
     }
@@ -1040,8 +1066,10 @@ function bm_eingabe_felder($form)
         'speichern' => array(
             'skalar' => array('intervall', 'zelltakt', 'zeitueberschreitung', 'drift_warnung',
                               'verlauf_tage', 'temp_max', 'temp_min', 'totmann', 'soc_min', 'soc_max',
-                              'schreibbremse', 'wartezeit', 'evcc_geraet', 'evcc_ladewatt'),
-            'haken'  => array('steuerung_ein', 'evcc_ein'),
+                              'schreibbremse', 'wartezeit', 'evcc_geraet', 'evcc_ladewatt',
+                              'wache_fenster_min', 'wache_erlaubt', 'fuehrung'),
+            'haken'  => array('steuerung_ein', 'evcc_ein', 'wache_ein', 'wache_lb_melden',
+                              'wache_sperren_ein'),
             'zeilen' => array('g_name', 'g_profil', 'g_ip', 'g_port', 'g_unit', 'g_dev', 'g_baud',
                               'g_nennkapaz', 'g_max_laden', 'g_max_entladen', 'g_vorzeichen',
                               'g_schreiben')),
@@ -1553,6 +1581,13 @@ function bm_rueckspiel_pruefen(array $neu)
         $aus['bean'][] = bm_e(bm_t('EINST.FEHLER_SOC_FENSTER'));
         $aus['namen'][] = 'soc_min';
         $aus['namen'][] = 'soc_max';
+    }
+    /* Energie-1 C1: "Fremde Schreiber abweisen" ohne Fuehrung und ohne einen
+     * erlaubten Schreiber - dieselbe Kreuzpruefung wie im Formular. */
+    if (bm_wache_kreuzmangel($neu)) {
+        $aus['bean'][] = bm_e(bm_t('EINST.FEHLER_WACHE_LEER'));
+        $aus['namen'][] = 'wache_sperren_ein';
+        $aus['namen'][] = 'wache_erlaubt';
     }
     $aus['namen'] = array_values(array_unique($aus['namen']));
     return $aus;
@@ -2561,6 +2596,519 @@ function bm_befehl_antworten(array $kennungen, $wartezeit)
         }
     }
     return $aus;
+}
+
+/* ================= Schreiber-Wache (Energie-1 C1, Entscheidung Nr. 25) ==================
+ *
+ * WOZU. Den Speicher sollen nicht zwei Regler zugleich fuehren. Im Haus
+ * koordiniert Loxone (Vorrangkette seit 26.07.2026). Am Endpunkt koennen
+ * neben dem Miniserver auch EVCC (aktion=batteriemodus) und jede andere Linie
+ * schreiben. ENERGIE1_ENTWURF.md, K8: EVCC-batteriemodus 2/3 gegen Loxone
+ * laden/entladen - der letzte Schreiber gewinnt, die Gleichwert-Unterdrueckung
+ * greift nicht (die Werte unterscheiden sich), und beide halten ihren Zwang
+ * mit Lebenszeichen am Leben. Bis 0.9.33 unterschied der Endpunkt seine
+ * Schreiber nicht, und nirgends stand es.
+ *
+ * WAS. Jeder schaltende Befehl (laden, entladen, sperren, lebenszeichen,
+ * automatik, batteriemodus - nicht abruf) wird mit seiner Herkunft gemerkt:
+ * optional &von=<kennung> (die Vorlage setzt von=loxone, die EVCC-Adresse im
+ * Reiter Loxone von=evcc) und der Absender (REMOTE_ADDR). Ein Schreiber ist
+ * das Paar Kennung@Absender; ohne &von= heisst er "ohne Kennung" - das ist
+ * kein Fehler, so erscheint jede Vorlage, die nicht neu eingelesen wurde.
+ * Kommen innerhalb des Fensters (wache_fenster_min, ab Werk 15) Befehle von
+ * mehr als einem Schreiber, steht das
+ *   - im Protokoll, gebremst: eine Zeile je Speicher, wenn die Runde der
+ *     Schreiber neu ist, sonst hoechstens eine je Fenster,
+ *   - in der Antwort (;SCHREIBER=n, hinten angehaengt),
+ *   - im Reiter Test (die Schreiber der letzten 24 h),
+ *   - bei einer neuen Runde und nur mit wache_lb_melden (ab Werk aus) als
+ *     LoxBerry-Meldung.
+ * Abgewiesen wird dadurch NICHTS (melden ab Werk an, Entscheidung Nr. 25).
+ *
+ * FUEHRUNG (fuehrung: beide | loxone | evcc; ab Werk beide = wie bis 0.9.33).
+ * Die Rolle eines Befehls: von=loxone -> Loxone, von=evcc -> EVCC; ohne
+ * Kennung wie bisher die Quelle im Sollwert (batteriemodus -> EVCC, alles
+ * andere -> Loxone); jede andere Kennung -> "andere". Steht die Fuehrung auf
+ * Loxone oder EVCC, meldet die Wache einen Sollwert einer anderen Rolle (eine
+ * Zeile je Rolle und Fenster) - auch dann, wenn er der einzige Schreiber ist.
+ * Mit Sperren wird er abgewiesen.
+ *
+ * SPERREN (wache_sperren_ein, ab Werk aus): ein Sollwert, dessen Rolle nicht
+ * fuehrt oder dessen Schreiber nicht in wache_erlaubt steht (sofern die Liste
+ * etwas enthaelt), bekommt HTTP 409 GRUND=FREMDSCHREIBER und wird nicht
+ * eingereiht. Eine Ruecknahme (automatik, laden/entladen mit watt=0,
+ * batteriemodus=1) wird NIE abgewiesen - sie ist der Sicherheitsweg und fuehrt
+ * keinen zweiten Regelkreis (ENERGIE1_ENTWURF.md, Weg C 1). Das Urteil braucht
+ * den Merker nicht. Ist Sperren an, aber weder eine Fuehrung gewaehlt noch eine
+ * brauchbare Liste da (nur von Hand moeglich - Formular und Sicherung weisen das
+ * ab), wirkt die Sperre NICHT, und das Protokoll sagt es: eine verschriebene
+ * Liste darf den Hausregler nicht aussperren.
+ *
+ * DER MERKER FAELLT OFFEN AUS. schreiber_geraet<N>.json im Datenordner unter
+ * flock, geoeffnet mit close-on-exec ('e', wo das System es kennt), gehalten
+ * nur fuer Lesen und Schreiben, nie waehrend des Einreihens und nie waehrend
+ * einer LoxBerry-Meldung. Laesst er sich nicht oeffnen, sperren oder schreiben,
+ * geht der Befehl trotzdem in die Warteschlange - die Antwort traegt
+ * ;WACHE=MERKER, das Protokoll eine Zeile (gebremst; eine weitere, wenn er
+ * wieder geht). Die Wache beobachtet nur; wiese sie wegen einer vollen Karte
+ * den Hausregler ab, richtete sie den Schaden an, vor dem sie warnen soll.
+ *
+ * WARUM 15 MINUTEN. Das Fenster muss den langsamsten regelmaessigen Schreiber
+ * fassen: der Miniserver schickt Sollwert oder Lebenszeichen innerhalb der
+ * Totmannzeit (ab Werk 300 s), EVCC schickt batteriemodus bei jedem Wechsel.
+ * 15 min sind drei Totmannzeiten; ein laengeres Fenster liesse einen Wechsel
+ * der Vorlage (ohne Kennung -> von=loxone) entsprechend laenger als zwei
+ * Schreiber stehen. Einstellbar 1 bis 120 min (wie MarstekVenus 1.1.19).
+ */
+if (!defined('BM_WACHE_AUFBEWAHREN_S')) {
+    define('BM_WACHE_AUFBEWAHREN_S', 86400);   // Reiter Test: Schreiber der letzten 24 h
+}
+if (!defined('BM_WACHE_HOECHSTENS')) {
+    define('BM_WACHE_HOECHSTENS', 20);          // Schreiber je Speicher im Merker
+}
+
+/** Pfad des Merkers der Schreiber-Wache fuer Speicher $nr. */
+function bm_wache_datei($nr)
+{
+    return bm_paths()['datadir'] . '/schreiber_geraet' . (int) $nr . '.json';
+}
+
+/** Eine Kennung fuer &von= und fuer die Liste: 1 bis 32 Zeichen aus A-Z a-z
+ *  0-9 _ -. Ohne Punkt und Doppelpunkt - so verwechselt sie sich nie mit
+ *  einer Adresse. */
+function bm_wache_kennung_gueltig($k)
+{
+    return is_string($k) && preg_match('/^[A-Za-z0-9_\-]{1,32}\z/', $k) === 1;
+}
+
+/** Eine Absenderadresse (IPv4 oder IPv6) fuer die Liste. */
+function bm_wache_adresse_gueltig($a)
+{
+    return is_string($a) && $a !== '' && filter_var($a, FILTER_VALIDATE_IP) !== false;
+}
+
+/** Zwei Adressen gleich? IPv6 in jeder Schreibweise (::1 = 0:0:0:0:0:0:0:1). */
+function bm_wache_adresse_gleich($a, $b)
+{
+    if ((string) $a === (string) $b) {
+        return true;
+    }
+    $x = @inet_pton((string) $a);
+    $y = @inet_pton((string) $b);
+    return $x !== false && $y !== false && $x === $y;
+}
+
+/** Der Absender dieser Anfrage, gesaeubert wie in bm_ep_log(). */
+function bm_wache_absender()
+{
+    $ip = isset($_SERVER['REMOTE_ADDR']) ? preg_replace('/[^0-9A-Fa-f:.]/', '', (string) $_SERVER['REMOTE_ADDR']) : '';
+    return substr((string) $ip, 0, 45);
+}
+
+/**
+ * Die Liste der erlaubten Schreiber zerlegen (rein).
+ * Eintraege durch Komma, Semikolon oder Leerraum getrennt, je Eintrag eine
+ * Kennung ("loxone"), eine Adresse ("192.168.178.10") oder beides als
+ * Kennung@Adresse ("loxone@<Adresse>"). Hoechstens 16 Eintraege.
+ * Rueckgabe: array(Eintraege array('von','ip'), unzulaessige Teile).
+ */
+function bm_wache_liste($text)
+{
+    if (!is_string($text)) {
+        return array(array(), array('?'));
+    }
+    $ein = array();
+    $fehl = array();
+    foreach (preg_split('/[\s,;]+/', trim($text)) as $teil) {
+        if ($teil === '') {
+            continue;
+        }
+        if (strpos($teil, '@') !== false) {
+            list($von, $ip) = explode('@', $teil, 2);
+            if (bm_wache_kennung_gueltig($von) && bm_wache_adresse_gueltig($ip)) {
+                $ein[] = array('von' => $von, 'ip' => $ip);
+                continue;
+            }
+        } elseif (bm_wache_adresse_gueltig($teil)) {
+            $ein[] = array('von' => '', 'ip' => $teil);
+            continue;
+        } elseif (bm_wache_kennung_gueltig($teil)) {
+            $ein[] = array('von' => $teil, 'ip' => '');
+            continue;
+        }
+        $fehl[] = substr((string) preg_replace('/[^\x20-\x7E]/', '?', $teil), 0, 40);
+    }
+    if (count($ein) > 16) {
+        $fehl[] = '> 16';
+    }
+    return array($ein, $fehl);
+}
+
+/** Steht der Schreiber Kennung@Absender in der Liste? (rein) */
+function bm_wache_erlaubt(array $eintraege, $von, $ip)
+{
+    foreach ($eintraege as $e) {
+        if ($e['von'] !== '' && $e['von'] !== (string) $von) {
+            continue;
+        }
+        if ($e['ip'] !== '' && !bm_wache_adresse_gleich($e['ip'], $ip)) {
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
+
+/** Die Rolle eines Befehls (rein, siehe Kopf "FUEHRUNG"). $evcc_weg: der
+ *  Befehl kam als aktion=batteriemodus. */
+function bm_wache_rolle($von, $evcc_weg)
+{
+    $v = strtolower((string) $von);
+    if ($v === 'loxone' || $v === 'evcc') {
+        return $v;
+    }
+    if ($v === '') {
+        return $evcc_weg ? 'evcc' : 'loxone';
+    }
+    return 'andere';
+}
+
+/** Fuehrt diese Rolle bei dieser Einstellung? "beide": jede Rolle. */
+function bm_wache_fuehrt($fuehrung, $rolle)
+{
+    return $fuehrung === 'beide' || $fuehrung === $rolle;
+}
+
+/** Name einer Rolle oder Fuehrung fuer Protokoll und Antwort. */
+function bm_wache_rollenname($r)
+{
+    $n = array('loxone' => 'Loxone', 'evcc' => 'EVCC', 'andere' => 'andere', 'beide' => 'Loxone und EVCC');
+    return isset($n[$r]) ? $n[$r] : '?';
+}
+
+/** Ist $v fuer diese Einstellung der Wache zulaessig? (rein, ohne Sprachdatei -
+ *  der Endpunkt fragt das bei jedem Befehl). Dieselben Grenzen wie in
+ *  bm_wert_pruefen(). */
+function bm_wache_wert_ok($k, $v)
+{
+    switch ($k) {
+        case 'wache_ein':
+        case 'wache_sperren_ein':
+        case 'wache_lb_melden':
+            return (is_int($v) || is_string($v)) && in_array((string) $v, array('0', '1'), true);
+        case 'wache_fenster_min':
+            return (is_int($v) || (is_string($v) && preg_match('/^[0-9]{1,3}\z/', $v) === 1))
+                && (int) $v >= 1 && (int) $v <= 120;
+        case 'wache_erlaubt':
+            if (!is_string($v) || strlen($v) > 512) {
+                return false;
+            }
+            list(, $f) = bm_wache_liste($v);
+            return !$f;
+        case 'fuehrung':
+            return is_string($v) && in_array($v, array('beide', 'loxone', 'evcc'), true);
+    }
+    return false;
+}
+
+/** Die Einstellungen der Wache aus einer Konfiguration. Was die eigene Pruefung
+ *  nicht besteht (von Hand bearbeitet), gilt mit der Vorgabe; eine so
+ *  verdorbene Liste merkt sich 'liste_kaputt' - dann wirkt die Sperre nicht. */
+function bm_wache_einstellungen(array $cfg)
+{
+    $v = bm_vorgaben();
+    $aus = array();
+    foreach (array('wache_ein', 'wache_fenster_min', 'wache_lb_melden', 'wache_sperren_ein',
+                   'wache_erlaubt', 'fuehrung') as $k) {
+        $aus[$k] = (array_key_exists($k, $cfg) && bm_wache_wert_ok($k, $cfg[$k])) ? $cfg[$k] : $v[$k];
+    }
+    $aus['wache_ein'] = (int) $aus['wache_ein'];
+    $aus['wache_fenster_min'] = (int) $aus['wache_fenster_min'];
+    $aus['wache_lb_melden'] = (int) $aus['wache_lb_melden'];
+    $aus['wache_sperren_ein'] = (int) $aus['wache_sperren_ein'];
+    $aus['wache_erlaubt'] = (string) $aus['wache_erlaubt'];
+    $aus['fuehrung'] = (string) $aus['fuehrung'];
+    $aus['liste_kaputt'] = array_key_exists('wache_erlaubt', $cfg)
+        && !bm_wache_wert_ok('wache_erlaubt', $cfg['wache_erlaubt']);
+    return $aus;
+}
+
+/** Kreuzpruefung (Formular und Zurueckspielen): "Fremde Schreiber abweisen"
+ *  ohne Fuehrung und ohne einen einzigen erlaubten Schreiber hat nichts, woran
+ *  es fremd und erlaubt unterscheidet. true = Mangel. */
+function bm_wache_kreuzmangel(array $c)
+{
+    $s = array_key_exists('wache_sperren_ein', $c) ? $c['wache_sperren_ein'] : 0;
+    $e = array_key_exists('wache_erlaubt', $c) ? $c['wache_erlaubt'] : '';
+    $f = array_key_exists('fuehrung', $c) ? $c['fuehrung'] : 'beide';
+    return (is_int($s) || is_string($s)) && (string) $s === '1'
+        && is_string($e) && trim($e) === '' && $f === 'beide';
+}
+
+/**
+ * Das Urteil der Sperre (rein). Rueckgabe array(aktiv, erlaubt, fehler, grund):
+ * aktiv = Sperren an UND etwas, woran sie urteilt (Fuehrung oder Liste).
+ * fehler 'LISTE': Sperren an, aber weder Fuehrung noch eine brauchbare Liste -
+ * dann wirkt die Sperre NICHT (Kopf). grund bei erlaubt = false: 'FUEHRUNG'
+ * (die Rolle fuehrt nicht) oder 'LISTE' (Schreiber nicht in der Liste).
+ * Ob es eine Ruecknahme ist, entscheidet der Aufrufer (die wird nie abgewiesen).
+ */
+function bm_wache_sperre_urteil(array $w, $von, $ip, $rolle)
+{
+    if ((int) $w['wache_sperren_ein'] !== 1) {
+        return array(false, true, '', '');
+    }
+    if (!empty($w['liste_kaputt'])) {
+        return array(false, true, 'LISTE', '');
+    }
+    list($ein, $fehl) = bm_wache_liste((string) $w['wache_erlaubt']);
+    $fuehrung = (string) $w['fuehrung'];
+    if ($fehl || (!$ein && $fuehrung === 'beide')) {
+        return array(false, true, 'LISTE', '');
+    }
+    if (!bm_wache_fuehrt($fuehrung, $rolle)) {
+        return array(true, false, '', 'FUEHRUNG');
+    }
+    if ($ein && !bm_wache_erlaubt($ein, $von, $ip)) {
+        return array(true, false, '', 'LISTE');
+    }
+    return array(true, true, '', '');
+}
+
+/**
+ * Den Merker eines Speichers fortschreiben (rein, ohne Datei - Selbsttest).
+ * $m: array('schreiber' => array('<von>@<ip>' => Eintrag), 'runde' => '', 'gemeldet' => ts)
+ * Rueckgabe: array(Merker, Schreiber im Fenster (neueste zuerst), melden, neue Runde).
+ * "Runde" ist die Menge der Schreiber im Fenster; gemeldet wird eine neue Runde
+ * sofort, dieselbe hoechstens einmal je Fenster. Faellt die Runde auf einen
+ * Schreiber zurueck, gilt die naechste zweite wieder als neu.
+ */
+function bm_wache_fortschreiben(array $m, $von, $ip, $rolle, $art, $abgewiesen, $jetzt, $fenster_s)
+{
+    $jetzt = (int) $jetzt;
+    $liste = (isset($m['schreiber']) && is_array($m['schreiber'])) ? $m['schreiber'] : array();
+    $schl = (string) $von . '@' . (string) $ip;
+    $e = (isset($liste[$schl]) && is_array($liste[$schl])) ? $liste[$schl]
+        : array('von' => (string) $von, 'ip' => (string) $ip, 'erst' => $jetzt, 'n' => 0, 'abgewiesen' => 0);
+    $e['zuletzt'] = $jetzt;
+    $e['n'] = (int) (isset($e['n']) ? $e['n'] : 0) + 1;
+    $e['abgewiesen'] = (int) (isset($e['abgewiesen']) ? $e['abgewiesen'] : 0) + ($abgewiesen ? 1 : 0);
+    $e['art'] = (string) $art;
+    $e['rolle'] = (string) $rolle;
+    $liste[$schl] = $e;
+    // Aufbewahren: 24 h (in beide Richtungen - eine zurueckgesprungene Uhr
+    // laesst keinen Eintrag ewig stehen), hoechstens BM_WACHE_HOECHSTENS.
+    foreach ($liste as $k => $x) {
+        if (!is_array($x) || !isset($x['zuletzt'], $x['von'], $x['ip'])
+                || abs($jetzt - (int) $x['zuletzt']) > BM_WACHE_AUFBEWAHREN_S) {
+            unset($liste[$k]);
+        }
+    }
+    uasort($liste, function ($a, $b) {
+        return (int) $b['zuletzt'] - (int) $a['zuletzt'];
+    });
+    $liste = array_slice($liste, 0, BM_WACHE_HOECHSTENS, true);
+    $fenster = array();
+    foreach ($liste as $k => $x) {
+        if (abs($jetzt - (int) $x['zuletzt']) < (int) $fenster_s) {
+            $fenster[$k] = $x;
+        }
+    }
+    $gemeldet = isset($m['gemeldet']) ? (int) $m['gemeldet'] : 0;
+    $runde = '';
+    $melden = false;
+    $neu = false;
+    if (count($fenster) > 1) {
+        $k2 = array_keys($fenster);
+        sort($k2, SORT_STRING);
+        $runde = implode('|', $k2);
+        $neu = ($runde !== (isset($m['runde']) ? (string) $m['runde'] : ''));
+        $melden = $neu || abs($jetzt - $gemeldet) >= (int) $fenster_s;
+        if ($melden) {
+            $gemeldet = $jetzt;
+        }
+    } else {
+        $gemeldet = 0;
+    }
+    return array(array('schreiber' => $liste, 'runde' => $runde, 'gemeldet' => $gemeldet),
+                 array_values($fenster), $melden, $neu);
+}
+
+/** Die Schreiber einer Runde als Text fuer Protokoll und Meldung. */
+function bm_wache_text(array $fenster)
+{
+    $t = array();
+    foreach ($fenster as $x) {
+        $t[] = ((string) $x['von'] !== '' ? $x['von'] : 'ohne Kennung') . '@' . ((string) $x['ip'] !== '' ? $x['ip'] : '?')
+             . ' (' . (isset($x['rolle']) ? bm_wache_rollenname($x['rolle']) . ', ' : '') . (int) $x['n'] . 'x'
+             . (!empty($x['abgewiesen']) ? ', ' . (int) $x['abgewiesen'] . ' abgewiesen' : '')
+             . ', zuletzt ' . date('H:i:s', (int) $x['zuletzt']) . ')';
+    }
+    return implode(', ', $t);
+}
+
+/** Den Merker oeffnen - mit close-on-exec ('e'): ein Kindprozess erbt die
+ *  flock-Sperre sonst und haelt sie ueber das Ende des Endpunkts hinaus
+ *  (gemessen an Bewaesserung und Sprachsteuerung: "Sperre vererbt sich an
+ *  Kinder"). 'e' kennt PHP nur auf POSIX-Systemen; unter Windows (Pruefstand
+ *  der Oberflaeche) ohne. Rueckgabe Handle oder false; ein Verzeichnis an der
+ *  Stelle ist false. */
+function bm_wache_oeffnen($f, $modus = 'c+')
+{
+    if (is_dir($f)) {
+        return false;
+    }
+    return @fopen($f, $modus . (DIRECTORY_SEPARATOR === '/' ? 'e' : ''));
+}
+
+/** Eine neue Runde als LoxBerry-Meldung (nur mit wache_lb_melden), ueber
+ *  bin/bm_notify.php wie die Meldung des Dienstes bei offenem Zwang. Laeuft
+ *  erst, wenn der Merker wieder frei ist; hoechstens 10 s. */
+function bm_wache_lb_melden($text)
+{
+    $skript = bm_paths()['bindir'] . '/bm_notify.php';
+    if (!is_file($skript)) {
+        bm_log_gebremst('wache_lb', 'Schreiber-Wache: ' . $skript . ' fehlt - keine LoxBerry-Meldung.', 3600);
+        return false;
+    }
+    $php = (PHP_SAPI === 'cli' && defined('PHP_BINARY') && PHP_BINARY !== '') ? PHP_BINARY : 'php';
+    $befehl = escapeshellarg($php) . ' ' . escapeshellarg($skript) . ' 4 '
+        . escapeshellarg((string) $text) . ' ' . escapeshellarg((string) bm_paths()['plugin']);
+    if (DIRECTORY_SEPARATOR === '/' && is_executable('/usr/bin/timeout')) {
+        $befehl = '/usr/bin/timeout 10 ' . $befehl;
+    }
+    $a = array();
+    $rc = 1;
+    @exec($befehl . ' 2>&1', $a, $rc);
+    if ($rc !== 0) {
+        bm_log_gebremst('wache_lb', 'Schreiber-Wache: die LoxBerry-Meldung liess sich nicht ablegen ('
+            . bm_text_sauber(implode(' ', $a), 200) . ').', 3600);
+    }
+    return $rc === 0;
+}
+
+/**
+ * Einen Befehl bei der Wache anmelden. Faellt offen aus (Kopf).
+ * $w: bm_wache_einstellungen().
+ * Rueckgabe: array('merker' => ging, 'anzahl' => Zahl der Schreiber im Fenster).
+ */
+function bm_wache_merken($nr, $von, $ip, $rolle, $art, $abgewiesen, array $w)
+{
+    $nr = (int) $nr;
+    $aus = array('merker' => true, 'anzahl' => 0);
+    $fenster_s = 60 * (int) $w['wache_fenster_min'];
+    $jetzt = time();
+    $f = bm_wache_datei($nr);
+    $erg = null;
+    $fh = bm_wache_oeffnen($f);
+    if ($fh !== false) {
+        $ende = microtime(true) + 2;
+        $gesperrt = true;
+        while (!@flock($fh, LOCK_EX | LOCK_NB)) {
+            if (microtime(true) >= $ende) {
+                $gesperrt = false;
+                break;
+            }
+            usleep(20000);
+        }
+        if ($gesperrt) {
+            $roh = (string) stream_get_contents($fh);
+            $m = $roh === '' ? array() : json_decode($roh, true);
+            if (!is_array($m)) {
+                // Unlesbar: neu beginnen - der Merker beobachtet nur. Eine Zeile,
+                // danach ist er wieder lesbar (kein Dauerprotokoll).
+                bm_log('Schreiber-Wache, Speicher ' . $nr . ': der Merker war unlesbar ('
+                    . strlen($roh) . ' Byte) und beginnt neu.');
+                $m = array();
+            }
+            list($m2, $fenster, $melden, $neu) = bm_wache_fortschreiben($m, $von, $ip, $rolle, $art,
+                $abgewiesen, $jetzt, $fenster_s);
+            $inhalt = (string) json_encode($m2);
+            if ($inhalt !== '' && ftruncate($fh, 0) && rewind($fh)
+                    && fwrite($fh, $inhalt) === strlen($inhalt) && fflush($fh)) {
+                $erg = array($fenster, $melden, $neu);
+            }
+            flock($fh, LOCK_UN);
+        }
+        fclose($fh);
+    }
+    $schl = 'wache_merker_' . $nr;
+    $merk = bm_paths()['datadir'] . '/.meld_' . $schl;
+    if ($erg === null) {
+        $aus['merker'] = false;
+        bm_log_gebremst($schl, 'Schreiber-Wache, Speicher ' . $nr . ': der Merker ' . $f
+            . ' laesst sich nicht oeffnen, sperren oder schreiben - die Befehle gehen weiter in die'
+            . ' Warteschlange, nur das Melden mehrerer Schreiber faellt aus, bis das behoben ist.'
+            . ' Pruefen: Platz und Eigentuemer (loxberry).', 3600);
+        return $aus;
+    }
+    if (is_file($merk)) {
+        @unlink($merk);
+        bm_log('Schreiber-Wache, Speicher ' . $nr . ': der Merker ist wieder lesbar.');
+    }
+    list($fenster, $melden, $neu) = $erg;
+    $aus['anzahl'] = count($fenster);
+    if ($melden) {
+        $text = 'Schreiber-Wache, Speicher ' . $nr . ': ' . count($fenster) . ' Schreiber in den letzten '
+              . (int) $w['wache_fenster_min'] . ' min - ' . bm_wache_text($fenster)
+              . ((int) $w['wache_sperren_ein'] === 1 ? '.' : '. Nichts abgewiesen (Sperren aus).');
+        bm_log($text);
+        if ($neu && (int) $w['wache_lb_melden'] === 1) {
+            bm_wache_lb_melden($text);
+        }
+    }
+    return $aus;
+}
+
+/** Die Schreiber eines Speichers fuer den Reiter Test, neueste zuerst.
+ *  Rueckgabe array(zustand, eintraege): 'ok' | 'leer' (kein Befehl in 24 h
+ *  oder seit dem letzten Update) | 'merker' (nicht lesbar). */
+function bm_wache_lesen($nr)
+{
+    $f = bm_wache_datei($nr);
+    if (!file_exists($f)) {
+        return array('leer', array());
+    }
+    $fh = bm_wache_oeffnen($f, 'r');
+    if ($fh === false) {
+        return array('merker', array());
+    }
+    $ende = microtime(true) + 2;
+    $ok = true;
+    while (!@flock($fh, LOCK_SH | LOCK_NB)) {
+        if (microtime(true) >= $ende) {
+            $ok = false;
+            break;
+        }
+        usleep(20000);
+    }
+    $roh = $ok ? (string) stream_get_contents($fh) : '';
+    if ($ok) {
+        flock($fh, LOCK_UN);
+    }
+    fclose($fh);
+    $m = ($ok && $roh !== '') ? json_decode($roh, true) : ($ok ? array() : null);
+    if (!is_array($m)) {
+        return array('merker', array());
+    }
+    $aus = array();
+    $liste = (isset($m['schreiber']) && is_array($m['schreiber'])) ? $m['schreiber'] : array();
+    foreach ($liste as $x) {
+        if (!is_array($x) || !isset($x['zuletzt'], $x['n'])
+                || abs(time() - (int) $x['zuletzt']) > BM_WACHE_AUFBEWAHREN_S) {
+            continue;
+        }
+        $aus[] = array('von' => isset($x['von']) && is_string($x['von']) ? $x['von'] : '',
+                       'ip' => isset($x['ip']) && is_string($x['ip']) ? $x['ip'] : '',
+                       'erst' => (int) (isset($x['erst']) ? $x['erst'] : 0), 'zuletzt' => (int) $x['zuletzt'],
+                       'n' => (int) $x['n'], 'abgewiesen' => (int) (isset($x['abgewiesen']) ? $x['abgewiesen'] : 0),
+                       'art' => isset($x['art']) && is_string($x['art']) ? $x['art'] : '',
+                       'rolle' => isset($x['rolle']) && is_string($x['rolle']) ? $x['rolle'] : '');
+    }
+    usort($aus, function ($a, $b) {
+        return $b['zuletzt'] - $a['zuletzt'];
+    });
+    return array($aus ? 'ok' : 'leer', $aus);
 }
 
 /**
@@ -5438,20 +5986,23 @@ function bm_vorlage_ausgang($nummer = 1)
     $n = (int) $nummer;
     /* O11: Titel und Kommentare aus der Sprachdatei - bis 0.9.29 stand hier
      * fest Deutsch, auch in der englischen Vorlage. Kommentare hoechstens
-     * 40 Zeichen; der ganze Satz steht im Reiter "Einbindung in Loxone". */
+     * 40 Zeichen; der ganze Satz steht im Reiter "Einbindung in Loxone".
+     * Energie-1 C1: jede Adresse traegt von=loxone, damit die Schreiber-Wache
+     * den Miniserver von anderen Schreibern unterscheidet. Wer die Vorlage
+     * nicht neu einliest, erscheint dort als "ohne Kennung" - kein Fehler. */
     $cmds = array(
         array('title' => bm_t('VORLAGE.VQ_LADEN_T'), 'analog' => 1,
               'comment' => bm_vorlage_kommentar(bm_t('VORLAGE.VQ_WATT_K')),
-              'on' => $basis . '&aktion=laden&geraet=' . $n . '&watt=<v.0>', 'off' => ''),
+              'on' => $basis . '&aktion=laden&geraet=' . $n . '&watt=<v.0>&von=loxone', 'off' => ''),
         array('title' => bm_t('VORLAGE.VQ_ENTLADEN_T'), 'analog' => 1,
               'comment' => bm_vorlage_kommentar(bm_t('VORLAGE.VQ_WATT_K')),
-              'on' => $basis . '&aktion=entladen&geraet=' . $n . '&watt=<v.0>', 'off' => ''),
+              'on' => $basis . '&aktion=entladen&geraet=' . $n . '&watt=<v.0>&von=loxone', 'off' => ''),
         array('title' => bm_t('VORLAGE.VQ_AUTO_T'), 'analog' => 0,
               'comment' => bm_vorlage_kommentar(bm_t('VORLAGE.VQ_AUTO_K')),
-              'on' => $basis . '&aktion=automatik&geraet=' . $n, 'off' => ''),
+              'on' => $basis . '&aktion=automatik&geraet=' . $n . '&von=loxone', 'off' => ''),
         array('title' => bm_t('VORLAGE.VQ_LEBEN_T'), 'analog' => 0,
               'comment' => bm_vorlage_kommentar(bm_t('VORLAGE.VQ_LEBEN_K')),
-              'on' => $basis . '&aktion=lebenszeichen&geraet=' . $n, 'off' => ''),
+              'on' => $basis . '&aktion=lebenszeichen&geraet=' . $n . '&von=loxone', 'off' => ''),
     );
     return array(
         'VQ_BMS_' . $n . '.xml',

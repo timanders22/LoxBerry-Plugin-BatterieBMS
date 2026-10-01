@@ -10,6 +10,29 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.33
+
+Energie-1 Teil C1 (Verbesserungsliste `Pruefung-Durchgang-2026-09-29/VERBESSERUNGEN_OFFEN.md`, Entscheidung 25).
+Gemessen an einer Speicher-Attrappe unter PHP 7.4, 8.3 und 8.5; nicht am Speicher.
+
+* **Schreiber-Wache:** Befehle dürfen eine Kennung tragen (`&von=<kennung>`,
+  1–32 Zeichen; ungültig ergibt 400 `ERR=VON`). Kommen innerhalb von 15 Minuten
+  (einstellbar) Sollwerte von mehr als einem Schreiber, meldet das Plugin es im
+  Protokoll, im Reiter Test („Schreiber der letzten 24 Stunden“) und in der
+  Antwort (`;SCHREIBER=n`); abgewiesen wird dabei nichts. Eine LoxBerry-Meldung
+  ist zuschaltbar (ab Werk aus).
+* **Führung** (ab Werk „beide“, wie bisher): Wer den Speicher führt – Loxone oder
+  EVCC. Sollwerte gegen die Führung werden gemeldet; mit **„Fremde Schreiber
+  abweisen“** (ab Werk aus) bekommen sie 409 `GRUND=FREMDSCHREIBER`. Rücknahmen
+  (automatik, watt=0, batteriemodus=1), Totmann und Notbremse sind nie betroffen.
+* Die Loxone-Vorlage setzt `&von=loxone`; in einer bestehenden Einbindung genügt
+  es, `&von=loxone` an die Befehle anzuhängen. Steuert EVCC den Speicher, kommt
+  dort `&von=evcc` an die Adresse.
+* Ist der Merker der Wache unbrauchbar, geht der Sollwert trotzdem
+  (`;WACHE=MERKER`). Kein neues MQTT-Thema.
+* Hinweis: Eine mit dieser Fassung erstellte Sicherung lässt sich in 0.9.32 und
+  älter nicht zurückspielen (unbekannte Felder).
+
 ## Neu in 0.9.32
 
 Verbesserungen aus dem Durchgang (Verbesserungsliste
@@ -621,6 +644,42 @@ gelten:
 
 `watt=0` ist etwas anderes als „laden mit 0 Watt": es beendet den Zwang.
 
+## Schreiber-Wache und Führung
+
+Den Speicher soll nur **ein** Regler führen; im Haus ist das Loxone. Am Endpunkt können aber auch
+EVCC (`batteriemodus`) und jede andere Linie schreiben – der letzte Schreiber gewinnt, und die
+Gleichwert-Unterdrückung greift nicht, weil sich die Werte unterscheiden. Die Schreiber-Wache
+macht das sichtbar (Energie-1, Teil C1):
+
+* Schaltende Befehle tragen wahlweise `&von=<kennung>` (1 bis 32 Zeichen `A–Z a–z 0–9 _ -`). Die
+  Loxone-Vorlage setzt `von=loxone`, die Betriebsart-Adresse für EVCC im Reiter *Einbindung in
+  Loxone* `von=evcc`. Eine ungültige Kennung bekommt HTTP 400 `ERR=VON`; ohne `von` geht jede
+  Adresse weiter.
+* Ein Schreiber ist das Paar Kennung@Absenderadresse. Kommen innerhalb des Zeitfensters (ab Werk
+  15 min, 1–120) Befehle von mehr als einem Schreiber, steht das im Protokoll (gebremst: einmal je
+  neuer Runde, sonst höchstens einmal je Fenster), im Reiter Test (Tabelle *Schreiber der letzten
+  24 Stunden*) und hinten in der Antwort (`;SCHREIBER=n`). Wahlweise zusätzlich als
+  LoxBerry-Meldung (ab Werk aus). **Melden ist ab Werk an, abgewiesen wird ab Werk nichts.**
+* **Führung** (Reiter Einstellungen): *Loxone und EVCC* (ab Werk, wie bisher), *Loxone* oder
+  *EVCC*. Die Rolle eines Befehls ist `von=loxone` bzw. `von=evcc`; ohne Kennung gilt
+  `batteriemodus` als EVCC und alles andere als Loxone; jede andere Kennung ist „andere“. Steht die
+  Führung auf einer Seite, wird ein Sollwert der anderen gemeldet – auch wenn er der einzige ist.
+* **Fremde Schreiber abweisen** (ab Werk aus): Ein Sollwert, dessen Rolle nicht führt oder dessen
+  Schreiber nicht in der Liste *Erlaubte Schreiber* steht (Kennung, Adresse oder Kennung@Adresse;
+  leer = nur die Führung entscheidet), bekommt HTTP 409 `SET;OK=0;GRUND=FREMDSCHREIBER;…` und wird
+  nicht eingereiht. **Rücknahmen** (`automatik`, `watt=0`, `batteriemodus=1`) werden nie
+  abgewiesen; Totmannschaltung und Notbremse laufen nicht über den Endpunkt und sind nicht
+  betroffen. Abweisen ohne Führung und ohne Liste beanstanden Formular und Zurückspielen; steht es
+  von Hand so in der Datei, wirkt die Sperre nicht, und das Protokoll sagt es.
+* Erst einschalten, wenn der Reiter Test eine Woche lang nur die erwarteten Schreiber zeigt. Eine
+  Loxone-Vorlage ohne `von=loxone` erscheint als „ohne Kennung“; sie gilt als Loxone, trifft aber
+  eine Liste mit nur `loxone` nicht. Bei bestehenden Befehlen in Loxone Config genügt es,
+  `&von=loxone` anzuhängen.
+* Der Merker (`schreiber_geraetN.json` im Datenordner, unter `flock`) fällt offen aus: Lässt er
+  sich nicht schreiben, geht der Befehl trotzdem in die Warteschlange, und die Antwort trägt
+  hinten `;WACHE=MERKER`. Die Sperre hängt nicht am Merker. Nach einem Update beginnt er leer.
+* Kein neues MQTT-Thema.
+
 ## Endpunkt für den Miniserver
 
 ```
@@ -642,6 +701,7 @@ gelten:
 | `sperren` | schaltend | nicht entladen (erzwungenes Entladen mit 0 W) |
 | `evcc` | lesend | `soc`, `power`, `capacity` als JSON, Vorzeichen wie EVCC es erwartet |
 | `batteriemodus` `&modus=` | schaltend | Betriebsart für EVCC: 1 normal, 2 halten, 3 aus dem Netz laden |
+| `&von=<kennung>` | Zusatz | Herkunft für die Schreiber-Wache (1 bis 32 Zeichen `A–Z a–z 0–9 _ -`); die Vorlage setzt `von=loxone`, die EVCC-Adresse `von=evcc`; ungültig: HTTP 400 `ERR=VON`. Siehe *Schreiber-Wache und Führung* |
 | `?selftest=1` | – | Selbsttest: `SELFTEST;OK=1;TOKEN=OK`, bei falschem Token 403 `ERR=TOKEN`, ohne eingerichtetes Token 403 `ERR=KEIN_TOKEN_EINGERICHTET`. Löst nichts aus |
 
 Das Token wird beim ersten Öffnen der Oberfläche erzeugt und mit `hash_equals`
