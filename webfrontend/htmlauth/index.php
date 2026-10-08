@@ -1149,6 +1149,8 @@ $bm_vtag = (isset($_GET['vtag']) && preg_match('/^[0-9]{8}$/', (string) $_GET['v
 
 <!-- ================= Reiter: Einstellungen ================= -->
 <div class="sm-seite<?= $bm_tab === 'tab-settings' ? ' sm-active' : '' ?>" id="tab-settings">
+<div class="sm-hinweis"><?= bm_t('EINST.WAS_IST_DAS') ?></div>
+
 <?php /* O14 (Durchgang 29.09.2026): EINE Legende oben je Reiter - bis 0.9.29 standen bis zu drei verstreut im Reiter. */ ?>
 <div class="sm-legende">
 <span><i class="sm-punkt sm-b-lesen"></i> <?= bm_t('LEGENDE.LESEN') ?></span>

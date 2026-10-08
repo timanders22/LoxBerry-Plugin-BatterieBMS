@@ -10,6 +10,15 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.34
+
+Kopf wie alle Hausplugins: Statusübersicht über den Reitern, Zusammenfassung oben im ersten Reiter.
+
+* **Zusammenfassung** des Plugins in einem grünen Kasten oben im Reiter Einstellungen, vor der Legende.
+* Die Statuskacheln über den Reitern (Dienst, letzter Abruf, Speicher, Steuerung, MQTT) stehen schon und
+  bleiben unverändert.
+* Nur Oberfläche; gerendert unter PHP 7.4, 8.4 und 8.5, nicht am Gerät angesehen.
+
 ## Neu in 0.9.33
 
 Energie-1 Teil C1 (Verbesserungsliste `Pruefung-Durchgang-2026-09-29/VERBESSERUNGEN_OFFEN.md`, Entscheidung 25).
