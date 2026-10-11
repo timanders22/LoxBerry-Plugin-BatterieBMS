@@ -10,6 +10,13 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.36
+
+Reiter „Einbindung in Loxone“: Vollausstattung aus dem
+[LoxBerry-Plugins Musterprojekt](https://github.com/timanders22/LoxBerry-Plugins-Musterprojekt) – zwei Baustein-Listen
+(„Werte und Meldungen“, „Laden nach Spotpreis“) mit zwei Bildern und
+Schritt-für-Schritt-Anleitung.
+
 ## Neu in 0.9.35
 
 Baustein-Liste in der Schreibweise des Leitungswerkzeugs.
@@ -523,7 +530,7 @@ alle vier bestanden.
 | **Abgeleitet** | Restenergie in kWh und geschätzte Restzeit bis voll oder leer; ein **Sammelmerker** mit Klartext, wenn Drift, Temperatur oder Fehlerbits auffällig sind |
 | **Steuerung** | Laden und Entladen erzwingen, mit Leistungsgrenze, Ladefenster, Schreibbremse und **Totmannschaltung**. Jeder Schreibbefehl wird gegen die Antwort des Geräts gehalten; ein **Trockenlauf** zeigt vorher, welche Register beschrieben würden |
 | **Ausgabe** | MQTT über das LoxBerry-Gateway (mit Zeitstempel `ts`) und ein tokengeschützter HTTP-Endpunkt für den Miniserver (mit `ALTER` in Sekunden – über MQTT wäre das Alter beim Senden immer null) |
-| **Loxone** | Fertige Importdateien für virtuelle Eingänge und Ausgänge — nur mit den Größen, die der jeweilige Speicher wirklich liefert —, dazu eine vollständige Baustein-Liste zum 1:1-Nachbauen |
+| **Loxone** | Fertige Importdateien für virtuelle Eingänge und Ausgänge — nur mit den Größen, die der jeweilige Speicher wirklich liefert —, dazu zwei Baustein-Listen aus dem LoxBerry-Plugins Musterprojekt (Werte und Meldungen, Laden nach Spotpreis) mit Bild und Schritt-für-Schritt-Anleitung |
 | **Fehlersuche** | Rohregister lesen, Mitschnitt des Datenverkehrs, Selbstprüfung, die den eigenen Endpunkt wirklich aufruft |
 
 ## Unterstützte Speicher
@@ -597,8 +604,9 @@ und umgekehrt.
    Speichern und beim Dienststart. *Unter Gateway V1 kommt ohne dieses Abo am
    Miniserver nichts an.* Ob Gateway V2 die Themengruppe auch ohne die Datei
    erkennt, ist nicht gemessen.
-5. **Einbindung in Loxone** – Schritt für Schritt, mit Importdatei und
-   Baustein-Liste.
+5. **Einbindung in Loxone** – Schritt für Schritt, mit Importdatei und zwei
+   Baustein-Listen samt Bild. Die ganze Projektdatei mit allen Plugin-Seiten und
+   Vorlagen: [LoxBerry-Plugins Musterprojekt](https://github.com/timanders22/LoxBerry-Plugins-Musterprojekt).
 
 ## Steuerung
 

@@ -5338,7 +5338,8 @@ function bm_restwerte(array $e, array $g)
  * Alarm und auch keine Entwarnung.
  *
  * Die Schwellen fuer Drift und Temperatur stehen im Reiter Einstellungen.
- * Der Merker ersetzt die Bausteine #14 bis #19 in Loxone nicht, er ergaenzt
+ * Der Merker ersetzt die Meldewege der Baustein-Liste in Loxone nicht (seit 0.9.36
+ * #13 bis #19 und #31 bis #39 im Abschnitt "Werte und Meldungen"), er ergaenzt
  * sie fuer alles, was ohne Loxone auskommen muss.
  */
 function bm_alarm(array $e, ?array $cfg = null)
@@ -5898,14 +5899,33 @@ function bm_check($feld)
     return '\i;' . $feld . '=\i\v';
 }
 
+/**
+ * Titel der Vorlage fuer Speicher $nummer: "BMS <n> <Name>" (ohne eingerichteten Speicher
+ * "BMS <n> Speicher <n>"), mit $steuerung der des virtuellen Ausgangs ("... Steuerung").
+ *
+ * Welle Bild 9 VOLL (0.9.36): bis 0.9.35 standen dieselben Ausdruecke fest in
+ * bm_vorlage_eingaenge() und bm_vorlage_ausgang(). Die Baustein-Listen im Reiter
+ * "Einbindung in Loxone" nennen den Titel im Typ - aus derselben Quelle wie die Vorlage.
+ */
+function bm_vorlage_titel($nummer = 1, $steuerung = false)
+{
+    $g = bm_geraet($nummer);
+    $bez = $g !== null ? $g['name'] : sprintf(bm_t('ALLG.SPEICHER_NAME'), (int) $nummer);
+    return 'BMS ' . (int) $nummer . ' ' . $bez . ($steuerung ? ' ' . bm_t('VORLAGE.VQ_STEUERUNG') : '');
+}
+
+/** Titel eines Befehls der Eingangsvorlage: BMS_<n>_<FELD> (Welle Bild 9 VOLL, wie oben). */
+function bm_vorlage_eingang_titel($nummer, $feld)
+{
+    return 'BMS_' . (int) $nummer . '_' . $feld;
+}
+
 /** Vorlage der virtuellen Eingaenge. Rueckgabe: array(name, inhalt) */
 function bm_vorlage_eingaenge($nummer = 1)
 {
     $p = bm_paths();
     $host = bm_hostname();
     $token = bm_token();
-    $g = bm_geraet($nummer);
-    $bez = $g !== null ? $g['name'] : sprintf(bm_t('ALLG.SPEICHER_NAME'), (int) $nummer);
     $cmds = array();
     foreach (bm_felder_geliefert($nummer) as $feld => $info) {
         // Der Text laeuft gleich durch bm_x() und wuerde dort ein zweites Mal
@@ -5914,7 +5934,7 @@ function bm_vorlage_eingaenge($nummer = 1)
         // O11: hoechstens 40 Zeichen, die Einheit steht in Unit.
         $bedeutung = trim(strip_tags(html_entity_decode(bm_t($info[1]), ENT_QUOTES, 'UTF-8')));
         $cmds[] = array(
-            'title'   => 'BMS_' . (int) $nummer . '_' . $feld,
+            'title'   => bm_vorlage_eingang_titel($nummer, $feld),
             'comment' => bm_vorlage_kommentar($bedeutung),
             'check'   => bm_check($feld),
             'min'     => (string) $info[2],
@@ -5942,7 +5962,7 @@ function bm_vorlage_eingaenge($nummer = 1)
      * steht, fand der Baustein den richtigen Wert. Seit bm_check() das
      * Trennzeichen setzt, traegt die Reihenfolge diese Last nicht mehr. */
     $cmds[] = array(
-        'title'   => 'BMS_' . (int) $nummer . '_SOLLART',
+        'title'   => bm_vorlage_eingang_titel($nummer, 'SOLLART'),
         'comment' => bm_vorlage_kommentar(strip_tags(html_entity_decode(bm_t('BM_FELD.SOLLART'),
                           ENT_QUOTES, 'UTF-8'))),
         'check'   => bm_check('SOLLART'),
@@ -5953,7 +5973,7 @@ function bm_vorlage_eingaenge($nummer = 1)
         'unit'    => '<v>',
     );
     $cmds[] = array(
-        'title'   => 'BMS_' . (int) $nummer . '_SOLLALTER',
+        'title'   => bm_vorlage_eingang_titel($nummer, 'SOLLALTER'),
         'comment' => bm_vorlage_kommentar(strip_tags(html_entity_decode(bm_t('BM_FELD.SOLLALTER'),
                           ENT_QUOTES, 'UTF-8'))),
         'check'   => bm_check('SOLLALTER'),
@@ -5966,7 +5986,7 @@ function bm_vorlage_eingaenge($nummer = 1)
     return array(
         'VI_BMS_' . (int) $nummer . '.xml',
         bm_xml_virtual_in_http(array(
-            'title'   => 'BMS ' . (int) $nummer . ' ' . $bez,
+            'title'   => bm_vorlage_titel($nummer),
             'address' => $adresse,
             'polling' => '60',
             'comment' => sprintf(bm_t('VORLAGE.KOPF'), date('Y-m-d')),
@@ -5980,8 +6000,6 @@ function bm_vorlage_ausgang($nummer = 1)
     $p = bm_paths();
     $host = bm_hostname();
     $token = bm_token();
-    $g = bm_geraet($nummer);
-    $bez = $g !== null ? $g['name'] : sprintf(bm_t('ALLG.SPEICHER_NAME'), (int) $nummer);
     $basis = '/plugins/' . $p['plugin'] . '/index.php?token=' . $token;
     $n = (int) $nummer;
     /* O11: Titel und Kommentare aus der Sprachdatei - bis 0.9.29 stand hier
@@ -6007,7 +6025,7 @@ function bm_vorlage_ausgang($nummer = 1)
     return array(
         'VQ_BMS_' . $n . '.xml',
         bm_xml_virtual_out(array(
-            'title'   => 'BMS ' . $n . ' ' . $bez . ' ' . bm_t('VORLAGE.VQ_STEUERUNG'),
+            'title'   => bm_vorlage_titel($n, true),
             'address' => 'http://' . $host,
             'comment' => sprintf(bm_t('VORLAGE.KOPF'), date('Y-m-d')),
         ), $cmds),

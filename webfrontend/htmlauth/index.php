@@ -1046,6 +1046,10 @@ if ($bm_rahmen) {
     background-repeat: no-repeat; background-position: right 10px center;
     padding-right: 32px; cursor: pointer; }
 .sm-tbl select { padding-right: 28px; background-position: right 7px center; }
+/* Ergaenzung (Welle Bild, Entscheidung 45): Bild der Bausteine aus dem gemeinsamen Musterprojekt. */
+.sm-bild { margin: 12px 0; }
+.sm-bild img { max-width: 100%; height: auto; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
+.sm-bild figcaption { font-size: .9em; color: #555; margin-top: 4px; }
 
 </style>
 <div class="sm-wrap">
@@ -1728,111 +1732,234 @@ if (!bm_felder_gemessen(1)) { ?>
 
 <?php
 /**
- * Die komplette Baustein-Liste. Pflicht im Hausstandard.
+ * Die Baustein-Listen. Pflicht im Hausstandard.
  *
- * Anspruch: Wer die Tabelle von oben nach unten abarbeitet, hat die Funktion
- * nachgebaut, ohne nachzudenken. Loxone Config fuehrt alle Bausteine in der
- * Baustein-Suche (F5).
+ * Welle Bild 9 VOLL (0.9.36, Hausherr 11.10.2026: "Vollausstattung ... ein absoluter Laie"):
+ * zwei Seiten aus dem LoxBerry-Plugins Musterprojekt, dort in Loxone Config gebaut und mit
+ * leitungen_setzen.py verbunden (Musterprojekt/baustein_listen.txt, Abschnitte "BatterieBMS"
+ * und "BatterieBMS Spotpreis-Laden"). Eine Zeile = ein Baustein; keine Leitung ueber die
+ * Seitengrenze - was beide Seiten brauchen, steht auf beiden (BMS_1_OK, BMS_1_SOC).
  *
- * Typ, Name und Parameter stehen als Sprachschluessel drin, die Eingangsspalte
- * ist symbolisch und damit sprachfrei.
+ * Speicher 1 wie die Vorlagen-Knoepfe ab Werk. Namen der Vorlagen-Bausteine und Vorlagentitel
+ * aus DERSELBEN Quelle wie die Importdateien (bm_vorlage_eingang_titel(), bm_vorlage_titel(),
+ * VORLAGE.VQ_*_T); die Logiknamen stehen fest hier, in beiden Sprachen gleich wie im
+ * Musterprojekt. Jede Zelle ist fertiges HTML. Zeile: array(Nr, Typ, Name, array('text' =>
+ * Parameter), Eingaenge) - bm_test.php liest Spalte 4 auf Suchtexte ohne Trennzeichen.
+ *
+ * Bis 0.9.35 stand hier EINE Liste (38 Zeilen bis #36, Ueberwachung und Spotpreis-Laden mit Merker,
+ * Analogspeicher und Flanke) samt bm_baustein_befehl() und der Erlaeuterung zu Schritt 7 (Sprachdatei).
  */
-/**
- * Der Parametertext einer Befehlserkennung - aus DERSELBEN Quelle wie die
- * Importdatei.
- *
- * Bis 0.9.10 stand er acht Mal ausgeschrieben in der Sprachdatei
- * (BAUSTEIN.P01 bis P08), je Sprache - also sechzehn Abschriften eines
- * Musters, das der Quelltext nebenan selbst baut. Der Bestandslauf von
- * Werkzeuge/suchmuster_pruefen.py hat sie als RISIKO gemeldet: sie zeigten
- * den Suchtext ohne Trennzeichen. Der Anwender schreibt aber die Oberflaeche
- * ab, nicht den Quelltext.
- *
- * Die naheliegende Antwort waere gewesen, sechzehn Zeilen zu berichtigen.
- * Diese hier ist besser: eine Abschrift kann nicht auseinanderlaufen, weil es
- * keine mehr gibt. Muster, Einheit und Grenzen kommen aus bm_check() und
- * bm_status_felder() - denselben Stellen, aus denen die Importdatei entsteht.
- */
-function bm_baustein_befehl($feld, $zusatz = '')
+function bm_bl_zeile($nr, $typ, $name, $param, $ein)
 {
-    $felder = bm_status_felder();
-    $info = isset($felder[$feld]) ? $felder[$feld] : array('', '', 0, 0);
-    $einheit = ($info[0] !== '')
-        ? sprintf(bm_t('BAUSTEIN.P_EINHEIT'), bm_e($info[0]))
-        : bm_t('BAUSTEIN.P_OHNE_EINHEIT');
-    $text = sprintf(bm_t('BAUSTEIN.P_BEFEHL'),
-        '<span class="sm-mono">' . bm_e(bm_check($feld)) . '</span>',
-        $einheit, (int) $info[2], (int) $info[3]);
-    if ($zusatz !== '') {
-        $text .= ' ' . bm_t($zusatz);
-    }
-    return array('text' => $text);
+    return array($nr, $typ, $name, array('text' => $param), $ein);
 }
 
+/** Typzelle aus einem Sprachschluessel ohne Platzhalter (Typen mit Vorlagentitel: sprintf an
+ * der Aufrufstelle, damit sprachplatzhalter_pruefen sie sieht). */
+function bm_bl_typ($schluessel)
+{
+    return bm_e(bm_t($schluessel));
+}
+
+/** Parameterzelle aus einem Sprachschluessel; '' heisst Strich. */
+function bm_bl_param($schluessel)
+{
+    return $schluessel === '' ? '&mdash;' : bm_e(bm_t($schluessel));
+}
+
+/** Eingangszelle "Eingang = #n". */
+function bm_bl_ein($n)
+{
+    return bm_e(sprintf(bm_t('BAUSTEIN.E_EIN'), (int) $n));
+}
+
+/** Namenszelle eines Vorlagen-Eingangs von Speicher 1 (wie in der Importdatei). */
+function bm_bl_vi($feld)
+{
+    return '<span class="sm-mono">' . bm_e(bm_vorlage_eingang_titel(1, $feld)) . '</span>';
+}
+
+/** Abschnitt "Werte und Meldungen" = Musterprojekt-Seite "BatterieBMS". */
 function bm_bausteine()
 {
+    $vi = bm_vorlage_titel(1);
+    $vq = bm_vorlage_titel(1, true);
+    $tvi = bm_e(sprintf(bm_t('BAUSTEIN.T_VE'), $vi));
+    $tva = bm_e(sprintf(bm_t('BAUSTEIN.T_VA'), $vq));
+    $leer = '&mdash;';
     return array(
-        array(1,  'BAUSTEIN.T_VE',       'BAUSTEIN.N01', bm_baustein_befehl('SOC'),    '&mdash;'),
-        array(2,  'BAUSTEIN.T_VE',       'BAUSTEIN.N02', bm_baustein_befehl('SOH'),    '&mdash;'),
-        array(3,  'BAUSTEIN.T_VE',       'BAUSTEIN.N03', bm_baustein_befehl('UZDIFF'), '&mdash;'),
-        array(4,  'BAUSTEIN.T_VE',       'BAUSTEIN.N04', bm_baustein_befehl('TMAX'),   '&mdash;'),
-        array(5,  'BAUSTEIN.T_VE',       'BAUSTEIN.N05', bm_baustein_befehl('PBAT', 'BAUSTEIN.Z_PBAT'), '&mdash;'),
-        array(6,  'BAUSTEIN.T_VE',       'BAUSTEIN.N06', bm_baustein_befehl('ZYKLEN'), '&mdash;'),
-        array(7,  'BAUSTEIN.T_VE',       'BAUSTEIN.N07', bm_baustein_befehl('ALTER'),  '&mdash;'),
-        array(8,  'BAUSTEIN.T_VE',       'BAUSTEIN.N08', bm_baustein_befehl('OK', 'BAUSTEIN.Z_OK'), '&mdash;'),
-        // O12 (Durchgang 29.09.2026): die Schwelle ist die Waechtergrenze der
-        // Anlage (bm_waechter_grenze(), 5 x Takt, mindestens 180 s), nicht
-        // fest 180 - bei Takt 60 s schlug #9 sonst bei jedem Abruf an.
-        array(9,  'BAUSTEIN.T_SWS',      'BAUSTEIN.N09',
-              array('text' => bm_e(sprintf(bm_t('BAUSTEIN.P09'), bm_waechter_grenze()))), 'Ausgang von #7'),
-        array(10, 'BAUSTEIN.T_NICHT',    'BAUSTEIN.N10', '',             'Ausgang von #8'),
-        array(11, 'BAUSTEIN.T_ODER',     'BAUSTEIN.N11', '',             'I1 = #9, I2 = #10'),
-        array(12, 'BAUSTEIN.T_EVZ',      'BAUSTEIN.N12', 'BAUSTEIN.P12', 'Ausgang von #11'),
-        array(13, 'BAUSTEIN.T_BENACHR',  'BAUSTEIN.N13', 'BAUSTEIN.P13', 'Ausgang von #12'),
-        array(14, 'BAUSTEIN.T_SWS',      'BAUSTEIN.N14', 'BAUSTEIN.P14', 'Ausgang von #3'),
-        array(15, 'BAUSTEIN.T_EVZ',      'BAUSTEIN.N15', 'BAUSTEIN.P15', 'Ausgang von #14'),
-        array(16, 'BAUSTEIN.T_SWS',      'BAUSTEIN.N16', 'BAUSTEIN.P16', 'Ausgang von #2'),
-        array(17, 'BAUSTEIN.T_SWS',      'BAUSTEIN.N17', 'BAUSTEIN.P17', 'Ausgang von #4'),
-        /* O13 (Durchgang 29.09.2026): kein ODER/UND mit drei Eingaengen
-         * (Regeln/04, A4) - Kaskade aus je zwei. Die Zeilen heissen 18a/18b
-         * und 27a/27b, damit alle uebrigen Nummern und die Erlaeuterungen
-         * gleich bleiben; jede Zeile verweist nur auf kleinere Nummern. */
-        array('18a', 'BAUSTEIN.T_ODER',  'BAUSTEIN.N18A', '',            'I1 = #15, I2 = #16'),
-        array('18b', 'BAUSTEIN.T_ODER',  'BAUSTEIN.N18', '',             'I1 = #18a, I2 = #17'),
-        array(19, 'BAUSTEIN.T_BENACHR',  'BAUSTEIN.N19', 'BAUSTEIN.P19', 'Ausgang von #18b'),
-        array(20, 'BAUSTEIN.T_STATUS',   'BAUSTEIN.N20', 'BAUSTEIN.P20', 'V1 = #1, V2 = #2'),
-        array(21, 'BAUSTEIN.T_VE',       'BAUSTEIN.N21', 'BAUSTEIN.P21', '&mdash;'),
-        array(22, 'BAUSTEIN.T_VEZ',      'BAUSTEIN.N22', 'BAUSTEIN.P22', '&mdash;'),
-        array(23, 'BAUSTEIN.T_VERGL',    'BAUSTEIN.N23', 'BAUSTEIN.P23', 'I1 = #21, I2 = #22'),
-        array(24, 'BAUSTEIN.T_VEZ',      'BAUSTEIN.N24', 'BAUSTEIN.P24', '&mdash;'),
-        array(25, 'BAUSTEIN.T_VERGL',    'BAUSTEIN.N25', 'BAUSTEIN.P25', 'I1 = #1, I2 = #24'),
-        array(26, 'BAUSTEIN.T_TASTER',   'BAUSTEIN.N26', 'BAUSTEIN.P26', '&mdash;'),
-        array('27a', 'BAUSTEIN.T_UND',   'BAUSTEIN.N27A', '',            'I1 = #23, I2 = #25'),
-        array('27b', 'BAUSTEIN.T_UND',   'BAUSTEIN.N27', '',             'I1 = #27a, I2 = #26'),
-        array(28, 'BAUSTEIN.T_VEZ',      'BAUSTEIN.N28', 'BAUSTEIN.P28', '&mdash;'),
-        array(29, 'BAUSTEIN.T_FORMEL',   'BAUSTEIN.N29', 'BAUSTEIN.P29', 'I1 = #27b, I2 = #28'),
-        array(30, 'BAUSTEIN.T_IMPULS',   'BAUSTEIN.N30', 'BAUSTEIN.P30', '&mdash;'),
-        array(31, 'BAUSTEIN.T_UND',      'BAUSTEIN.N31', '',             'I1 = #27b, I2 = #30'),
-        array(32, 'BAUSTEIN.T_ANALOGSP', 'BAUSTEIN.N32', 'BAUSTEIN.P32', 'Input = #29, ' . bm_t('BAUSTEIN.TRIGGER') . ' = #31'),
-        array(33, 'BAUSTEIN.T_VA',       'BAUSTEIN.N33', 'BAUSTEIN.P33', 'Ausgang von #32'),
-        array(34, 'BAUSTEIN.T_FLANKE',   'BAUSTEIN.N34', 'BAUSTEIN.P34', 'Ausgang von #27b'),
-        array(35, 'BAUSTEIN.T_VA',       'BAUSTEIN.N35', 'BAUSTEIN.P35', 'Ausgang von #34'),
-        array(36, 'BAUSTEIN.T_VA',       'BAUSTEIN.N36', 'BAUSTEIN.P36', 'Ausgang von #31'),
+        bm_bl_zeile(1,  $tvi, bm_bl_vi('OK'),     bm_bl_param('BAUSTEIN.A01'), $leer),
+        bm_bl_zeile(2,  $tvi, bm_bl_vi('ALTER'),  bm_bl_param('BAUSTEIN.A02'), $leer),
+        bm_bl_zeile(3,  $tvi, bm_bl_vi('SOC'),    bm_bl_param('BAUSTEIN.A03'), $leer),
+        bm_bl_zeile(4,  $tvi, bm_bl_vi('SOH'),    bm_bl_param('BAUSTEIN.A04'), $leer),
+        bm_bl_zeile(5,  $tvi, bm_bl_vi('UZDIFF'), bm_bl_param('BAUSTEIN.A05'), $leer),
+        bm_bl_zeile(6,  $tvi, bm_bl_vi('TMAX'),   bm_bl_param('BAUSTEIN.A06'), $leer),
+        bm_bl_zeile(7,  bm_bl_typ('BAUSTEIN.T_STATUS'), bm_e('Speicher jetzt'), bm_bl_param('BAUSTEIN.A07'), 'V1 = #3, V2 = #4'),
+        bm_bl_zeile(8,  bm_bl_typ('BAUSTEIN.T_SWS'), bm_e('Werte veraltet'), bm_bl_param('BAUSTEIN.A08'), bm_bl_ein(2)),
+        bm_bl_zeile(9,  bm_bl_typ('BAUSTEIN.T_NICHT'), bm_e('BMS antwortet nicht'), $leer, 'I = #1'),
+        bm_bl_zeile(10, bm_bl_typ('BAUSTEIN.T_ODER'), bm_e('BMS gestört'), $leer, 'I1 = #8, I2 = #9'),
+        bm_bl_zeile(11, bm_bl_typ('BAUSTEIN.T_EVZ'), bm_e('Störung hält an'), bm_bl_param('BAUSTEIN.A11'), bm_bl_ein(10)),
+        bm_bl_zeile(12, bm_bl_typ('BAUSTEIN.T_BENACHR'), bm_e('Meldung BMS gestört'), bm_bl_param('BAUSTEIN.P_FREI'), bm_bl_ein(11)),
+        bm_bl_zeile(13, bm_bl_typ('BAUSTEIN.T_SWS'), bm_e('Zellspannung driftet'), bm_bl_param('BAUSTEIN.A13'), bm_bl_ein(5)),
+        bm_bl_zeile(14, bm_bl_typ('BAUSTEIN.T_EVZ'), bm_e('Drift hält an'), bm_bl_param('BAUSTEIN.A14'), bm_bl_ein(13)),
+        bm_bl_zeile(15, bm_bl_typ('BAUSTEIN.T_SWS'), bm_e('Gesundheit niedrig'), bm_bl_param('BAUSTEIN.A15'), bm_bl_ein(4)),
+        bm_bl_zeile(16, bm_bl_typ('BAUSTEIN.T_SWS'), bm_e('Zelle zu warm'), bm_bl_param('BAUSTEIN.A16'), bm_bl_ein(6)),
+        bm_bl_zeile(17, bm_bl_typ('BAUSTEIN.T_ODER'), bm_e('Drift oder Gesundheit'), $leer, 'I1 = #14, I2 = #15'),
+        bm_bl_zeile(18, bm_bl_typ('BAUSTEIN.T_ODER'), bm_e('Akku auffällig'), $leer, 'I1 = #17, I2 = #16'),
+        bm_bl_zeile(19, bm_bl_typ('BAUSTEIN.T_BENACHR'), bm_e('Meldung Akku prüfen'), bm_bl_param('BAUSTEIN.P_FREI'), bm_bl_ein(18)),
+        bm_bl_zeile(20, bm_bl_typ('BAUSTEIN.T_TASTE'), bm_e('Zwang beenden'), bm_bl_param('BAUSTEIN.A20'), $leer),
+        bm_bl_zeile(21, $tva, bm_e(bm_t('VORLAGE.VQ_AUTO_T')), bm_bl_param('BAUSTEIN.A21'), bm_bl_ein(20)),
+        bm_bl_zeile(22, $tvi, bm_bl_vi('PBAT'),     bm_bl_param('BAUSTEIN.A22'), $leer),
+        bm_bl_zeile(23, $tvi, bm_bl_vi('ZYKLEN'),   bm_bl_param('BAUSTEIN.A23'), $leer),
+        bm_bl_zeile(24, $tvi, bm_bl_vi('RESTKWH'),  bm_bl_param('BAUSTEIN.A24'), $leer),
+        bm_bl_zeile(25, $tvi, bm_bl_vi('RESTZEIT'), bm_bl_param('BAUSTEIN.A25'), $leer),
+        bm_bl_zeile(26, $tvi, bm_bl_vi('SOLLART'),  bm_bl_param('BAUSTEIN.A26'), $leer),
+        bm_bl_zeile(27, $tvi, bm_bl_vi('FEHLER'),   bm_bl_param('BAUSTEIN.A27'), $leer),
+        bm_bl_zeile(28, $tvi, bm_bl_vi('WARNUNG'),  bm_bl_param('BAUSTEIN.A28'), $leer),
+        bm_bl_zeile(29, $tvi, bm_bl_vi('TMIN'),     bm_bl_param('BAUSTEIN.A29'), $leer),
+        bm_bl_zeile(30, bm_bl_typ('BAUSTEIN.T_STATUS'), bm_e('BMS Leistung'), bm_bl_param('BAUSTEIN.A30'),
+                    'V1 = #22, V2 = #24, V3 = #25, V4 = #23, V5 = #26'),
+        bm_bl_zeile(31, bm_bl_typ('BAUSTEIN.T_GROESSER'), bm_e('BMS-Fehlerbits gesetzt'), bm_bl_param('BAUSTEIN.A31'), 'V1 = #27'),
+        bm_bl_zeile(32, bm_bl_typ('BAUSTEIN.T_GROESSER'), bm_e('BMS-Warnbits gesetzt'), bm_bl_param('BAUSTEIN.A31'), 'V1 = #28'),
+        bm_bl_zeile(33, bm_bl_typ('BAUSTEIN.T_SWS'), bm_e('Zelle zu kalt zum Laden'), bm_bl_param('BAUSTEIN.A33'), bm_bl_ein(29)),
+        bm_bl_zeile(34, bm_bl_typ('BAUSTEIN.T_GLEICH'), bm_e('Zwang unvollständig'), bm_bl_param('BAUSTEIN.A34'), 'V1 = #26'),
+        bm_bl_zeile(35, bm_bl_typ('BAUSTEIN.T_ODER'), bm_e('BMS meldet Fehler oder Warnung'), $leer, 'I1 = #31, I2 = #32'),
+        bm_bl_zeile(36, bm_bl_typ('BAUSTEIN.T_ODER'), bm_e('Kälte oder Zwang hängt'), $leer, 'I1 = #33, I2 = #34'),
+        bm_bl_zeile(37, bm_bl_typ('BAUSTEIN.T_ODER'), bm_e('BMS-Meldung gesammelt'), $leer, 'I1 = #35, I2 = #36'),
+        bm_bl_zeile(38, bm_bl_typ('BAUSTEIN.T_EVZ'), bm_e('BMS-Meldung hält an'), bm_bl_param('BAUSTEIN.A38'), bm_bl_ein(37)),
+        bm_bl_zeile(39, bm_bl_typ('BAUSTEIN.T_BENACHR'), bm_e('Meldung BMS-Alarm'), bm_bl_param('BAUSTEIN.A39'), bm_bl_ein(38)),
     );
 }
+
+/** Abschnitt "Laden nach Spotpreis" = Musterprojekt-Seite "BatterieBMS Spotpreis-Laden". */
+function bm_bausteine_spot()
+{
+    $tvi = bm_e(sprintf(bm_t('BAUSTEIN.T_VE'), bm_vorlage_titel(1)));
+    $tva = bm_e(sprintf(bm_t('BAUSTEIN.T_VA'), bm_vorlage_titel(1, true)));
+    $leer = '&mdash;';
+    return array(
+        bm_bl_zeile(1,  $tvi, bm_bl_vi('OK'),  bm_bl_param('BAUSTEIN.S01'), $leer),
+        bm_bl_zeile(2,  $tvi, bm_bl_vi('SOC'), bm_bl_param('BAUSTEIN.S02'), $leer),
+        bm_bl_zeile(3,  bm_e(sprintf(bm_t('BAUSTEIN.T_VE_PLUGIN'), 'Spotpreis aWATTar', 'Spotpreis aWATTar')),
+                    '<span class="sm-mono">SPOT_CURB</span>', bm_bl_param('BAUSTEIN.S03'), $leer),
+        bm_bl_zeile(4,  bm_bl_typ('BAUSTEIN.T_SCHIEBER'), bm_e('Preisgrenze Laden (ct/kWh)'), bm_bl_param('BAUSTEIN.S04'), $leer),
+        bm_bl_zeile(5,  bm_bl_typ('BAUSTEIN.T_KLEINER'), bm_e('Preis unter Grenze'), $leer, 'V1 = #3, V2 = #4'),
+        bm_bl_zeile(6,  bm_bl_typ('BAUSTEIN.T_SCHIEBER'), bm_e('Ziel-Ladezustand (Proz)'), bm_bl_param('BAUSTEIN.S06'), $leer),
+        bm_bl_zeile(7,  bm_bl_typ('BAUSTEIN.T_KLEINER'), bm_e('Ladezustand unter Ziel'), $leer, 'V1 = #2, V2 = #6'),
+        bm_bl_zeile(8,  bm_bl_typ('BAUSTEIN.T_SCHALTER'), bm_e('Spotpreis-Laden erlaubt'), bm_bl_param('BAUSTEIN.S08'), $leer),
+        bm_bl_zeile(9,  bm_bl_typ('BAUSTEIN.T_UND'), bm_e('Preis und Ladezustand'), $leer, 'I1 = #5, I2 = #7'),
+        bm_bl_zeile(10, bm_bl_typ('BAUSTEIN.T_UND'), bm_e('Ladezwang gewünscht'), $leer, 'I1 = #9, I2 = #8'),
+        bm_bl_zeile(11, bm_bl_typ('BAUSTEIN.T_UND'), bm_e('Ladezwang aktiv'), bm_bl_param('BAUSTEIN.S11'), 'I1 = #10, I2 = #1'),
+        bm_bl_zeile(12, bm_bl_typ('BAUSTEIN.T_SCHIEBER'), bm_e('Ladeleistung (W)'), bm_bl_param('BAUSTEIN.S12'), $leer),
+        bm_bl_zeile(13, bm_bl_typ('BAUSTEIN.T_FORMEL'), bm_e('Ladeleistung wenn aktiv'), bm_bl_param('BAUSTEIN.S13'), 'I1 = #11, I2 = #12'),
+        bm_bl_zeile(14, $tva, bm_e(bm_t('VORLAGE.VQ_LADEN_T')), bm_bl_param('BAUSTEIN.S14'), bm_bl_ein(13)),
+        bm_bl_zeile(15, bm_bl_typ('BAUSTEIN.T_IMPULS'), bm_e('Lebenszeichen-Takt'), bm_bl_param('BAUSTEIN.S15'), $leer),
+        bm_bl_zeile(16, bm_bl_typ('BAUSTEIN.T_UND'), bm_e('Lebenszeichen senden'), $leer,
+                    bm_e(sprintf(bm_t('BAUSTEIN.E_I1_I2Q'), 11, 15))),
+        bm_bl_zeile(17, $tva, bm_e(bm_t('VORLAGE.VQ_LEBEN_T')), $leer, bm_bl_ein(16)),
+        bm_bl_zeile(18, bm_bl_typ('BAUSTEIN.T_STATUS'), bm_e('Spotpreis-Laden'), bm_bl_param('BAUSTEIN.S18'),
+                    'V1 = #11, V2 = #3, V3 = #4, V4 = #6'),
+    );
+}
+
+/** Kasten "So uebernehmen Sie diese Seite" und Hinweise je Abschnitt - fertiges HTML je Punkt. */
+function bm_bl_texte($art)
+{
+    $vi = bm_vorlage_titel(1);
+    $vq = bm_vorlage_titel(1, true);
+    $auto = bm_t('VORLAGE.VQ_AUTO_T');
+    $laden = bm_t('VORLAGE.VQ_LADEN_T');
+    $leben = bm_t('VORLAGE.VQ_LEBEN_T');
+    $haken = bm_t('EINST.L_STEUERUNG_EIN');
+    $spalte = bm_t('EINST.T_SCHREIBEN');
+    switch ($art) {
+        case 'schritte_werte':
+            $t = array(
+                sprintf(bm_t('LOX.BL_W1'), bm_t('LOX.K_VORLAGE_EIN'), bm_t('LOX.K_VORLAGE_AUS')),
+                sprintf(bm_t('LOX.BL_W2'), $vi, $vq, $auto),
+                bm_t('LOX.BL_W3'),
+                bm_t('LOX.BL_W4'),
+                bm_t('LOX.BL_W5'),
+                sprintf(bm_t('LOX.BL_W6'), $auto, $haken, $spalte),
+            );
+            break;
+        case 'hinweise_werte':
+            $t = array(
+                bm_t('LOX.BL_HW1'),
+                bm_t('LOX.BL_HW2'),
+                bm_t('LOX.BL_HW3'),
+                bm_t('LOX.BL_HW4'),
+                sprintf(bm_t('LOX.BL_HW5'), $auto),
+                bm_t('LOX.BL_HW6'),
+                sprintf(bm_t('LOX.BL_HW7'), $auto, $laden, $leben),
+                bm_t('LOX.BL_HW8'),
+            );
+            break;
+        case 'schritte_spot':
+            $t = array(
+                bm_t('LOX.BL_S1'),
+                bm_t('LOX.BL_S2'),
+                sprintf(bm_t('LOX.BL_S3'), $vi, $laden, $leben, $vq),
+                bm_t('LOX.BL_S4'),
+                bm_t('LOX.BL_S5'),
+                bm_t('LOX.BL_S6'),
+                sprintf(bm_t('LOX.BL_S7'), $haken, $spalte),
+            );
+            break;
+        default:
+            $t = array(
+                sprintf(bm_t('LOX.BL_HS1'), $laden),
+                bm_t('LOX.BL_HS2'),
+                bm_t('LOX.BL_HS3'),
+                bm_t('LOX.BL_HS4'),
+                bm_t('LOX.BL_HS5'),
+                bm_t('LOX.BL_HS6'),
+                bm_t('LOX.BL_HS7'),
+            );
+    }
+    return array_map('bm_e', $t);
+}
+
+$bm_bl_abschnitte = array(
+    array('h' => 'LOX.BL_WERTE', 'seite' => 'BatterieBMS', 'bild' => 'einbindung_loxone_werte.png',
+          'zeilen' => bm_bausteine(), 'schritte' => bm_bl_texte('schritte_werte'),
+          'hinweise' => bm_bl_texte('hinweise_werte')),
+    array('h' => 'LOX.BL_SPOT', 'seite' => 'BatterieBMS Spotpreis-Laden', 'bild' => 'einbindung_loxone_steuerung.png',
+          'zeilen' => bm_bausteine_spot(), 'schritte' => bm_bl_texte('schritte_spot'),
+          'hinweise' => bm_bl_texte('hinweise_spot')),
+);
 ?>
 
 <div class="sm-step"><b><?= bm_e(bm_t('LOX.S7_TITEL')) ?></b><br>
 <?= bm_t('LOX.S7_TEXT') ?>
+<?php foreach ($bm_bl_abschnitte as $bm_a) { ?>
+<h3><?= bm_e(bm_t($bm_a['h'])) ?></h3>
+<div class="sm-hinweis"><b><?= bm_e(bm_t('LOX.BL_SO_TITEL')) ?></b>
+<ol>
+<?php foreach ($bm_a['schritte'] as $bm_x) { ?><li><?= $bm_x ?></li>
+<?php } ?>
+</ol></div>
+<div class="sm-breit">
 <table class="sm-tbl">
 <tr><th>#</th><th><?= bm_e(bm_t('LOX.T_BAUSTEIN')) ?></th><th><?= bm_e(bm_t('LOX.T_NAMENSVORSCHLAG')) ?></th>
     <th><?= bm_e(bm_t('LOX.T_PARAMETER')) ?></th><th><?= bm_e(bm_t('LOX.T_EINGAENGE')) ?></th></tr>
-<?php foreach (bm_bausteine() as $bm_b) { ?>
-<tr><td><?= bm_e((string) $bm_b[0]) ?></td><td><?= bm_t($bm_b[1]) ?></td><td><?= bm_t($bm_b[2]) ?></td>
-    <td><?= is_array($bm_b[3]) ? $bm_b[3]['text'] : ($bm_b[3] !== '' ? bm_t($bm_b[3]) : '&mdash;') ?></td><td><?= $bm_b[4] ?></td></tr>
+<?php foreach ($bm_a['zeilen'] as $bm_b) { ?>
+<tr><td><?= bm_e((string) $bm_b[0]) ?></td><td><?= $bm_b[1] ?></td><td><?= $bm_b[2] ?></td>
+    <td><?= $bm_b[3]['text'] ?></td><td><?= $bm_b[4] ?></td></tr>
 <?php } ?>
 </table>
-<?= bm_t('LOX.S7_ERLAEUTERUNG') ?>
+</div>
+<div class="sm-hinweis"><b><?= bm_e(bm_t('LOX.BL_HINWEISE')) ?></b>
+<ul>
+<?php foreach ($bm_a['hinweise'] as $bm_x) { ?><li><?= $bm_x ?></li>
+<?php } ?>
+</ul></div>
+<figure class="sm-bild">
+<img src="<?= bm_e($bm_a['bild']) ?>" alt="<?= bm_e(sprintf(bm_t('LOX.BILD_ALT'), $bm_a['seite'])) ?>" loading="lazy">
+<figcaption><?= bm_e(sprintf(bm_t('LOX.BILD_UNTERSCHRIFT'), $bm_a['seite'])) ?></figcaption>
+</figure>
+<p class="sm-hilfe"><?= bm_t('LOX.MUSTERPROJEKT') ?></p>
+<?php } ?>
 </div>
 
 <div class="sm-step"><b><?= bm_e(bm_t('LOX.S8_TITEL')) ?></b><br>
