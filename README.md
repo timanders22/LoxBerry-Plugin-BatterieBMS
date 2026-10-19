@@ -10,6 +10,13 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.37
+
+Textnachzug zum Musterprojekt, Reiter **Einbindung in Loxone**, Seite „BatterieBMS Spotpreis-Laden“: Spotpreis aWATTar liefert die
+Werte jetzt über MQTT. Nr. 3 ist deshalb ein Virtueller Eingang `spot_awattar_cur_boerse` (bisher Virtueller HTTP-Eingang-Befehl
+`SPOT_CURB` aus der Vorlage „Spotpreis aWATTar“): Virtuellen Eingang mit dem Namen aus der Namenstabelle im Reiter ‚Einbindung in Loxone‘ des Plugins Spotpreis aWATTar (ab 1.2.38) anlegen.
+Kasten, Hinweise und Bild der Seite sind nachgezogen. Das Plugin selbst und seine Vorlagen sind unverändert.
+
 ## Neu in 0.9.36
 
 Reiter „Einbindung in Loxone“: Vollausstattung aus dem

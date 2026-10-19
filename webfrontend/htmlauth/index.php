@@ -1840,8 +1840,8 @@ function bm_bausteine_spot()
     return array(
         bm_bl_zeile(1,  $tvi, bm_bl_vi('OK'),  bm_bl_param('BAUSTEIN.S01'), $leer),
         bm_bl_zeile(2,  $tvi, bm_bl_vi('SOC'), bm_bl_param('BAUSTEIN.S02'), $leer),
-        bm_bl_zeile(3,  bm_e(sprintf(bm_t('BAUSTEIN.T_VE_PLUGIN'), 'Spotpreis aWATTar', 'Spotpreis aWATTar')),
-                    '<span class="sm-mono">SPOT_CURB</span>', bm_bl_param('BAUSTEIN.S03'), $leer),
+        bm_bl_zeile(3,  bm_e(sprintf(bm_t('BAUSTEIN.T_VE_PLUGIN'), 'Spotpreis aWATTar')),
+                    '<span class="sm-mono">spot_awattar_cur_boerse</span>', bm_bl_param('BAUSTEIN.S03'), $leer),
         bm_bl_zeile(4,  bm_bl_typ('BAUSTEIN.T_SCHIEBER'), bm_e('Preisgrenze Laden (ct/kWh)'), bm_bl_param('BAUSTEIN.S04'), $leer),
         bm_bl_zeile(5,  bm_bl_typ('BAUSTEIN.T_KLEINER'), bm_e('Preis unter Grenze'), $leer, 'V1 = #3, V2 = #4'),
         bm_bl_zeile(6,  bm_bl_typ('BAUSTEIN.T_SCHIEBER'), bm_e('Ziel-Ladezustand (Proz)'), bm_bl_param('BAUSTEIN.S06'), $leer),
