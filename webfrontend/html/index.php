@@ -55,6 +55,13 @@
  *
  * Ein Strich als Wert bedeutet: der Speicher hat dieses Feld nicht geliefert.
  * Es wird bewusst keine 0 gesendet - eine 0 waere eine stille Falschaussage.
+ *
+ * Seit 0.9.38 (Gruppe 31): der Lesezweig fuer Loxone (status, zellen, liste,
+ * summe, roh) antwortet nur mit "HTTP-Lesezweig fuer Loxone annehmen"
+ * (endpunkt_ein; bestehende Anlagen 1, Neuinstallation 0) - sonst 403
+ * BMS;OK=0;GRUND=ENDPUNKT_AUS. Neue Anlagen holen die Werte ueber das
+ * MQTT-Gateway V2 und schicken Befehle ueber die Befehlsbruecke. selftest,
+ * evcc und die schaltenden Aufrufe mit Token bleiben offen.
  */
 
 error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE);
@@ -159,6 +166,16 @@ if (!in_array($bm_aktion, array_merge($bm_lesend, $bm_schaltend), true)) {
     echo "FEHLER;OK=0;GRUND=UNBEKANNTE_AKTION\n";
     echo 'Erlaubt sind: ' . implode(', ', array_merge($bm_lesend, $bm_schaltend)) . "\n";
     bm_ep_log('UNBEKANNTE_AKTION');
+    exit;
+}
+
+/* Gruppe 31 (Entscheidung 3, E-E13): das Tor des Lesezweigs. Gesperrt nur status, zellen, liste, summe und
+ * roh; evcc bleibt offen (N8 - EVCC liest den Speicher als Batteriezaehler ueber HTTP; ein abgeschalteter
+ * Lesezweig darf EVCC nicht still trennen), ebenso ?selftest=1 und die schaltenden Aufrufe mit Token. */
+if (in_array($bm_aktion, bm_endpunkt_lesezweig(), true) && (int) $bm_cfg['endpunkt_ein'] !== 1) {
+    bm_ep_log('ENDPUNKT_AUS', $bm_aktion);
+    http_response_code(403);
+    echo "BMS;OK=0;GRUND=ENDPUNKT_AUS\n";
     exit;
 }
 
@@ -495,153 +512,20 @@ if ($bm_aktion === 'status') {
  * seinen Aufruf zu berichtigen. Sie steht jetzt unten, unmittelbar vor dem
  * Absetzen (B17). */
 
-/* Betriebsart von EVCC in eine Aktion dieses Plugins uebersetzen.
- *
- * Abgewiesen wird, was nicht in der Tabelle steht - nicht auf 'normal'
- * zurechtgebogen. Ein missverstandener Betriebsartwechsel ist schlimmer als
- * ein abgelehnter: EVCC haelt den Speicher dann fuer angehalten, waehrend er
- * weiter entlaedt. */
-$bm_war_modus = ($bm_aktion === 'batteriemodus');
-if ($bm_aktion === 'batteriemodus') {
-    $bm_modus = (isset($_GET['modus']) && is_string($_GET['modus'])) ? $_GET['modus'] : '';
-    $bm_ziel = bm_evcc_modus($bm_modus);
-    if ($bm_ziel === '') {
-        http_response_code(400);
-        echo "SET;OK=0;GRUND=MODUS_UNBEKANNT\n";
-        echo "Erlaubt sind 1/normal, 2/hold und 3/charge.\n";
-        exit;
-    }
-    if ($bm_ziel === 'laden' && $bm_watt === '') {
-        // Aus dem Netz laden ohne Leistungsangabe waere geraten. Entweder
-        // steht sie im Aufruf oder in den Einstellungen - sonst Abbruch.
-        $bm_vorgabe = (int) $bm_cfg['evcc_ladewatt'];
-        if ($bm_vorgabe <= 0) {
-            http_response_code(400);
-            echo "SET;OK=0;GRUND=WATT_FEHLT\n";
-            echo "Fuer modus=3 braucht es watt=W oder eine Vorgabe in den Einstellungen.\n";
-            exit;
-        }
-        $bm_watt = (string) $bm_vorgabe;
-    }
-    $bm_aktion = $bm_ziel;
+/* Gruppe 31 (Entscheidung 3, E-E11): ab hier EINE Funktion fuer den Endpunkt und die Befehlsbruecke 1.0.1 -
+ * bm_befehl_annehmen() in bm_lib.php. Der Ablauf stand bis 0.9.37 hier und ist wortgleich dorthin gezogen:
+ * Uebersetzung von batteriemodus (abweisen statt zurechtbiegen), Wattpflicht, Freigabe 403 STEUERUNG_AUS (nie
+ * fuer abruf und die Ruecknahmen, C3), Schreiber-Wache 409 (Energie-1 C1), Dienst 503 (unmittelbar vor dem
+ * Absetzen, B17), Merkmal "gleichwert" (X-7) und die Antwortzeile SET;OK=...;AKTION=...;GERAET=...;MELDUNG=...
+ * mit ;UNVERAENDERT=1 und dem Zusatz der Wache hinten. Die Ausgaben sind byte-gleich mit 0.9.37 (im Bau je
+ * Fall mit php-cgi verglichen). */
+$bm_r = bm_befehl_annehmen(array(
+    'aktion' => $bm_aktion,
+    'geraet' => (int) $bm_nr,
+    'watt'   => $bm_watt,
+    'modus'  => (isset($_GET['modus']) && is_string($_GET['modus'])) ? $_GET['modus'] : '',
+), $bm_von, '');
+if ((int) $bm_r[0] !== 200) {
+    http_response_code((int) $bm_r[0]);
 }
-
-/* Woher kam der Befehl? 'batteriemodus' ist der Weg, den EVCC benutzt, alles
- * uebrige kommt vom Miniserver. Steht die Herkunft im Sollwert, laesst sich
- * spaeter beantworten, warum der Speicher gerade laedt. */
-$bm_befehl = array('aktion' => $bm_aktion, 'geraet' => (int) $bm_nr,
-                   'quelle' => $bm_war_modus ? 'EVCC' : 'Loxone');
-if ($bm_aktion === 'laden' || $bm_aktion === 'entladen') {
-    if ($bm_watt === '') {
-        http_response_code(400);
-        echo "SET;OK=0;GRUND=WATT_FEHLT\n";
-        echo "Fuer laden und entladen ist watt Pflicht. watt=0 gibt die Regie zurueck.\n";
-        exit;
-    }
-    $bm_befehl['watt'] = (int) $bm_watt;
-}
-
-$bm_ruecknahme = ($bm_aktion === 'automatik')
-    || (($bm_aktion === 'laden' || $bm_aktion === 'entladen') && (int) $bm_watt === 0);
-if ($bm_aktion !== 'abruf' && !$bm_ruecknahme && empty($bm_cfg['steuerung_ein'])) {
-    http_response_code(403);
-    echo "SET;OK=0;GRUND=STEUERUNG_AUS\n";
-    echo "Schreibende Befehle sind gesperrt. Reiter Einstellungen, Haken "
-       . "'Schreibende Befehle zulassen'.\n";
-    exit;
-}
-
-/**
- * Schreiber-Wache (Energie-1 C1, Entscheidung Nr. 25; Kopf der Funktionen in
- * bm_lib.php): merken und melden, und nur mit "Fremde Schreiber abweisen"
- * einen Sollwert mit 409 abweisen, bevor er eingereiht wird. Ruecknahmen nie.
- * Rueckgabe: Zusatz fuer die Antwortzeile - ;SCHREIBER=n ab zwei Schreibern
- * im Fenster, ;WACHE=MERKER, wenn das Merken nicht ging (der Befehl geht
- * trotzdem). Neue Felder immer hinten (siehe "DIE REIHENFOLGE DER FELDER").
- */
-function bm_ep_wache($nr, $von, $evcc_weg, $aktion, $ruecknahme, $watt)
-{
-    $w = bm_wache_einstellungen(bm_config());
-    $ip = bm_wache_absender();
-    $rolle = bm_wache_rolle($von, $evcc_weg);
-    list($aktiv, $erlaubt, $fehler, $grund) = bm_wache_sperre_urteil($w, $von, $ip, $rolle);
-    if ($fehler !== '') {
-        bm_log_gebremst('wache_liste', 'Schreiber-Wache: "Fremde Schreiber abweisen" ist eingeschaltet, '
-            . 'aber weder eine Fuehrung gewaehlt noch eine brauchbare Liste erlaubter Schreiber da - die '
-            . 'Sperre wirkt NICHT, bis das im Reiter Einstellungen berichtigt ist.', 3600);
-    }
-    $abweisen = $aktiv && !$erlaubt && !$ruecknahme;
-    $art = $ruecknahme ? 'ruecknahme'
-        : ($aktion . (($aktion === 'laden' || $aktion === 'entladen') ? ' ' . (int) $watt . ' W' : ''));
-    $wer = ($von !== '' ? $von : 'ohne Kennung') . '@' . ($ip !== '' ? $ip : '?');
-    $zusatz = '';
-    if ((int) $w['wache_ein'] === 1) {
-        $m = bm_wache_merken((int) $nr, $von, $ip, $rolle, $art, $abweisen, $w);
-        if ($m['anzahl'] > 1) {
-            $zusatz .= ';SCHREIBER=' . (int) $m['anzahl'];
-        }
-        if (!$m['merker']) {
-            $zusatz .= ';WACHE=MERKER';
-        }
-        if (!$ruecknahme && !bm_wache_fuehrt($w['fuehrung'], $rolle)) {
-            bm_log_gebremst('wache_fuehrung_' . (int) $nr . '_' . $rolle, 'Schreiber-Wache, Speicher '
-                . (int) $nr . ': ' . $art . ' von ' . $wer . ' (Rolle ' . bm_wache_rollenname($rolle)
-                . '), eingestellt ist "Fuehrung: ' . bm_wache_rollenname($w['fuehrung']) . '" - '
-                . ($abweisen ? 'abgewiesen (409).' : ((int) $w['wache_sperren_ein'] === 1
-                    ? 'nicht abgewiesen (die Sperre wirkt nicht, siehe die Zeile dazu).'
-                    : 'nicht abgewiesen (Sperren aus).')),
-                60 * (int) $w['wache_fenster_min']);
-        }
-    }
-    if ($abweisen) {
-        http_response_code(409);
-        printf("SET;OK=0;GRUND=FREMDSCHREIBER;AKTION=%s;GERAET=%d%s\n", $aktion, (int) $nr, $zusatz);
-        echo ($grund === 'FUEHRUNG')
-            ? 'Die Fuehrung steht auf ' . bm_wache_rollenname($w['fuehrung']) . '; dieser Sollwert hat die Rolle '
-              . bm_wache_rollenname($rolle) . ". Nichts eingereiht (Reiter Einstellungen, Schreiber-Wache).\n"
-            : "Dieser Schreiber steht nicht in der Liste der erlaubten Schreiber. Nichts eingereiht "
-              . "(Reiter Einstellungen, Schreiber-Wache).\n";
-        bm_ep_log('FREMDSCHREIBER', $art . ', ' . $wer . ', ' . $grund);
-        exit;
-    }
-    return $zusatz;
-}
-
-/* Erst jetzt, unmittelbar vor dem Absetzen: laeuft der Dienst ueberhaupt?
- * Nicht stillschweigend einreihen - ohne laufenden Dienst passiert nichts,
- * und Loxone haelt den Zwang sonst faelschlich fuer gesetzt. */
-/* Energie-1 C1: die Schreiber-Wache - nach der Freigabe (eine abgeschaltete
- * Steuerung bleibt 403), vor dem Dienst und vor dem Einreihen. abruf schreibt
- * nichts und geht vorbei. */
-$bm_wz = ($bm_aktion === 'abruf') ? ''
-    : bm_ep_wache($bm_nr, $bm_von, $bm_war_modus, $bm_aktion, $bm_ruecknahme,
-                  isset($bm_befehl['watt']) ? $bm_befehl['watt'] : 0);
-
-if (bm_dienst_pid() === 0) {
-    http_response_code(503);
-    echo "SET;OK=0;GRUND=DIENST_LAEUFT_NICHT\n";
-    echo "Der Abrufdienst laeuft nicht. Reiter Einstellungen, Knopf 'Dienst starten'.\n";
-    bm_ep_log('DIENST_LAEUFT_NICHT', $bm_aktion);
-    exit;
-}
-
-/* X-7 Gleichwert-Unterdrueckung (B-Nachzug 01.10.2026, Entscheidung Nr. 19):
- * Sollwerte - laden/entladen mit watt > 0, sperren und damit batteriemodus
- * 2/3 - tragen das Merkmal "gleichwert". Der Dienst schickt denselben Wert
- * innerhalb von 60 s nicht erneut an den Speicher, frischt den Sollwert
- * aber auf (bm_gleichwert_seit() in bin/bms_dienst.php). Ruecknahmen
- * (automatik, watt=0, batteriemodus=1) tragen es nie; die Annahme vor dem
- * ersten Lesen (a2, Nr. 16/18) bleibt unberuehrt. Die Antwort traegt dann
- * hinten ;UNVERAENDERT=1 - neue Felder immer hinten (siehe oben). */
-if ($bm_aktion === 'sperren'
-    || (($bm_aktion === 'laden' || $bm_aktion === 'entladen') && (int) $bm_watt > 0)) {
-    $bm_befehl['gleichwert'] = 1;
-}
-$bm_antwort = bm_befehl_absetzen($bm_befehl);
-list($bm_erg, $bm_meldung) = $bm_antwort;
-if ($bm_erg === 0) {
-    http_response_code(500);
-}
-printf("SET;OK=%d;AKTION=%s;GERAET=%d;MELDUNG=%s%s%s\n", $bm_erg, $bm_aktion, (int) $bm_nr,
-    str_replace(array("\r", "\n", ';'), ' ', $bm_meldung),
-    !empty($bm_antwort[2]) ? ';UNVERAENDERT=1' : '', $bm_wz);
+echo $bm_r[1];

@@ -82,7 +82,9 @@ bm_marke_weg() {
 }
 trap bm_marke_weg EXIT
 
-mkdir -p "$PDATA/befehle" "$PDATA/antworten" "$PDATA/verlauf" "$PDATA/profile" \
+# Gruppe 31 (N1): die Warteschlange des Dienstes liegt in auftraege/ - befehle/ ist der Datenordner der
+# Befehlsbruecke (sie legt ihn selbst mit 0700 an).
+mkdir -p "$PDATA/auftraege" "$PDATA/antworten" "$PDATA/verlauf" "$PDATA/profile" \
          "$PLOG" "$PCONFIG" || {
     echo "<FAIL> Ordner konnten nicht angelegt werden."
     exit 1
@@ -290,5 +292,22 @@ else
     echo "<INFO> Bitte die Plugin-Oberflaeche oeffnen, die Speicher eintragen und den"
     echo "<INFO> Dienst im Reiter Einstellungen starten. Der Reiter Test sagt danach"
     echo "<INFO> Zeile fuer Zeile, ob die Einrichtung traegt."
+fi
+# Gruppe 31: nur bei einer NEUINSTALLATION hier (dort ist der Haken ab Werk aus, also praktisch nie ein Start);
+# bei einer Aktualisierung liegt die Marke noch, und postupgrade.sh startet die Bruecke nach ihrem Entfernen.
+if [ ! -f "$BM_MARKE" ]; then
+    # Gruppe 31 (0.9.38, Entscheidung 3): die Befehlsbruecke starten - befehlsbruecke.sh startet nur mit dem Haken
+    # "Befehle ueber MQTT annehmen" (ab Werk aus) und "Werte ueber MQTT", und nicht, solange eine frische
+    # Upgrade-Marke liegt. Der Waechter im Minutentakt (cron/cron.01min) holt einen ausgelassenen Start binnen
+    # einer Minute nach.
+    BBSH="$BASE/bin/plugins/$PFOLDER/befehlsbruecke.sh"
+    if [ -f "$BBSH" ]; then
+        BB_AUS=$(timeout 40 bash "$BBSH" start 2>&1 | head -n 1)
+        case "$BB_AUS" in
+            *gestartet*|*laeuft*) echo "<OK> Befehlsbruecke: $BB_AUS" ;;
+            "Haken aus - kein Start.") echo "<INFO> Befehlsbruecke: aus (Reiter MQTT, Haken 'Befehle ueber MQTT annehmen')." ;;
+            *) echo "<WARNING> Befehlsbruecke: $BB_AUS - der Minutentakt versucht es erneut." ;;
+        esac
+    fi
 fi
 exit 0

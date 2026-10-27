@@ -66,6 +66,7 @@ if (isset($_POST['activetab']) && preg_match($bm_muster, (string) $_POST['active
 
 $bm_meldungen = array();
 $bm_fehler = array();      // gesammelt, nicht ueberschrieben
+$bm_warnungen = array();   // Gruppe 31 (B13): gelb - etwa "angehalten, aber ein Zwang ist offen"
 $bm_mark = array();       // X-2: beanstandete Felder ('feld' oder 'feld.zeile')
 $bm_eingaben = null;      // X-2: die abgewiesenen Eingaben fuer die Einmalmeldung
 
@@ -150,7 +151,20 @@ if ($bm_post && isset($_POST['vorlage'])) {
         $bm_tab = 'tab-loxone';
     }
 }
-if ($bm_post && isset($_POST['vorlage']) && $bm_vorlage_nr !== null) {
+/* Gruppe 31 (Entscheidung 3): die Vorlage der Befehle ueber das MQTT-Gateway V2 (Befehlsbruecke, bb_liste()). */
+if ($bm_post && isset($_POST['vorlage']) && (string) $_POST['vorlage'] === 'mqtt' && $bm_vorlage_nr !== null) {
+    list($bm_vmn, $bm_vmx) = bm_vorlage_ausgang_mqtt();
+    if ($bm_vmn === '') {
+        $bm_fehler[] = bm_e($bm_vmx);
+        $bm_tab = 'tab-loxone';
+    } else {
+        header('Content-Type: application/xml; charset=utf-8');
+        header('Content-Disposition: attachment; filename="' . $bm_vmn . '"');
+        echo $bm_vmx;
+        exit;
+    }
+}
+if ($bm_post && isset($_POST['vorlage']) && (string) $_POST['vorlage'] !== 'mqtt' && $bm_vorlage_nr !== null) {
     $bm_nr = $bm_vorlage_nr;
     if ((string) $_POST['vorlage'] === 'aus') {
         list($bm_name, $bm_inhalt) = bm_vorlage_ausgang($bm_nr);
@@ -264,6 +278,16 @@ if ($bm_post && isset($_POST['konfig_import'])) {
                         $bm_fehler[] = $bm_b;
                     }
                 } else {
+                    /* Gruppe 31 (N12, E-E10): Schluessel, die eine Sicherung aus einer Vorfassung nicht kennt,
+                     * behalten den GELTENDEN Wert - sonst setzte eine Sicherung aus 0.9.37 endpunkt_ein auf 0
+                     * (Werkswert), und der Bestand verloere still seinen HTTP-Lesezweig. Stehen sie in der
+                     * Sicherung, gelten sie (auch die eingreifenden Haken - das Zurueckspielen stellt die
+                     * Anlage wieder her). */
+                    $bm_spaet = array_values(array_diff(bm_sicherung_spaete_schluessel(), array_keys($bm_neu)));
+                    if ($bm_spaet) {
+                        $bm_neu += array_intersect_key(bm_config(), array_flip($bm_spaet));
+                        $bm_meldungen[] = sprintf(bm_e(bm_t('EINST.SICH_SPAET_BEHALTEN')), bm_e(implode(', ', $bm_spaet)));
+                    }
                     $bm_zusammen = array_merge(bm_vorgaben(), $bm_neu);
                     /* Ein FEHLENDES Aktionstoken in der Sicherung heisst 'kein
                      * Token gesichert' - es darf das bestehende nicht loeschen
@@ -326,6 +350,10 @@ if ($bm_post && isset($_POST['konfig_import'])) {
                     if (!empty($bm_zusammen['mqtt_ein'])) {
                         bm_abo_datei((string) $bm_zusammen['mqtt_topic'], true);
                     }
+                    // Gruppe 31: die Befehlsbruecke dem zurueckgespielten Stand nachfuehren.
+                    list($bm_bok, $bm_bfe) = bm_bruecke_meldungen(bm_bruecke_schalten($bm_zusammen));
+                    $bm_meldungen = array_merge($bm_meldungen, $bm_bok);
+                    $bm_fehler = array_merge($bm_fehler, $bm_bfe);
                 } else {
                     $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_SPEICHERN'), $bm_p['config']);
                 }
@@ -370,7 +398,8 @@ if ($bm_post && isset($_POST['profil_import'])) {
             }
             $bm_ziel = $bm_ordner . '/' . $bm_schl . '.json';
             $bm_ersetzt = isset(bm_profile_eingebaut()[$bm_schl]);
-            if (@file_put_contents($bm_ziel, $bm_d['inhalt']) === false) {
+            // Gruppe 31 (B4c): atomar ueber bm_datei_schreiben() wie das Zurueckspielen.
+            if (!bm_datei_schreiben($bm_ziel, $bm_d['inhalt'], 0644)) {
                 $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_PROFIL_SCHREIBEN'), bm_e($bm_ziel));
             } else {
                 $bm_meldungen[] = sprintf(bm_t('EINST.PROFIL_ANGENOMMEN'), bm_e($bm_schl))
@@ -610,10 +639,22 @@ if ($bm_post && isset($_POST['speichern'])) {
         'zeitueberschreitung' => array(1, 30),
         'drift_warnung'       => array(1, 2000),
         'temp_max'            => array(0, 100),
-        'temp_min'            => array(0, 100),
+        'temp_min'            => array(-30, 30),     // Gruppe 31 (E3): auch unter 0 Grad
+        // Gruppe 31: Spotpreis-Laden im Plugin und Ausgleichsladen (dieselben Grenzen wie bm_wert_grenzen()).
+        'spotladen_geraet'    => array(1, 99),
+        'spotladen_grenze_ct' => array(-20, 100),
+        'spotladen_rang'      => array(0, 48),
+        'spotladen_ziel'      => array(20, 100),
+        'spotladen_watt'      => array(0, 30000),
+        'ausgleich_start_mv'  => array(20, 500),
+        'ausgleich_rueck_mv'  => array(5, 490),
+        'ausgleich_watt'      => array(0, 30000),
+        'ausgleich_max_min'   => array(30, 720),
+        'ausgleich_abstand_tage' => array(1, 60),
     ) as $bm_feld => $bm_grenzen) {
         $bm_wert = isset($_POST[$bm_feld]) ? trim((string) $_POST[$bm_feld]) : '';
-        if (!preg_match('/^[0-9]+$/', $bm_wert)) {
+        // Gruppe 31 (E3): ein Minus nur, wo die Untergrenze negativ ist.
+        if (!preg_match($bm_grenzen[0] < 0 ? '/^-?[0-9]+$/' : '/^[0-9]+$/', $bm_wert)) {
             $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_ZAHL'), bm_t('EINST.L_' . strtoupper($bm_feld)));
             $bm_mark[] = $bm_feld;
             continue;
@@ -635,6 +676,21 @@ if ($bm_post && isset($_POST['speichern'])) {
 
     $bm_cfg['steuerung_ein'] = isset($_POST['steuerung_ein']) ? 1 : 0;
     $bm_cfg['evcc_ein'] = isset($_POST['evcc_ein']) ? 1 : 0;
+    // Gruppe 31: die beiden Schreiber aus dem Plugin selbst - ab Werk aus, die Leistung ist Pflicht.
+    $bm_cfg['spotladen_ein'] = isset($_POST['spotladen_ein']) ? 1 : 0;
+    $bm_cfg['ausgleich_ein'] = isset($_POST['ausgleich_ein']) ? 1 : 0;
+    if (!empty($bm_cfg['spotladen_ein']) && (int) $bm_cfg['spotladen_watt'] <= 0) {
+        $bm_fehler[] = bm_t('EINST.FEHLER_SPOT_WATT');
+        $bm_mark[] = 'spotladen_watt';
+    }
+    if (!empty($bm_cfg['ausgleich_ein']) && (int) $bm_cfg['ausgleich_watt'] <= 0) {
+        $bm_fehler[] = bm_t('EINST.FEHLER_AUSGLEICH_WATT');
+        $bm_mark[] = 'ausgleich_watt';
+    }
+    if ((int) $bm_cfg['ausgleich_rueck_mv'] > (int) $bm_cfg['ausgleich_start_mv'] - 10) {
+        $bm_fehler[] = bm_t('EINST.FEHLER_AUSGLEICH_RUECK');
+        $bm_mark[] = 'ausgleich_rueck_mv';
+    }
 
     foreach (array('evcc_geraet' => array(1, 99), 'evcc_ladewatt' => array(0, 30000))
              as $bm_ef => $bm_eg) {
@@ -766,6 +822,7 @@ if ($bm_post && isset($_POST['save_mqtt'])) {
     $bm_mcfg = bm_config();
     $bm_mvorher = $bm_mcfg;
     $bm_mcfg['mqtt_ein'] = isset($_POST['mqtt_ein']) ? 1 : 0;
+    $bm_mcfg['befehle_mqtt_ein'] = isset($_POST['befehle_mqtt_ein']) ? 1 : 0;   // Gruppe 31
     /* O7 (Durchgang 29.09.2026): abweisen statt umbiegen. Bis 0.9.29 wurden
      * Anfuehrungszeichen still entfernt und ein Schraegstrich am Rand still
      * abgeschnitten - gespeichert war dann ein anderes Praefix als das
@@ -795,6 +852,10 @@ if ($bm_post && isset($_POST['save_mqtt'])) {
             if (!empty($bm_mcfg['mqtt_ein'])) {
                 bm_abo_datei((string) $bm_mcfg['mqtt_topic'], true);
             }
+            // Gruppe 31 (Entscheidung 3): die Befehlsbruecke sofort schalten (Bauart fer_bruecke_schalten()).
+            list($bm_bok, $bm_bfe) = bm_bruecke_meldungen(bm_bruecke_schalten($bm_mcfg));
+            $bm_meldungen = array_merge($bm_meldungen, $bm_bok);
+            $bm_fehler = array_merge($bm_fehler, $bm_bfe);
         } else {
             // Bis 0.9.15 fehlte dieser Zweig: ein fehlgeschlagenes Speichern
             // blieb voellig stumm, und der Bediener glaubte, Haken und Thema
@@ -808,11 +869,48 @@ if ($bm_post && isset($_POST['save_mqtt'])) {
 /* ---------------- Dienst ---------------- */
 if ($bm_post && isset($_POST['dienst'])) {
     $bm_befehl = (string) $_POST['dienst'];
-    list($bm_ok, $bm_ausgabe) = bm_dienst($bm_befehl);
-    if ($bm_ok) {
+    $bm_dr = bm_dienst($bm_befehl);
+    list($bm_ok, $bm_ausgabe) = $bm_dr;
+    /* Gruppe 31 (B13, nur die Meldung; E2): Rueckgabewert 3 "angehalten, aber ein Zwang ist nicht
+     * zurueckgenommen" und 4 "nicht zuruecknehmbar" sind keine roten Fehlschlaege, sondern gelbe Lagen. */
+    if (!$bm_ok && isset($bm_dr[2]) && in_array((int) $bm_dr[2], array(3, 4), true)) {
+        $bm_warnungen[] = bm_t((int) $bm_dr[2] === 3 ? 'EINST.DIENST_STOP_ZWANG' : 'EINST.DIENST_STOP_UNAUFLOESBAR')
+            . ' <span class="sm-mono">' . bm_e($bm_ausgabe) . '</span>';
+    } elseif ($bm_ok) {
         $bm_meldungen[] = bm_t('EINST.DIENST_' . strtoupper($bm_befehl)) . ' ' . bm_e($bm_ausgabe);
     } else {
         $bm_fehler[] = bm_e($bm_ausgabe);
+    }
+    $bm_tab = 'tab-settings';
+}
+
+/* ---------------- Gruppe 31 (E-E13): HTTP-Lesezweig fuer Loxone annehmen (endpunkt_ein) ---------------- */
+if ($bm_post && isset($_POST['endpunkt'])) {
+    $bm_ecfg = bm_config();
+    $bm_ecfg['endpunkt_ein'] = isset($_POST['endpunkt_ein']) ? 1 : 0;
+    if (bm_config_speichern($bm_ecfg)) {
+        $bm_meldungen[] = bm_t(!empty($bm_ecfg['endpunkt_ein']) ? 'LOX.ENDPUNKT_AN' : 'LOX.ENDPUNKT_AUS');
+    } else {
+        $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_SPEICHERN'), $bm_p['config']);
+    }
+    $bm_tab = 'tab-loxone';
+}
+
+/* ---------------- Gruppe 31 (E2): Zwang am Geraet geprueft - Sollwert verwerfen ----------------
+ * Nur mit Bestaetigungshaken (Regeln/04). Das Plugin schreibt dabei NICHTS an den Speicher. */
+if ($bm_post && isset($_POST['soll_verwerfen'])) {
+    $bm_vn = is_string($_POST['soll_verwerfen']) ? trim($_POST['soll_verwerfen']) : '';
+    if (empty($_POST['soll_verwerfen_ok'])) {
+        $bm_fehler[] = bm_t('EINST.FEHLER_VERWERFEN_HAKEN');
+    } elseif (!preg_match('/^[0-9]{1,3}$/', $bm_vn)) {
+        $bm_fehler[] = bm_t('EINST.FEHLER_VERWERFEN_NR');
+    } else {
+        list($bm_vok, $bm_vtext) = bm_soll_verwerfen((int) $bm_vn);
+        if ($bm_vok) {
+            $bm_meldungen[] = bm_e($bm_vtext);
+        } else {
+            $bm_fehler[] = bm_e($bm_vtext);
+        }
     }
     $bm_tab = 'tab-settings';
 }
@@ -896,6 +994,7 @@ if ($bm_post && isset($_POST['selbsttest'])) {
 if ($bm_post) {
     if (bm_einmal_schreiben(array('meldungen' => array_values($bm_meldungen),
                                   'fehler' => array_values($bm_fehler),
+                                  'warnungen' => array_values($bm_warnungen),
                                   'test' => (string) $bm_testausgabe,
                                   'tab' => $bm_tab,
                                   'eingaben' => $bm_eingaben))) {
@@ -908,6 +1007,7 @@ if ($bm_post) {
     if (is_array($bm_einmal)) {
         $bm_meldungen = array_merge($bm_meldungen, $bm_einmal['meldungen']);
         $bm_fehler = array_merge($bm_fehler, $bm_einmal['fehler']);
+        $bm_warnungen = array_merge($bm_warnungen, $bm_einmal['warnungen']);
         if ($bm_einmal['test'] !== '') {
             $bm_testausgabe = $bm_einmal['test'];
         }
@@ -936,17 +1036,22 @@ $bm_pid = bm_dienst_pid();
 $bm_mqtt = bm_mqtt_zustand();
 $bm_profile = bm_profile();
 $bm_host = bm_hostname();
+/* Gruppe 31 (B9): kennt der Rechnername keinen Port (gethostname()), traegt die Adresse den Webserver-Port
+ * aus der general.json - auf einer Anlage mit anderem Port stimmte die Adresse fuer Loxone sonst nicht. */
+if (strpos($bm_host, ':') === false && bm_webport() !== 80) {
+    $bm_host .= ':' . bm_webport();
+}
 $bm_basis = 'http://' . $bm_host . '/plugins/' . $bm_p['plugin'] . '/index.php';
+/* Gruppe 31 (B4d): die letzten 256 KiB rueckwaerts statt der ganzen Datei mit file(). */
 $bm_logzeilen = array();
 if (is_file($bm_p['log'])) {
-    $bm_logzeilen = array_slice(
-        array_reverse(file($bm_p['log'], FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: array()),
-        0, 400);
+    $bm_logzeilen = array_slice(array_reverse(bm_datei_ende($bm_p['log'], 262144)), 0, 400);
 }
 
 $bm_rahmen = class_exists('LBWeb', false);
 if ($bm_rahmen) {
-    LBWeb::lbheader('Batterie-Heimspeicher (BMS)', 'https://wiki.loxberry.de/', 'help.html');
+    // Gruppe 31 (N10): der Hilfelink zeigt auf die Wikiseite des Plugins, nicht auf die Wiki-Startseite.
+    LBWeb::lbheader('Batterie-Heimspeicher (BMS)', 'https://wiki.loxberry.de/plugins/batteriebms/start', 'help.html');
 }
 
 ?>
@@ -1050,12 +1155,20 @@ if ($bm_rahmen) {
 .sm-bild { margin: 12px 0; }
 .sm-bild img { max-width: 100%; height: auto; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
 .sm-bild figcaption { font-size: .9em; color: #555; margin-top: 4px; }
+/* Gruppe 31 (0.9.38, Bauart Anker 0.9.32): Kopierknopf der Namenstabelle und der zugeklappte Abschnitt
+   "Bestehende Anlagen: HTTP-Endpunkt". */
+.sm-wrap .sm-btn.sm-kopie { min-width: 0 !important; padding: 2px 8px !important; font-size: 0.8em; margin-left: 6px !important; }
+.sm-alt { border: 1px solid #ddd; border-radius: 6px; padding: 8px 12px; margin: 14px 0; background: #fbfbfb; }
+.sm-alt summary { cursor: pointer; }
 
 </style>
 <div class="sm-wrap">
 
 <?php foreach ($bm_meldungen as $bm_m) { ?>
 <div class="sm-hinweis"><?= $bm_m ?></div>
+<?php } ?>
+<?php foreach ($bm_warnungen as $bm_m) { ?>
+<div class="sm-warnung"><?= $bm_m ?></div>
 <?php } ?>
 <?php if ($bm_fehler) { ?>
 <div class="sm-fehler"><b><?= bm_e(bm_t('ALLG.BEANSTANDUNG')) ?></b>
@@ -1324,7 +1437,7 @@ foreach ($bm_hinweise as $bm_h) {
 </div>
 <div class="sm-feld">
   <label for="temp_min"><?= bm_e(bm_t('EINST.L_TEMP_MIN')) ?></label>
-  <input data-role="none" type="number" id="temp_min" name="temp_min" value="<?= bm_e(bm_eingabe('speichern', 'temp_min', (string) (int) $bm_cfg['temp_min'])) ?>"<?= bm_markierung('speichern', 'temp_min') ?> min="0" max="100">
+  <input data-role="none" type="number" id="temp_min" name="temp_min" value="<?= bm_e(bm_eingabe('speichern', 'temp_min', (string) (int) $bm_cfg['temp_min'])) ?>"<?= bm_markierung('speichern', 'temp_min') ?> min="-30" max="30">
   <div class="sm-hilfe"><?= bm_t('EINST.H_TEMP_MIN') ?></div>
 </div>
 
@@ -1434,10 +1547,79 @@ foreach (array('beide', 'loxone', 'evcc') as $bm_fo) { ?>
   <div class="sm-hilfe"><?= bm_t('EINST.H_WACHE_ERLAUBT') ?></div>
 </div>
 
+
+<?php /* Gruppe 31 (0.9.38, Entwurf 2.6.3, E-E8): Spotpreis-Laden im Plugin - Abnehmer haus/strompreis, Grenze in
+       * ENDPREIS. Ab Werk aus. */ ?>
+<h2><?= bm_e(bm_t('EINST.H_SPOTLADEN')) ?></h2>
+<div class="sm-warnung"><?= bm_t('EINST.SPOTLADEN_ERKLAERUNG') ?></div>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;">
+    <input data-role="none" type="checkbox" name="spotladen_ein" value="1" <?= bm_eingabe('speichern', 'spotladen_ein', !empty($bm_cfg['spotladen_ein']) ? '1' : '0') === '1' ? 'checked' : '' ?><?= bm_markierung('speichern', 'spotladen_ein') ?>>
+    <?= bm_e(bm_t('EINST.L_SPOTLADEN_EIN')) ?>
+  </label>
+</div>
+<?php foreach (array('spotladen_geraet' => array(1, 99, 1), 'spotladen_grenze_ct' => array(-20, 100, 1),
+                     'spotladen_rang' => array(0, 48, 1), 'spotladen_ziel' => array(20, 100, 5),
+                     'spotladen_watt' => array(0, 30000, 100)) as $bm_sf => $bm_sg) { ?>
+<div class="sm-feld">
+  <label for="<?= $bm_sf ?>"><?= bm_e(bm_t('EINST.L_' . strtoupper($bm_sf))) ?></label>
+  <input data-role="none" type="number" id="<?= $bm_sf ?>" name="<?= $bm_sf ?>" value="<?= bm_e(bm_eingabe('speichern', $bm_sf, (string) (int) $bm_cfg[$bm_sf])) ?>"<?= bm_markierung('speichern', $bm_sf) ?> min="<?= (int) $bm_sg[0] ?>" max="<?= (int) $bm_sg[1] ?>" step="<?= (int) $bm_sg[2] ?>">
+  <div class="sm-hilfe"><?= bm_t('EINST.H_' . strtoupper($bm_sf)) ?></div>
+</div>
+<?php } ?>
+
+<?php /* Gruppe 31 (Entscheidung 4, E-E19/E-E20): Ausgleichsladen auf 100 % bei hoher Zelldrift. Ab Werk aus. */ ?>
+<h2><?= bm_e(bm_t('EINST.H_AUSGLEICH')) ?></h2>
+<div class="sm-warnung"><?= bm_t('EINST.AUSGLEICH_ERKLAERUNG') ?></div>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;">
+    <input data-role="none" type="checkbox" name="ausgleich_ein" value="1" <?= bm_eingabe('speichern', 'ausgleich_ein', !empty($bm_cfg['ausgleich_ein']) ? '1' : '0') === '1' ? 'checked' : '' ?><?= bm_markierung('speichern', 'ausgleich_ein') ?>>
+    <?= bm_e(bm_t('EINST.L_AUSGLEICH_EIN')) ?>
+  </label>
+</div>
+<?php foreach (array('ausgleich_start_mv' => array(20, 500, 5), 'ausgleich_rueck_mv' => array(5, 490, 5),
+                     'ausgleich_watt' => array(0, 30000, 100), 'ausgleich_max_min' => array(30, 720, 10),
+                     'ausgleich_abstand_tage' => array(1, 60, 1)) as $bm_sf => $bm_sg) { ?>
+<div class="sm-feld">
+  <label for="<?= $bm_sf ?>"><?= bm_e(bm_t('EINST.L_' . strtoupper($bm_sf))) ?></label>
+  <input data-role="none" type="number" id="<?= $bm_sf ?>" name="<?= $bm_sf ?>" value="<?= bm_e(bm_eingabe('speichern', $bm_sf, (string) (int) $bm_cfg[$bm_sf])) ?>"<?= bm_markierung('speichern', $bm_sf) ?> min="<?= (int) $bm_sg[0] ?>" max="<?= (int) $bm_sg[1] ?>" step="<?= (int) $bm_sg[2] ?>">
+</div>
+<?php } ?>
+<div class="sm-hilfe"><?= bm_t('EINST.H_AUSGLEICH_WERTE') ?></div>
+
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= bm_e(bm_t('ALLG.SPEICHERN')) ?></button>
 </div>
 </form>
+
+<?php /* Gruppe 31 (E2, Entscheidung 1): offene Zwaenge - erkennbar, ob das Plugin sie zuruecknehmen kann, und nach
+       * einer Pruefung am Geraet verwerfbar (orange, nur mit Bestaetigungshaken, Regeln/04). Das Plugin schreibt
+       * dabei NICHTS an den Speicher. */
+list($bm_zauf, $bm_zun) = bm_zwang_aufteilen();
+if ($bm_zauf || $bm_zun) { ?>
+<h2><?= bm_e(bm_t('EINST.H_VERWERFEN')) ?></h2>
+<div class="sm-warnung"><?= bm_t('EINST.VERWERFEN_ERKLAERUNG') ?></div>
+<table class="sm-tbl">
+<tr><th><?= bm_e(bm_t('ALLG.SPEICHER_EINZ')) ?></th><th><?= bm_e(bm_t('ALLG.ZWANG')) ?></th><th><?= bm_e(bm_t('EINST.T_VERWERFEN_LAGE')) ?></th><th>&nbsp;</th></tr>
+<?php foreach (array($bm_zauf, $bm_zun) as $bm_zi => $bm_zl) {
+    foreach ($bm_zl as $bm_zn => $bm_zs) { ?>
+<tr><td><?= bm_e(bm_zwang_namen(array($bm_zn => $bm_zs))) ?></td>
+    <td><span class="sm-mono"><?= bm_e((isset($bm_zs['aktion']) ? $bm_zs['aktion'] : '?') . ':' . (int) (isset($bm_zs['watt']) ? $bm_zs['watt'] : 0)) ?></span>
+      <?= isset($bm_zs['quelle']) && $bm_zs['quelle'] !== '' ? '(' . bm_e($bm_zs['quelle']) . ')' : '' ?></td>
+    <td class="<?= $bm_zi === 0 ? 'sm-an' : 'sm-aus' ?>"><?= bm_e(bm_t($bm_zi === 0 ? 'EINST.VERWERFEN_AUFLOESBAR' : 'EINST.VERWERFEN_UNAUFLOESBAR')) ?></td>
+    <td><form action="index.php" method="post">
+      <?php echo bm_fmt(); ?>
+      <input data-role="none" type="hidden" name="activetab" value="tab-settings">
+      <input data-role="none" type="hidden" name="soll_verwerfen" value="<?= (int) $bm_zn ?>">
+      <label style="display:inline-flex;align-items:center;gap:6px;margin-right:10px;font-size:0.9em;">
+        <input data-role="none" type="checkbox" name="soll_verwerfen_ok" value="1"> <?= bm_e(bm_t('EINST.L_VERWERFEN_OK')) ?>
+      </label>
+      <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= bm_e(bm_t('EINST.K_VERWERFEN')) ?></button>
+    </form></td></tr>
+<?php }
+} ?>
+</table>
+<?php } ?>
 
 <h2><?= bm_e(bm_t('EINST.H_SICHERUNG')) ?></h2>
 <p class="sm-hilfe"><?= bm_t('EINST.SICHERUNG_ERKLAERUNG') ?></p>
@@ -1529,6 +1711,16 @@ if ($bm_x3) { ?>
   <label for="mqtt_topic"><?= bm_e(bm_t('EINST.L_MQTT_TOPIC')) ?></label>
   <input data-role="none" type="text" id="mqtt_topic" name="mqtt_topic" value="<?= bm_e(bm_eingabe('mqtt', 'mqtt_topic', (string) $bm_cfg['mqtt_topic'])) ?>"<?= bm_markierung('mqtt', 'mqtt_topic') ?> placeholder="batteriebms">
 </div>
+<?php /* Gruppe 31 (Entscheidung 3, E-E11): Befehle aus Loxone ueber das MQTT-Gateway V2 und die Befehlsbruecke
+       * 1.0.1 - im selben Formular (orange). */ ?>
+<h3><?= bm_e(bm_t('BEFEHL.H_BEFEHLE')) ?></h3>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;">
+    <input data-role="none" type="checkbox" name="befehle_mqtt_ein" value="1" <?= bm_eingabe('mqtt', 'befehle_mqtt_ein', !empty($bm_cfg['befehle_mqtt_ein']) ? '1' : '0') === '1' ? 'checked' : '' ?><?= bm_markierung('mqtt', 'befehle_mqtt_ein') ?>>
+    <?= bm_e(bm_t('BEFEHL.L_ANNEHMEN')) ?>
+  </label>
+  <div class="sm-hilfe"><?= bm_t('BEFEHL.H_ANNEHMEN') ?></div>
+</div>
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= bm_e(bm_t('ALLG.SPEICHERN')) ?></button>
 </div>
@@ -1557,6 +1749,20 @@ if ($bm_x3) { ?>
 <div class="sm-step"><?= bm_t('MQTT.ABO_SCHRITTE') ?>
 <p><span class="sm-mono"><?= bm_e($bm_cfg['mqtt_topic']) ?>/#</span></p>
 </div>
+
+<?php /* Gruppe 31 (Entscheidung 3, E-E2): die V2-Hakenliste - welche Datenpunkte im MQTT-Gateway V2 anzuhaken sind
+       * (16 fuer das Musterprojekt, Speicher 1), status/ok und geraet1/ok "Noncached". Kein Knopf. */ ?>
+<h2><?= bm_e(bm_t('MQTT.H_V2_HAKEN')) ?></h2>
+<p class="sm-hilfe"><?= bm_t('MQTT.V2_ERKLAERUNG') ?></p>
+<table class="sm-tbl">
+<tr><th><?= bm_e(bm_t('MQTT.T_NAME')) ?></th><th><?= bm_e(bm_t('MQTT.T_THEMA')) ?></th><th><?= bm_e(bm_t('MQTT.T_NONCACHED')) ?></th></tr>
+<?php foreach (bm_mqtt_namenstabelle($bm_cfg) as $bm_ne) {
+    if (!$bm_ne['haken']) { continue; } ?>
+<tr><td><span class="sm-mono"><?= bm_e($bm_ne['name']) ?></span></td>
+    <td><span class="sm-mono"><?= bm_e($bm_ne['voll']) ?></span></td>
+    <td><?= $bm_ne['noncached'] ? '<b>' . bm_e(bm_t('ALLG.JA')) . '</b>' : '&ndash;' ?></td></tr>
+<?php } ?>
+</table>
 
 <h2><?= bm_e(bm_t('MQTT.H_THEMEN')) ?></h2>
 <p class="sm-hilfe"><?= bm_t('MQTT.THEMEN_ERKLAERUNG') ?></p>
@@ -1587,6 +1793,7 @@ foreach (bm_mqtt_themen() as $bm_thema => $bm_schluessel) {
 <div class="sm-seite<?= $bm_tab === 'tab-loxone' ? ' sm-active' : '' ?>" id="tab-loxone">
 <?php /* O14 (Durchgang 29.09.2026): EINE Legende oben je Reiter - bis 0.9.29 standen bis zu drei verstreut im Reiter. */ ?>
 <div class="sm-legende">
+<span><i class="sm-punkt sm-b-lesen"></i> <?= bm_t('LEGENDE.KOPIEREN') ?></span>
 <span><i class="sm-punkt sm-b-technik"></i> <?= bm_t('LEGENDE.TECHNIK') ?></span>
 <span><i class="sm-punkt sm-b-aktion"></i> <?= bm_t('LEGENDE.AKTION_TOKEN') ?></span>
 </div>
@@ -1606,6 +1813,99 @@ foreach (bm_mqtt_themen() as $bm_thema => $bm_schluessel) {
 <div class="sm-warnung"><?= bm_abo_text() ?></div>
 </div>
 
+
+<?php /* Gruppe 31 (0.9.38, Entscheidung 3, E-E2): Werte ueber das MQTT-Gateway V2 - die Namenstabelle (eine Quelle
+       * mit Sendeliste, Hakenliste und Bausteinliste: bm_mqtt_namenstabelle()). */
+$bm_nt = bm_mqtt_namenstabelle($bm_cfg); ?>
+<div class="sm-step"><b><?= bm_e(bm_t('LOX.W_TITEL')) ?></b><br>
+<?= bm_t('LOX.W_TEXT') ?>
+<div class="sm-warnung"><?= bm_abo_text() ?></div>
+<ul class="sm-hilfe">
+<li><?= bm_t('LOX.W_RECHTE') ?></li>
+<li><?= bm_t('LOX.W_RECONNECT') ?></li>
+<li><?= bm_t('LOX.W_PBAT') ?></li>
+</ul>
+<div class="sm-breit">
+<table class="sm-tbl">
+<tr><th><?= bm_e(bm_t('MQTT.T_NAME')) ?></th><th><?= bm_e(bm_t('MQTT.T_BAUFORM')) ?></th><th><?= bm_e(bm_t('MQTT.T_BEDEUTUNG')) ?></th>
+    <th><?= bm_e(bm_t('MQTT.T_WERTE')) ?></th><th><?= bm_e(bm_t('MQTT.T_OHNE')) ?></th><th><?= bm_e(bm_t('MQTT.T_RETAINED')) ?></th>
+    <th><?= bm_e(bm_t('MQTT.T_HAKEN')) ?></th><th><?= bm_e(bm_t('MQTT.T_MP')) ?></th></tr>
+<?php foreach ($bm_nt as $bm_ne) { ?>
+<tr><td><span class="sm-mono"><?= bm_e($bm_ne['name']) ?></span>
+<?php if (!$bm_ne['muster']) { ?>
+      <button data-role="none" type="button" class="sm-btn sm-b-lesen sm-kopie" data-kopie="<?= bm_e($bm_ne['name']) ?>"><?= bm_e(bm_t('LOX.K_KOPIEREN')) ?></button>
+<?php } ?>
+      <?= $bm_ne['alt'] ? '<br><i>' . bm_e(bm_t('MQTT.ALT')) . '</i>' : '' ?><?= $bm_ne['muster'] ? '<br><i>' . bm_e(bm_t('MQTT.MUSTER')) . '</i>' : '' ?></td>
+    <td><?= bm_e(bm_t($bm_ne['text'] ? 'MQTT.B_TEXTEINGANG' : 'MQTT.B_EINGANG')) ?></td>
+    <td><?= bm_t($bm_ne['bez']) ?></td>
+    <td><?= bm_e($bm_ne['bereich']) ?></td>
+    <td><span class="sm-mono"><?= bm_e($bm_ne['fehlwert']) ?></span></td>
+    <td><?= $bm_ne['retain'] ? bm_e(bm_t('ALLG.JA')) : bm_e(bm_t('ALLG.NEIN')) ?></td>
+    <td><?= $bm_ne['haken'] ? bm_e(bm_t('ALLG.JA')) . ($bm_ne['noncached'] ? ', Noncached' : '') : '&ndash;' ?></td>
+    <td><?= $bm_ne['mp'] !== '' ? bm_e($bm_ne['mp']) : '&ndash;' ?></td></tr>
+<?php } ?>
+</table>
+</div>
+</div>
+
+<?php /* Gruppe 31 (Entscheidung 3, E-E11): Befehle ueber die Befehlsbruecke 1.0.1 - die Liste aus bb_liste(). */ ?>
+<div class="sm-step"><b><?= bm_e(bm_t('LOX.B_TITEL')) ?></b><br>
+<?= bm_t('LOX.B_TEXT') ?>
+<?php list($bm_bl, $bm_blf) = bm_bruecke_liste(); ?>
+<?php if (!is_array($bm_bl)) { ?>
+<div class="sm-fehler"><?= bm_e($bm_blf) ?></div>
+<?php } else { ?>
+<p class="sm-hilfe"><?= sprintf(bm_t('LOX.B_AUSGANG'), bm_e(preg_replace('/:[0-9]+\z/', '', $bm_host)), (int) ($bm_mqtt['udpport'] ? $bm_mqtt['udpport'] : 11884)) ?></p>
+<div class="sm-breit">
+<table class="sm-tbl">
+<tr><th><?= bm_e(bm_t('LOX.T_B_NAME')) ?></th><th><?= bm_e(bm_t('LOX.T_B_WERTE')) ?></th><th><?= bm_e(bm_t('LOX.T_B_LOXONE')) ?></th><th><?= bm_e(bm_t('LOX.T_B_SPERRE')) ?></th></tr>
+<?php foreach ($bm_bl['befehle'] as $bm_bb) {
+    $bm_lx = $bm_bb['loxone'];
+    $bm_bz = isset($bm_lx['je_wert']) ? array_values($bm_lx['je_wert'])
+        : array_values(array_filter(array($bm_lx['ein'], $bm_lx['aus']), 'strlen'));
+    $bm_bw = $bm_bb['art'] === 'auswahl' ? implode(', ', $bm_bb['werte'])
+        : (isset($bm_bb['min']) ? $bm_bb['min'] . ' … ' . $bm_bb['max'] : ($bm_bb['art'] === 'schalter' ? '1 / 0' : '1')); ?>
+<tr><td><span class="sm-mono"><?= bm_e($bm_bb['thema']) ?></span><br><?= bm_e(bm_t($bm_bb['kachel'])) ?></td>
+    <td><?= bm_e($bm_bw) ?></td>
+    <td><span class="sm-mono"><?= implode('<br>', array_map('bm_e', $bm_bz)) ?></span></td>
+    <td><?= (int) $bm_bb['sperre_s'] ?> s</td></tr>
+<?php } ?>
+</table>
+</div>
+<p class="sm-hilfe"><?= sprintf(bm_t('LOX.B_QUITTUNG'), bm_e($bm_bl['lebenszeichen'])) ?></p>
+<?php } ?>
+<div class="sm-knopfreihe">
+  <form action="index.php" method="post">
+    <?php echo bm_fmt(); ?>
+    <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
+    <input data-role="none" type="hidden" name="vorlage" value="mqtt">
+    <input data-role="none" type="hidden" name="vorlage_geraet" value="1">
+    <button data-role="none" class="sm-btn sm-b-technik" type="submit"><?= bm_e(bm_t('LOX.K_VORLAGE_MQTT')) ?></button>
+  </form>
+</div>
+<p class="sm-hilfe"><?= bm_t('LOX.B_VORLAGE') ?></p>
+</div>
+
+<?php /* Gruppe 31 (Entscheidung 3, E-E13): Bestehende Anlagen - der HTTP-Lesezweig (endpunkt_ein). Zugeklappt,
+       * offen bei endpunkt_ein 1; darin die alten Schritte 3 und 4 (Vorlagen des HTTP-Endpunkts, grau). */ ?>
+<details class="sm-alt"<?= !empty($bm_cfg['endpunkt_ein']) ? ' open' : '' ?>>
+<summary><b><?= bm_e(bm_t('LOX.H_ENDPUNKT')) ?></b></summary>
+<div class="sm-hinweis"><?= bm_t('LOX.ENDPUNKT_NEU_HINWEIS') ?></div>
+<form action="index.php" method="post">
+  <?php echo bm_fmt(); ?>
+<input data-role="none" type="hidden" name="activetab" value="tab-loxone">
+<input data-role="none" type="hidden" name="endpunkt" value="1">
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;">
+    <input data-role="none" type="checkbox" name="endpunkt_ein" value="1" <?= !empty($bm_cfg['endpunkt_ein']) ? 'checked' : '' ?>>
+    <?= bm_e(bm_t('LOX.L_ENDPUNKT_EIN')) ?>
+  </label>
+  <div class="sm-hilfe"><?= bm_t('LOX.H_ENDPUNKT_EIN') ?></div>
+</div>
+<div class="sm-knopfreihe">
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= bm_e(bm_t('ALLG.SPEICHERN')) ?></button>
+</div>
+</form>
 <div class="sm-step"><b><?= bm_e(bm_t('LOX.S3_TITEL')) ?></b><br>
 <?= bm_t('LOX.S3_TEXT') ?>
 <table class="sm-tbl">
@@ -1710,6 +2010,7 @@ if (!bm_felder_gemessen(1)) { ?>
 <?php /* Energie-1 C1: woran die Schreiber-Wache den Miniserver erkennt. */ ?>
 <div class="sm-hinweis"><?= bm_t('LOX.VON_HINWEIS') ?></div>
 </div>
+</details>
 
 <div class="sm-step"><b><?= bm_e(bm_t('LOX.S5_TITEL')) ?></b><br>
 <?= bm_t('LOX.S5_TEXT') ?>
@@ -1754,133 +2055,70 @@ function bm_bl_zeile($nr, $typ, $name, $param, $ein)
     return array($nr, $typ, $name, array('text' => $param), $ein);
 }
 
-/** Typzelle aus einem Sprachschluessel ohne Platzhalter (Typen mit Vorlagentitel: sprintf an
- * der Aufrufstelle, damit sprachplatzhalter_pruefen sie sieht). */
-function bm_bl_typ($schluessel)
+/** Gruppe 31 (0.9.38, Entwurf Abschnitt 9): je Tabellenzeile EIN Sprachschluessel BAUSTEIN.Z<seite>_<nn> =
+ *  "Typ | Name | Parameter | Eingaenge" - wortgleich mit Musterprojekt/baustein_listen.txt (Bauart Anker SOLIX
+ *  0.9.32). Virtuelle Eingaenge mit Gateway-Namen (MQTT-Gateway V2, batteriebms_geraet1_soc ...), die drei Befehle
+ *  am Ausgang "LoxBerry MQTT-Gateway" (Befehlsbruecke 1.0.1), die Lebenszeichen-Validierung (#40-#43) und die
+ *  Absicherung gegen -1/-999 (#44-#47). Bis 0.9.37 standen hier Vorlagen-Eingaenge des HTTP-Endpunkts (BMS_1_OK
+ *  ...) und der Ausgang mit Aktionstoken. Jede Zelle wird maskiert ausgegeben; ein anderes Praefix als
+ *  "batteriebms" aendert die Gateway-Namen mit (bm_bs_name()). */
+function bm_bs_zeilen($seite, $anzahl)
 {
-    return bm_e(bm_t($schluessel));
+    $praefix = bm_mqtt_thema_saeubern((string) bm_config()['mqtt_topic']);
+    $aus = array();
+    for ($i = 1; $i <= $anzahl; $i++) {
+        $t = explode(' | ', bm_t(sprintf('BAUSTEIN.Z%d_%02d', $seite, $i)));
+        while (count($t) < 4) {
+            $t[] = '';
+        }
+        $name = bm_bs_name($t[1], $praefix);
+        $aus[] = bm_bl_zeile($i, bm_e($t[0]), $name, bm_e($t[2]), bm_e($t[3]));
+    }
+    return $aus;
 }
 
-/** Parameterzelle aus einem Sprachschluessel; '' heisst Strich. */
-function bm_bl_param($schluessel)
+/** Namenszelle: ein Gateway-Name der Linie in Festbreite, beim eigenen Praefix umgeschrieben. */
+function bm_bs_name($name, $praefix)
 {
-    return $schluessel === '' ? '&mdash;' : bm_e(bm_t($schluessel));
+    if (strpos($name, 'batteriebms_') === 0) {
+        if ($praefix !== '' && $praefix !== 'batteriebms') {
+            $name = bm_gateway_name($praefix, substr($name, 12));
+        }
+        return '<span class="sm-mono">' . bm_e($name) . '</span>';
+    }
+    if (strpos($name, 'spot_awattar_') === 0) {
+        return '<span class="sm-mono">' . bm_e($name) . '</span>';
+    }
+    return bm_e($name);
 }
 
-/** Eingangszelle "Eingang = #n". */
-function bm_bl_ein($n)
-{
-    return bm_e(sprintf(bm_t('BAUSTEIN.E_EIN'), (int) $n));
-}
-
-/** Namenszelle eines Vorlagen-Eingangs von Speicher 1 (wie in der Importdatei). */
-function bm_bl_vi($feld)
-{
-    return '<span class="sm-mono">' . bm_e(bm_vorlage_eingang_titel(1, $feld)) . '</span>';
-}
-
-/** Abschnitt "Werte und Meldungen" = Musterprojekt-Seite "BatterieBMS". */
+/** Abschnitt "Werte und Meldungen" = Musterprojekt-Seite "BatterieBMS" (47 Zeilen). */
 function bm_bausteine()
 {
-    $vi = bm_vorlage_titel(1);
-    $vq = bm_vorlage_titel(1, true);
-    $tvi = bm_e(sprintf(bm_t('BAUSTEIN.T_VE'), $vi));
-    $tva = bm_e(sprintf(bm_t('BAUSTEIN.T_VA'), $vq));
-    $leer = '&mdash;';
-    return array(
-        bm_bl_zeile(1,  $tvi, bm_bl_vi('OK'),     bm_bl_param('BAUSTEIN.A01'), $leer),
-        bm_bl_zeile(2,  $tvi, bm_bl_vi('ALTER'),  bm_bl_param('BAUSTEIN.A02'), $leer),
-        bm_bl_zeile(3,  $tvi, bm_bl_vi('SOC'),    bm_bl_param('BAUSTEIN.A03'), $leer),
-        bm_bl_zeile(4,  $tvi, bm_bl_vi('SOH'),    bm_bl_param('BAUSTEIN.A04'), $leer),
-        bm_bl_zeile(5,  $tvi, bm_bl_vi('UZDIFF'), bm_bl_param('BAUSTEIN.A05'), $leer),
-        bm_bl_zeile(6,  $tvi, bm_bl_vi('TMAX'),   bm_bl_param('BAUSTEIN.A06'), $leer),
-        bm_bl_zeile(7,  bm_bl_typ('BAUSTEIN.T_STATUS'), bm_e('Speicher jetzt'), bm_bl_param('BAUSTEIN.A07'), 'V1 = #3, V2 = #4'),
-        bm_bl_zeile(8,  bm_bl_typ('BAUSTEIN.T_SWS'), bm_e('Werte veraltet'), bm_bl_param('BAUSTEIN.A08'), bm_bl_ein(2)),
-        bm_bl_zeile(9,  bm_bl_typ('BAUSTEIN.T_NICHT'), bm_e('BMS antwortet nicht'), $leer, 'I = #1'),
-        bm_bl_zeile(10, bm_bl_typ('BAUSTEIN.T_ODER'), bm_e('BMS gestört'), $leer, 'I1 = #8, I2 = #9'),
-        bm_bl_zeile(11, bm_bl_typ('BAUSTEIN.T_EVZ'), bm_e('Störung hält an'), bm_bl_param('BAUSTEIN.A11'), bm_bl_ein(10)),
-        bm_bl_zeile(12, bm_bl_typ('BAUSTEIN.T_BENACHR'), bm_e('Meldung BMS gestört'), bm_bl_param('BAUSTEIN.P_FREI'), bm_bl_ein(11)),
-        bm_bl_zeile(13, bm_bl_typ('BAUSTEIN.T_SWS'), bm_e('Zellspannung driftet'), bm_bl_param('BAUSTEIN.A13'), bm_bl_ein(5)),
-        bm_bl_zeile(14, bm_bl_typ('BAUSTEIN.T_EVZ'), bm_e('Drift hält an'), bm_bl_param('BAUSTEIN.A14'), bm_bl_ein(13)),
-        bm_bl_zeile(15, bm_bl_typ('BAUSTEIN.T_SWS'), bm_e('Gesundheit niedrig'), bm_bl_param('BAUSTEIN.A15'), bm_bl_ein(4)),
-        bm_bl_zeile(16, bm_bl_typ('BAUSTEIN.T_SWS'), bm_e('Zelle zu warm'), bm_bl_param('BAUSTEIN.A16'), bm_bl_ein(6)),
-        bm_bl_zeile(17, bm_bl_typ('BAUSTEIN.T_ODER'), bm_e('Drift oder Gesundheit'), $leer, 'I1 = #14, I2 = #15'),
-        bm_bl_zeile(18, bm_bl_typ('BAUSTEIN.T_ODER'), bm_e('Akku auffällig'), $leer, 'I1 = #17, I2 = #16'),
-        bm_bl_zeile(19, bm_bl_typ('BAUSTEIN.T_BENACHR'), bm_e('Meldung Akku prüfen'), bm_bl_param('BAUSTEIN.P_FREI'), bm_bl_ein(18)),
-        bm_bl_zeile(20, bm_bl_typ('BAUSTEIN.T_TASTE'), bm_e('Zwang beenden'), bm_bl_param('BAUSTEIN.A20'), $leer),
-        bm_bl_zeile(21, $tva, bm_e(bm_t('VORLAGE.VQ_AUTO_T')), bm_bl_param('BAUSTEIN.A21'), bm_bl_ein(20)),
-        bm_bl_zeile(22, $tvi, bm_bl_vi('PBAT'),     bm_bl_param('BAUSTEIN.A22'), $leer),
-        bm_bl_zeile(23, $tvi, bm_bl_vi('ZYKLEN'),   bm_bl_param('BAUSTEIN.A23'), $leer),
-        bm_bl_zeile(24, $tvi, bm_bl_vi('RESTKWH'),  bm_bl_param('BAUSTEIN.A24'), $leer),
-        bm_bl_zeile(25, $tvi, bm_bl_vi('RESTZEIT'), bm_bl_param('BAUSTEIN.A25'), $leer),
-        bm_bl_zeile(26, $tvi, bm_bl_vi('SOLLART'),  bm_bl_param('BAUSTEIN.A26'), $leer),
-        bm_bl_zeile(27, $tvi, bm_bl_vi('FEHLER'),   bm_bl_param('BAUSTEIN.A27'), $leer),
-        bm_bl_zeile(28, $tvi, bm_bl_vi('WARNUNG'),  bm_bl_param('BAUSTEIN.A28'), $leer),
-        bm_bl_zeile(29, $tvi, bm_bl_vi('TMIN'),     bm_bl_param('BAUSTEIN.A29'), $leer),
-        bm_bl_zeile(30, bm_bl_typ('BAUSTEIN.T_STATUS'), bm_e('BMS Leistung'), bm_bl_param('BAUSTEIN.A30'),
-                    'V1 = #22, V2 = #24, V3 = #25, V4 = #23, V5 = #26'),
-        bm_bl_zeile(31, bm_bl_typ('BAUSTEIN.T_GROESSER'), bm_e('BMS-Fehlerbits gesetzt'), bm_bl_param('BAUSTEIN.A31'), 'V1 = #27'),
-        bm_bl_zeile(32, bm_bl_typ('BAUSTEIN.T_GROESSER'), bm_e('BMS-Warnbits gesetzt'), bm_bl_param('BAUSTEIN.A31'), 'V1 = #28'),
-        bm_bl_zeile(33, bm_bl_typ('BAUSTEIN.T_SWS'), bm_e('Zelle zu kalt zum Laden'), bm_bl_param('BAUSTEIN.A33'), bm_bl_ein(29)),
-        bm_bl_zeile(34, bm_bl_typ('BAUSTEIN.T_GLEICH'), bm_e('Zwang unvollständig'), bm_bl_param('BAUSTEIN.A34'), 'V1 = #26'),
-        bm_bl_zeile(35, bm_bl_typ('BAUSTEIN.T_ODER'), bm_e('BMS meldet Fehler oder Warnung'), $leer, 'I1 = #31, I2 = #32'),
-        bm_bl_zeile(36, bm_bl_typ('BAUSTEIN.T_ODER'), bm_e('Kälte oder Zwang hängt'), $leer, 'I1 = #33, I2 = #34'),
-        bm_bl_zeile(37, bm_bl_typ('BAUSTEIN.T_ODER'), bm_e('BMS-Meldung gesammelt'), $leer, 'I1 = #35, I2 = #36'),
-        bm_bl_zeile(38, bm_bl_typ('BAUSTEIN.T_EVZ'), bm_e('BMS-Meldung hält an'), bm_bl_param('BAUSTEIN.A38'), bm_bl_ein(37)),
-        bm_bl_zeile(39, bm_bl_typ('BAUSTEIN.T_BENACHR'), bm_e('Meldung BMS-Alarm'), bm_bl_param('BAUSTEIN.A39'), bm_bl_ein(38)),
-    );
+    return bm_bs_zeilen(1, 47);
 }
 
-/** Abschnitt "Laden nach Spotpreis" = Musterprojekt-Seite "BatterieBMS Spotpreis-Laden". */
+/** Abschnitt "Laden nach Spotpreis" = Musterprojekt-Seite "BatterieBMS Spotpreis-Laden" (19 Zeilen). */
 function bm_bausteine_spot()
 {
-    $tvi = bm_e(sprintf(bm_t('BAUSTEIN.T_VE'), bm_vorlage_titel(1)));
-    $tva = bm_e(sprintf(bm_t('BAUSTEIN.T_VA'), bm_vorlage_titel(1, true)));
-    $leer = '&mdash;';
-    return array(
-        bm_bl_zeile(1,  $tvi, bm_bl_vi('OK'),  bm_bl_param('BAUSTEIN.S01'), $leer),
-        bm_bl_zeile(2,  $tvi, bm_bl_vi('SOC'), bm_bl_param('BAUSTEIN.S02'), $leer),
-        bm_bl_zeile(3,  bm_e(sprintf(bm_t('BAUSTEIN.T_VE_PLUGIN'), 'Spotpreis aWATTar')),
-                    '<span class="sm-mono">spot_awattar_cur_boerse</span>', bm_bl_param('BAUSTEIN.S03'), $leer),
-        bm_bl_zeile(4,  bm_bl_typ('BAUSTEIN.T_SCHIEBER'), bm_e('Preisgrenze Laden (ct/kWh)'), bm_bl_param('BAUSTEIN.S04'), $leer),
-        bm_bl_zeile(5,  bm_bl_typ('BAUSTEIN.T_KLEINER'), bm_e('Preis unter Grenze'), $leer, 'V1 = #3, V2 = #4'),
-        bm_bl_zeile(6,  bm_bl_typ('BAUSTEIN.T_SCHIEBER'), bm_e('Ziel-Ladezustand (Proz)'), bm_bl_param('BAUSTEIN.S06'), $leer),
-        bm_bl_zeile(7,  bm_bl_typ('BAUSTEIN.T_KLEINER'), bm_e('Ladezustand unter Ziel'), $leer, 'V1 = #2, V2 = #6'),
-        bm_bl_zeile(8,  bm_bl_typ('BAUSTEIN.T_SCHALTER'), bm_e('Spotpreis-Laden erlaubt'), bm_bl_param('BAUSTEIN.S08'), $leer),
-        bm_bl_zeile(9,  bm_bl_typ('BAUSTEIN.T_UND'), bm_e('Preis und Ladezustand'), $leer, 'I1 = #5, I2 = #7'),
-        bm_bl_zeile(10, bm_bl_typ('BAUSTEIN.T_UND'), bm_e('Ladezwang gewünscht'), $leer, 'I1 = #9, I2 = #8'),
-        bm_bl_zeile(11, bm_bl_typ('BAUSTEIN.T_UND'), bm_e('Ladezwang aktiv'), bm_bl_param('BAUSTEIN.S11'), 'I1 = #10, I2 = #1'),
-        bm_bl_zeile(12, bm_bl_typ('BAUSTEIN.T_SCHIEBER'), bm_e('Ladeleistung (W)'), bm_bl_param('BAUSTEIN.S12'), $leer),
-        bm_bl_zeile(13, bm_bl_typ('BAUSTEIN.T_FORMEL'), bm_e('Ladeleistung wenn aktiv'), bm_bl_param('BAUSTEIN.S13'), 'I1 = #11, I2 = #12'),
-        bm_bl_zeile(14, $tva, bm_e(bm_t('VORLAGE.VQ_LADEN_T')), bm_bl_param('BAUSTEIN.S14'), bm_bl_ein(13)),
-        bm_bl_zeile(15, bm_bl_typ('BAUSTEIN.T_IMPULS'), bm_e('Lebenszeichen-Takt'), bm_bl_param('BAUSTEIN.S15'), $leer),
-        bm_bl_zeile(16, bm_bl_typ('BAUSTEIN.T_UND'), bm_e('Lebenszeichen senden'), $leer,
-                    bm_e(sprintf(bm_t('BAUSTEIN.E_I1_I2Q'), 11, 15))),
-        bm_bl_zeile(17, $tva, bm_e(bm_t('VORLAGE.VQ_LEBEN_T')), $leer, bm_bl_ein(16)),
-        bm_bl_zeile(18, bm_bl_typ('BAUSTEIN.T_STATUS'), bm_e('Spotpreis-Laden'), bm_bl_param('BAUSTEIN.S18'),
-                    'V1 = #11, V2 = #3, V3 = #4, V4 = #6'),
-    );
+    return bm_bs_zeilen(2, 19);
 }
 
 /** Kasten "So uebernehmen Sie diese Seite" und Hinweise je Abschnitt - fertiges HTML je Punkt. */
 function bm_bl_texte($art)
 {
-    $vi = bm_vorlage_titel(1);
-    $vq = bm_vorlage_titel(1, true);
-    $auto = bm_t('VORLAGE.VQ_AUTO_T');
-    $laden = bm_t('VORLAGE.VQ_LADEN_T');
-    $leben = bm_t('VORLAGE.VQ_LEBEN_T');
+    $annehmen = bm_t('BEFEHL.L_ANNEHMEN');
     $haken = bm_t('EINST.L_STEUERUNG_EIN');
     $spalte = bm_t('EINST.T_SCHREIBEN');
     switch ($art) {
         case 'schritte_werte':
             $t = array(
-                sprintf(bm_t('LOX.BL_W1'), bm_t('LOX.K_VORLAGE_EIN'), bm_t('LOX.K_VORLAGE_AUS')),
-                sprintf(bm_t('LOX.BL_W2'), $vi, $vq, $auto),
+                bm_t('LOX.BL_W1'),
+                bm_t('LOX.BL_W2'),
                 bm_t('LOX.BL_W3'),
                 bm_t('LOX.BL_W4'),
                 bm_t('LOX.BL_W5'),
-                sprintf(bm_t('LOX.BL_W6'), $auto, $haken, $spalte),
+                sprintf(bm_t('LOX.BL_W6'), $annehmen, $haken, $spalte),
             );
             break;
         case 'hinweise_werte':
@@ -1889,32 +2127,34 @@ function bm_bl_texte($art)
                 bm_t('LOX.BL_HW2'),
                 bm_t('LOX.BL_HW3'),
                 bm_t('LOX.BL_HW4'),
-                sprintf(bm_t('LOX.BL_HW5'), $auto),
+                bm_t('LOX.BL_HW5'),
                 bm_t('LOX.BL_HW6'),
-                sprintf(bm_t('LOX.BL_HW7'), $auto, $laden, $leben),
+                bm_t('LOX.BL_HW7'),
                 bm_t('LOX.BL_HW8'),
+                bm_t('LOX.BL_HW9'),
             );
             break;
         case 'schritte_spot':
             $t = array(
                 bm_t('LOX.BL_S1'),
                 bm_t('LOX.BL_S2'),
-                sprintf(bm_t('LOX.BL_S3'), $vi, $laden, $leben, $vq),
+                bm_t('LOX.BL_S3'),
                 bm_t('LOX.BL_S4'),
                 bm_t('LOX.BL_S5'),
                 bm_t('LOX.BL_S6'),
-                sprintf(bm_t('LOX.BL_S7'), $haken, $spalte),
+                sprintf(bm_t('LOX.BL_S7'), $annehmen, $haken, $spalte),
             );
             break;
         default:
             $t = array(
-                sprintf(bm_t('LOX.BL_HS1'), $laden),
+                bm_t('LOX.BL_HS1'),
                 bm_t('LOX.BL_HS2'),
                 bm_t('LOX.BL_HS3'),
                 bm_t('LOX.BL_HS4'),
                 bm_t('LOX.BL_HS5'),
                 bm_t('LOX.BL_HS6'),
                 bm_t('LOX.BL_HS7'),
+                bm_t('LOX.BL_HS8'),
             );
     }
     return array_map('bm_e', $t);
@@ -2054,11 +2294,16 @@ $bm_wue = bm_wache_uebersicht(); ?>
 
 
 <h3><?= bm_e(bm_t('TEST.H_LESEN')) ?></h3>
+<?php /* Gruppe 31 (E-E13): die Lesezweig-Knoepfe nur, wenn der Lesezweig angenommen wird. */ ?>
+<?php if (empty($bm_cfg['endpunkt_ein'])) { ?>
+<p class="sm-hilfe"><?= bm_t('TEST.LESEZWEIG_AUS') ?></p>
+<?php } else { ?>
 <div class="sm-knopfreihe">
   <a data-role="none" class="sm-btn sm-b-lesen" href="<?= bm_e($bm_basis) ?>?token=<?= bm_e($bm_token) ?>&amp;aktion=status&amp;geraet=1" target="_blank"><?= bm_e(bm_t('TEST.K_STATUS')) ?></a>
   <a data-role="none" class="sm-btn sm-b-lesen" href="<?= bm_e($bm_basis) ?>?token=<?= bm_e($bm_token) ?>&amp;aktion=zellen&amp;geraet=1" target="_blank"><?= bm_e(bm_t('TEST.K_ZELLEN')) ?></a>
   <a data-role="none" class="sm-btn sm-b-lesen" href="<?= bm_e($bm_basis) ?>?token=<?= bm_e($bm_token) ?>&amp;aktion=liste" target="_blank"><?= bm_e(bm_t('TEST.K_LISTE')) ?></a>
 </div>
+<?php } ?>
 
 <h3><?= bm_e(bm_t('TEST.H_TECHNIK')) ?></h3>
 <p class="sm-hilfe"><?= bm_t('TEST.TECHNIK_ERKLAERUNG') ?></p>
@@ -2068,7 +2313,9 @@ $bm_wue = bm_wache_uebersicht(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-test">
     <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="selbsttest" value="1"><?= bm_e(bm_t('TEST.K_SELBSTTEST')) ?></button>
   </form>
+<?php if (!empty($bm_cfg['endpunkt_ein'])) { ?>
   <a data-role="none" class="sm-btn sm-b-technik" href="<?= bm_e($bm_basis) ?>?token=<?= bm_e($bm_token) ?>&amp;aktion=roh" target="_blank"><?= bm_e(bm_t('TEST.K_ROH_ABBILD')) ?></a>
+<?php } ?>
 </div>
 
 <h3><?= bm_e(bm_t('TEST.H_REGISTER')) ?></h3>
@@ -2146,8 +2393,8 @@ $bm_wue = bm_wache_uebersicht(); ?>
 <?php
 $bm_mdatei = bm_mitschnitt_datei();
 if (is_file($bm_mdatei)) {
-    $bm_mz = array_slice(array_reverse(file($bm_mdatei,
-        FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: array()), 0, 60);
+    // Gruppe 31 (B4d): die letzten 64 KiB, nicht die ganze Datei.
+    $bm_mz = array_slice(array_reverse(bm_datei_ende($bm_mdatei, 65536)), 0, 60);
     if ($bm_mz) { ?>
 <div class="sm-log"><?= bm_e(implode("\n", $bm_mz)) ?></div>
 <?php }
@@ -2230,6 +2477,17 @@ if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {
 </div><!-- /sm-wrap -->
 
 <script>
+/* Gruppe 31: Kopierknopf der Namenstabelle (liest nur, Bauart Anker 0.9.32). */
+document.addEventListener('DOMContentLoaded', function () {
+	document.querySelectorAll('.sm-kopie').forEach(function (k) {
+		k.addEventListener('click', function () {
+			var t = k.getAttribute('data-kopie') || '';
+			if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(t); }
+			else { var a = document.createElement('textarea'); a.value = t; document.body.appendChild(a); a.select();
+			       try { document.execCommand('copy'); } catch (x) {} document.body.removeChild(a); }
+		});
+	});
+});
 (function () {
 	var reiter = document.querySelectorAll('.sm-tab');
 	function zeige(id) {

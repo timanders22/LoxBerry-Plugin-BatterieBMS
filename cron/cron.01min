@@ -1,20 +1,32 @@
 #!/bin/sh
-# Batterie-Heimspeicher (BMS) - Waechter, minuetlich.
-# Startet den Dienst neu, wenn er laufen soll, aber nicht laeuft.
-# Den bin-Pfad des Plugins setzt der Installer in der Zeile WAECHTER= unten ein.
-# Der Platzhalter steht bewusst NUR dort: der Installer ersetzt ihn in der
-# ganzen Datei, auch in einem Kommentar - bis 0.9.21 stand er hier, und am
-# Geraet las sich der Satz dann als Pfad (B53, gemessen 17.09.2026).
-# B30: bis 0.9.15 stand hier '>/dev/null 2>&1'. Faellt der Waechter aus -
-# Platzhalter nicht ersetzt, dienst.sh ohne x-Bit, su nicht vorhanden -,
-# geschah das restlos still: kein Logeintrag, keine Meldung. Fuer den
-# wichtigsten Ausfallschutz des Plugins gab es damit keine Rueckmeldung.
-# Die normale Ausgabe bleibt unterdrueckt (der Waechter schweigt im Regelfall),
-# die FEHLERausgabe geht ins Systemprotokoll.
+# Batterie-Heimspeicher (BMS) - Waechter, minuetlich (Gruppe 31, 0.9.38, B8).
+# Hausform (Regeln/06 :475, :505; Docker NG 1.3.7, Marstek 1.0.17): Fehlerausgabe nach cron.err im
+# Protokollordner (Reiter Logdateien), touch frischt die Zeit auf, ab 256 kB die letzten 300 Zeilen.
+# bash statt Ausfuehrbarkeitspruefung (B8): das x-Bit setzt der Installer, ein fehlendes Bit
+# legte bis 0.9.37 den Waechter still. Die Platzhalter stehen NUR in den drei Zuweisungen
+# darunter (B53: der Installer ersetzt sie in der ganzen Datei, auch im Kommentar).
+# Als root aufgerufen (von Hand): einmal auf loxberry wechseln, sonst gehoerte cron.err root.
 WAECHTER="REPLACELBPBINDIR/dienst.sh"
-if [ ! -x "$WAECHTER" ]; then
-    logger -t batteriebms "Waechter nicht ausfuehrbar: $WAECHTER"
-    exit 1
+BRUECKE="REPLACELBPBINDIR/befehlsbruecke.sh"
+LOGD="REPLACELBPLOGDIR"
+if [ "$(id -u)" = "0" ] && command -v su >/dev/null 2>&1; then
+    exec su loxberry -s /bin/sh -c "sh '$0'"
 fi
-"$WAECHTER" waechter 2>&1 >/dev/null | logger -t batteriebms
+ERR="$LOGD/cron.err"
+mkdir -p "$LOGD" 2>/dev/null
+if touch "$ERR" 2>/dev/null; then
+    if [ "$(stat -c %s "$ERR" 2>/dev/null || echo 0)" -gt 262144 ]; then
+        tail -n 300 "$ERR" > "$ERR.neu" 2>/dev/null && mv -f "$ERR.neu" "$ERR"
+    fi
+else
+    ERR=/dev/null
+fi
+if [ ! -f "$WAECHTER" ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Waechter fehlt: $WAECHTER" >> "$ERR"
+    exit 0
+fi
+bash "$WAECHTER" waechter >/dev/null 2>>"$ERR"
+if [ -f "$BRUECKE" ]; then
+    bash "$BRUECKE" waechter >/dev/null 2>>"$ERR"
+fi
 exit 0

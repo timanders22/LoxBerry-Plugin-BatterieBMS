@@ -13,22 +13,30 @@ Reiter Einstellungen, Abschnitt Geraeteprofile, Knopf "Als JSON laden". Damit
 laesst sich jedes vorhandene Profil herunterladen, anpassen und hier wieder
 ablegen.
 
+Sungrow SBR und Victron GX sind seit 0.9.38 EINGEBAUT (sungrow_sbr,
+victron_gx; beide "ungeprueft am Geraet"). Als Vorlage fuer ein Sungrow- oder
+Victron-Geraet das eingebaute Profil mit "Als JSON laden" holen - nicht das
+Beispiel unten abschreiben. Bis 0.9.37 stand hier ein Sungrow-Beispiel, das in
+Leseart und Steuerung falsch belegt war (FC 3 statt FC 4, PBAT ueber dem SOC,
+"laden" ins Befehlsregister und eine 32-Bit-Leistung ueber ein reserviertes
+Register) - wer es abschrieb, haette ein falsches Geraet bekommen.
+
 Wie heisst die Datei?
 ---------------------
 Der Dateiname ohne .json ist der Schluessel des Profils. Erlaubt sind
 Kleinbuchstaben, Ziffern und Unterstrich; alles andere wird entfernt.
 
-   sungrow_sbr.json      -> Schluessel sungrow_sbr
+   mein_speicher.json    -> Schluessel mein_speicher
    byd_battery_box.json  -> ersetzt das EINGEBAUTE Profil gleichen Namens
 
 Eine eigene Datei ersetzt ein eingebautes Profil VOLLSTAENDIG. Das ist
 gewollt: wer ein Profil korrigiert, soll nicht mit einer halb ueberschriebenen
 Mischung dastehen.
 
-Aufbau
+Aufbau (neutrales Beispiel ohne Herstellerbezug - die Adressen sind erfunden)
 ------
 {
-  "name":      "Sungrow SBR (Beispiel, ungeprueft)",
+  "name":      "Mein Speicher (Beispiel, ungeprueft)",
   "transport": "modbus_tcp",          modbus_tcp | modbus_rtu_tcp | pylontech_rs485
   "port":      502,
   "unit":      1,
@@ -36,13 +44,15 @@ Aufbau
   "stand":     "unbestaetigt",        dokumentiert | unbestaetigt
   "quelle":    "Handbuch Seite 42",   PFLICHT. Wo die Adressen herkommen.
   "bloecke": [
-    { "fc": 3, "start": 13000, "anzahl": 40 }
+    { "fc": 3, "start": 100, "anzahl": 6 },
+    { "fc": 3, "start": 200, "anzahl": 2, "optional": true }
   ],
   "felder": {
-    "SOC":  { "reg": 13022, "typ": "u16", "faktor": 0.1,  "nk": 1 },
-    "SOH":  { "reg": 13023, "typ": "u16", "faktor": 0.1,  "nk": 1 },
-    "UBAT": { "reg": 13019, "typ": "u16", "faktor": 0.1,  "nk": 1 },
-    "PBAT": { "reg": 13021, "typ": "s32", "faktor": 1,    "nk": 0, "wort": "nieder" }
+    "SOC":  { "reg": 100, "typ": "u16", "faktor": 0.1,  "nk": 1, "leer": 65535 },
+    "SOH":  { "reg": 101, "typ": "u16", "faktor": 0.1,  "nk": 1, "leer": 65535 },
+    "UBAT": { "reg": 102, "typ": "u16", "faktor": 0.1,  "nk": 1 },
+    "TBAT": { "reg": 103, "typ": "s16", "faktor": 0.1,  "nk": 1, "leer": 32767 },
+    "PBAT": { "reg": 200, "typ": "s32", "faktor": 1,    "nk": 0, "wort": "nieder" }
   },
   "rechnung":  {},
   "zellen":    {},
@@ -64,15 +74,33 @@ Profil, auch wenn die Pruefung sie bisher durchgelassen hat:
 Genau darin liegt der Sinn: die Loxone-Seite sieht bei jedem Hersteller gleich
 aus. Wer den Speicher tauscht, tauscht das Profil - nicht die Bausteine.
 
+Ein Wert ausserhalb des Bereichs einer Messgroesse (etwa SOH ueber 100 %,
+Temperaturen ausserhalb -40 bis 100 Grad) gilt seit 0.9.38 nicht als Messwert:
+das Feld bleibt leer, und das Protokoll sagt es.
+
 Registerbeschreibung
 --------------------
   reg       Registeradresse (dezimal in der JSON-Datei)
-  typ       u16 | s16 | u32 | s32 | u16hi | u16lo
+  typ       u16 | s16 | u32 | s32 | f32 | u16hi | u16lo
   faktor    Multiplikator auf den Rohwert
   nk        Nachkommastellen der Ausgabe
   wort      nur bei 32 Bit: "hoch" (Vorgabe) oder "nieder"
   maske     UND-Maske auf den Rohwert, etwa 15 fuer die unteren vier Bit
   schieben  Anzahl Bits, um die nach der Maske nach rechts geschoben wird
+  leer      Rohwert (oder Liste von Rohwerten), der "kein Wert" bedeutet - etwa
+            65535 (0xFFFF) bei u16 oder 32767 (0x7FFF) bei s16, wenn das Geraet
+            ein nicht verfuegbares Register so meldet; bei 32 Bit der ganze
+            Wert ohne Vorzeichen (2147483647 = 0x7FFFFFFF). Das Feld bleibt dann
+            leer statt einer Zahl, die aussieht wie ein Messwert.
+
+Leseblock
+---------
+  fc        Funktionscode 1, 2, 3 oder 4
+  start     erstes Register
+  anzahl    Zahl der Register
+  optional  true: antwortet das Geraet auf diesen Block nicht, bleiben nur
+            seine Felder leer - der Speicher gilt weiter als erreichbar. Ohne
+            optional legt ein unbeantworteter Block den ganzen Abruf still.
 
 Berechnete Groessen
 -------------------
@@ -90,23 +118,27 @@ Schreibbefehle
 --------------
 "steuerung" ist eine Liste von Schrittfolgen. Jeder Schritt schreibt ein
 Register. Der Platzhalter "@watt" steht fuer den uebergebenen Sollwert.
+Die Adressen unten sind erfunden - fuer ein echtes Geraet nur aus einem
+Herstellerdokument, nie geraten.
 
   "steuerung": {
     "laden": {
       "text": "Ladeleistung setzen",
       "schritte": [
-        { "reg": 13050, "typ": "u16", "wert": 2 },
-        { "reg": 13051, "typ": "u32", "wert": "@watt" }
+        { "reg": 300, "typ": "u16", "wert": 2 },
+        { "reg": 301, "typ": "u16", "wert": "@watt" }
       ]
     },
     "automatik": {
       "text": "zurueck in die Automatik",
-      "schritte": [ { "reg": 13050, "typ": "u16", "wert": 0 } ]
+      "schritte": [ { "reg": 300, "typ": "u16", "wert": 0 } ]
     }
   }
 
 Fehlt "steuerung" oder ist es leer, nimmt das Geraet keine Befehle entgegen -
-und das Plugin meldet das ausdruecklich, statt es zu versuchen.
+und das Plugin meldet das ausdruecklich, statt es zu versuchen. Fuer jeden
+Lade- und Entladezwang gilt der Temperaturschutz (Reiter Einstellungen,
+Ladegrenze niedrigste Zelltemperatur / Grenze hoechste Zelltemperatur).
 
 Zuerst pruefen, dann glauben
 ----------------------------

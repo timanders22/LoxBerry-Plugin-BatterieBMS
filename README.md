@@ -10,6 +10,36 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.38
+
+* **Temperaturschutz beim Zwang (Vorrang):** ein Ladezwang wird abgewiesen, solange die niedrigste Zelltemperatur unter
+  der Ladegrenze liegt, Laden und Entladen, solange die höchste über der Grenze liegt – und ein laufender Zwang wird
+  in diesem Fall in die Automatik zurückgenommen (LoxBerry-Meldung). Nur ein frischer, plausibler Messwert sperrt;
+  fehlt TMIN/TMAX, gilt die Pack-Temperatur. Die Ladegrenze ist jetzt auch unter 0 °C einstellbar (-30 bis 30 °C).
+* **MQTT-Gateway V2:** Namenstabelle mit den Namen, die das Gateway vergibt, V2-Hakenliste (16 Datenpunkte fürs
+  Musterprojekt, `status/ok` und `geraet1/ok` „Noncached“), Lebenszeichen `status/zaehler|ok|alter|ts` im festen
+  60-s-Takt, `geraetN/alter`, `geraetN/tbat`. **-1-Regel:** ein Feld ohne Wert geht als -1 (Temperaturen -999) hinaus;
+  ein einzelner Aussetzer lässt die Werte stehen, ein Ausfall (länger als drei Abruftakte) setzt sie einmal auf -1/-999.
+  Die Abo-Datei `<praefix>/#` ist nur noch der Rückfall für Gateway V1. Neu: `temp_schutz`, `ausgleich`, `spotladen`
+  und die Zellansicht kompakt je Modul (`geraetN/modul/M/zellen`, fürs Dashboard).
+* **Befehlsbrücke 1.0.1:** laden, entladen, sperren, automatik, lebenszeichen, batteriemodus und abruf aus Loxone über
+  das MQTT-Gateway V2 – ohne Token in der Projektdatei (Haken „Befehle über MQTT annehmen“, ab Werk aus). Dieselbe
+  Annahme wie der HTTP-Endpunkt; der Dienst bleibt der einzige Modbus-Schreiber. Seine Warteschlange liegt jetzt in
+  `auftraege/` (der Ordner `befehle/` gehört der Brücke).
+* **HTTP-Lesezweig:** `status`, `zellen`, `liste`, `summe` und `roh` antworten nur mit „HTTP-Lesezweig für Loxone
+  annehmen“ – bestehende Anlagen behalten ihn beim Update, eine Neuinstallation hat ihn aus. `evcc`, `?selftest=1` und
+  die Befehle mit Token bleiben offen.
+* **Spotpreis-Laden im Plugin** (ab Werk aus): Abnehmer von `haus/strompreis` über eine Dauerverbindung des Dienstes;
+  lädt, solange der Endpreis unter der Grenze liegt (wahlweise nur in den k günstigsten Stunden). Befehle von außen
+  haben Vorrang.
+* **Ausgleichsladen** auf 100 % bei hoher Zelldrift (ab Werk aus, 80/30 mV, höchstens 240 min, alle 7 Tage).
+* **Neue Profile (ungeprüft am Gerät):** Sungrow SBR über den SH-Hybridwechselrichter und Victron GX (z. B. Pylontech
+  über CAN). Profilschlüssel `leer` (Leerwerte des Geräts) und Leseblock `optional`; Werte außerhalb des Bereichs
+  einer Messgröße bleiben leer.
+* `bin/healthcheck`, Fehler des Minutenwächters nach `cron.err`, „Sollwert verwerfen“ für einen Zwang, den das Plugin
+  nicht zurücknehmen kann, und etliche Korrekturen (Upgrade-Abbruch ohne Wurzel/Marke, BYD-Frosttemperaturen,
+  Verlaufsbild an Umstelltagen, Mitschnitt endet binnen 2 s).
+
 ## Neu in 0.9.37
 
 Textnachzug zum Musterprojekt, Reiter **Einbindung in Loxone**, Seite „BatterieBMS Spotpreis-Laden“: Spotpreis aWATTar liefert die
@@ -548,6 +578,8 @@ alle vier bestanden.
 | **Huawei LUNA2000** (Grunddaten über SUN2000) | Modbus TCP, Port 502 | dokumentiert |
 | **Huawei LUNA2000** (Batteriepakete) | Modbus TCP, Port 502 | **ungeprüft** |
 | **Pylontech** US2000, US3000, US5000, Force | RS485-Konsole, 115200 Baud | dokumentiert |
+| **Sungrow SBR** (über SH-Hybridwechselrichter) | Modbus TCP, Port 502 | **ungeprüft am Gerät** |
+| **Victron GX** – Batterie (z. B. Pylontech über CAN) | Modbus TCP, Port 502, Unit-ID 225 | **ungeprüft am Gerät** |
 | **Frei einstellbar** | Modbus TCP oder RTU | Vorlage |
 
 Weitere Speicher kommen als **JSON-Profildatei** dazu, ohne Änderung am

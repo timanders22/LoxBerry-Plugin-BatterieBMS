@@ -531,6 +531,66 @@ function bm_pruefungen()
     $zeilen[] = bm_pruefzeile($bm_ww['fuehrung'] === 'beide' ? -1 : 1, bm_t('TEST.F_FUEHRUNG'),
         bm_t('TEST.A_FUEHRUNG_' . strtoupper($bm_ww['fuehrung'])));
 
+    // Gruppe 31 (0.9.38): Temperaturschutz, Strompreis, Spotpreis-Laden, Ausgleichsladen, Bruecke, Lesezweig.
+    $zeilen = array_merge($zeilen, bm_pruefungen_g31($cfg, $werte));
+
+    return $zeilen;
+}
+
+/** Gruppe 31: die Zeilen des Reiters Test zu den Neuerungen der 0.9.38 - Temperaturschutz je Speicher,
+ *  Spotpreis-Laden mit dem Strompreis aus dem Haus, Ausgleichsladen, Befehlsbruecke, Lesezweig des Endpunkts.
+ *  Nur im offenen Reiter Test (Regeln/04 :397); nichts wird gesendet oder geschrieben. */
+function bm_pruefungen_g31(array $cfg, array $werte)
+{
+    $zeilen = array();
+    foreach ($werte as $nr => $e) {
+        $name = isset($e['name']) ? (string) $e['name'] : (string) $nr;
+        list($code, $text) = bm_temp_schutz('laden', $e, $cfg, bm_temp_frisch($e, $cfg));
+        if ($code === 'TEMP_MIN' || $code === 'TEMP_MAX') {
+            $zeilen[] = bm_pruefzeile(0, sprintf(bm_t('TEST.F_TEMP'), bm_e($name)), bm_e($text));
+        } elseif ($text === 'TEMP_UNGEPRUEFT') {
+            $zeilen[] = bm_pruefzeile(-1, sprintf(bm_t('TEST.F_TEMP'), bm_e($name)), bm_t('TEST.A_TEMP_ALT'));
+        } elseif ($text === 'TEMP_UNBEKANNT') {
+            $zeilen[] = bm_pruefzeile(-1, sprintf(bm_t('TEST.F_TEMP'), bm_e($name)), bm_t('TEST.A_TEMP_UNBEKANNT'));
+        } else {
+            $zeilen[] = bm_pruefzeile(1, sprintf(bm_t('TEST.F_TEMP'), bm_e($name)),
+                sprintf(bm_t('TEST.A_TEMP_FREI'), (int) $cfg['temp_min'], (int) $cfg['temp_max']));
+        }
+    }
+    if (empty($cfg['spotladen_ein'])) {
+        $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_PREIS'), bm_t('TEST.A_PREIS_AUS'));
+    } else {
+        $hp = bm_haus_preis_lesen();
+        $sp = bm_spotladen_lesen();
+        if (isset($hp['lage']) && $hp['lage'] === 'haus') {
+            $zeilen[] = bm_pruefzeile(1, bm_t('TEST.F_PREIS'), sprintf(bm_t('TEST.A_PREIS_HAUS'),
+                bm_e(str_replace('.', ',', (string) $hp['preis_jetzt'])), (int) $hp['rang'], (int) $hp['stunden'],
+                max(0, time() - (int) $hp['zaehler_ts'])));
+        } else {
+            $zeilen[] = bm_pruefzeile(0, bm_t('TEST.F_PREIS'), sprintf(bm_t('TEST.A_PREIS_SCHWEIGT'),
+                bm_e(isset($hp['lage']) ? (string) $hp['lage'] : '-'),
+                isset($hp['seit']) ? max(0, (int) round((time() - (int) $hp['seit']) / 60)) : 0));
+        }
+        $zeilen[] = bm_pruefzeile(isset($sp['wert']) && (int) $sp['wert'] === 2 ? 0 : -1, bm_t('TEST.F_SPOT'),
+            bm_e(isset($sp['grund']) ? (string) $sp['grund'] : '-'));
+    }
+    $ag = bm_ausgleich_lesen();
+    if (empty($cfg['ausgleich_ein'])) {
+        $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_AUSGLEICH'), bm_t('TEST.A_AUSGLEICH_AUS'));
+    } elseif (!empty($ag['laeuft'])) {
+        $zeilen[] = bm_pruefzeile(1, bm_t('TEST.F_AUSGLEICH'), sprintf(bm_t('TEST.A_AUSGLEICH_LAEUFT'),
+            (int) round((time() - (int) $ag['start']) / 60)));
+    } else {
+        $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_AUSGLEICH'), bm_e(isset($ag['grund']) ? (string) $ag['grund'] : '-'));
+    }
+    if (empty($cfg['befehle_mqtt_ein'])) {
+        $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_BRUECKE'), bm_t('BEFEHL.T_AUS'));
+    } else {
+        list($bl, $bt) = bm_bruecke_lage();
+        $zeilen[] = bm_pruefzeile($bl === true ? 1 : ($bl === null ? -1 : 0), bm_t('TEST.F_BRUECKE'), $bt);
+    }
+    $zeilen[] = bm_pruefzeile(-1, bm_t('TEST.F_LESEZWEIG'),
+        bm_t(!empty($cfg['endpunkt_ein']) ? 'TEST.A_LESEZWEIG_AN' : 'TEST.A_LESEZWEIG_AUS'));
     return $zeilen;
 }
 
@@ -666,14 +726,16 @@ function bm_themen_gesendet(array $cfg)
                                             'zellen' => array(1 => 3300))));
     foreach (array('SOC', 'SOH', 'UBAT', 'IBAT', 'PBAT', 'TMAX', 'TMIN', 'UZMAX', 'UZMIN',
                    'UZDIFF', 'ZYKLEN', 'KAPAZ', 'MODULE', 'ZELLEN', 'FEHLER', 'WARNUNG', 'MODUS',
-                   'UZMINMOD', 'UZMINZELLE', 'RESTKWH', 'RESTZEIT', 'ALARM') as $f) {
+                   'UZMINMOD', 'UZMINZELLE', 'RESTKWH', 'RESTZEIT', 'ALARM', 'TBAT') as $f) {
         $e[$f] = 1;
     }
     $cfg['evcc_ein'] = 1;
     $cfg['evcc_geraet'] = 1;
     $aus = array();
-    foreach (array_keys(bm_mqtt_paare(array('ok' => 1, 'ts' => 1, 'geraete' => array(1 => $e)),
-                                      false, $cfg)) as $k) {
+    $paare = bm_mqtt_paare(array('ok' => 1, 'ts' => 1, 'geraete' => array(1 => $e)), false, $cfg);
+    $paare += array('status/zaehler' => 0, 'status/ok' => 0, 'status/alter' => 0, 'status/ts' => 0,
+                    'geraet1/alter' => 0);
+    foreach (array_keys($paare) as $k) {
         $k = preg_replace('#^geraet[0-9]+/#', 'geraetN/', (string) $k);
         $k = preg_replace('#/modul/[0-9]+/#', '/modul/M/', $k);
         $k = preg_replace('#/zelle/[0-9]+$#', '/zelle/Z', $k);
@@ -764,6 +826,8 @@ function bm_soc_svg($punkte, $tag = '')
     $tag0 = (preg_match('/^[0-9]{8}$/', (string) $tag))
         ? (int) strtotime(substr($tag, 0, 4) . '-' . substr($tag, 4, 2) . '-' . substr($tag, 6, 2))
         : strtotime('today 00:00');
+    $tagLen = max(1, (int) strtotime('+1 day', $tag0) - (int) $tag0);
+    $datum = date('Y-m-d', $tag0);
     $svg = '<svg viewBox="0 0 ' . $w . ' ' . $h . '" style="width:100%;max-width:' . $w
          . 'px;height:auto;background:#fafafa;border:1px solid #e0e0e0;border-radius:8px;"'
          . ' xmlns="http://www.w3.org/2000/svg">';
@@ -775,7 +839,8 @@ function bm_soc_svg($punkte, $tag = '')
               . '" font-size="9" fill="#999" text-anchor="end">' . $pct . '</text>';
     }
     foreach (array(0, 6, 12, 18, 24) as $hh) {
-        $x = $x0 + $pw * $hh / 24;
+        $ts = ($hh === 24) ? $tag0 + $tagLen : (int) strtotime(sprintf('%s %02d:00', $datum, $hh));
+        $x = round($x0 + $pw * ($ts - $tag0) / $tagLen, 1);
         $svg .= '<line x1="' . $x . '" y1="' . $y0 . '" x2="' . $x . '" y2="' . ($y0 + $ph)
               . '" stroke="#eeeeee" stroke-width="1"/>';
         $svg .= '<text x="' . $x . '" y="' . ($h - 6)
@@ -783,7 +848,7 @@ function bm_soc_svg($punkte, $tag = '')
     }
     $poly = array();
     foreach ($punkte as $pt) {
-        $anteil = ($pt[0] - $tag0) / 86400;
+        $anteil = ($pt[0] - $tag0) / $tagLen;
         if ($anteil < 0 || $anteil > 1) {
             continue;
         }

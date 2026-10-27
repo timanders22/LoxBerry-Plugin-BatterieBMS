@@ -69,6 +69,63 @@ if [ -z "$BASE" ]; then
     exit 1
 fi
 
+# Gruppe 31 (B7a): plugininstall.pl ruft die Deinstallationsskripte aller Plugins, deren Name mit dem Namen des
+# deinstallierten BEGINNT ($pname*, plugininstall.pl :1570) - die Deinstallation eines fremden Plugins
+# "batteriebmsx" fuehrte dieses Skript mit aus. Nur der eigene Name gilt.
+if [ "${2:-}" != "batteriebms" ]; then
+    echo "<INFO> uninstall: fremder Name '${2:-}' - nichts getan."
+    exit 0
+fi
+
+# Gruppe 31 (0.9.38; Muster Ferien 1.2.28 / aWATTar 1.2.39): die Befehlsbruecke anhalten (stop beendet Dienst und
+# mosquitto_sub, auch ein verwaistes), argumentweise nachzaehlen, die Optionsdateien mit dem Broker-Kennwort
+# ueberschreiben und den Ordner befehle/ entfernen. Im Broker bleibt nichts: Quittungen und status/befehle sind nie
+# zurueckbehalten. Vor allem anderen, gleich nach der Wurzel- und Namenspruefung.
+case "$PFOLDER" in
+    */*|*..*)
+        echo "<WARNING> Unzulaessiger Ordnername '$PFOLDER' - die Befehlsbruecke wurde nicht angehalten." ;;
+    *)
+        BBSH="$BASE/bin/plugins/$PFOLDER/befehlsbruecke.sh"
+        BBPHP="$BASE/bin/plugins/$PFOLDER/befehlsbruecke.php"
+        BBDIR="$BASE/data/plugins/$PFOLDER/befehle"
+        if [ -f "$BBSH" ]; then
+            timeout 40 bash "$BBSH" stop
+        fi
+        BB_REST=0
+        for d in /proc/[0-9]*; do
+            mapfile -d '' -t a 2>/dev/null < "$d/cmdline" || continue
+            if [ "${#a[@]}" -eq 2 ] && [ "${a[1]}" = "$BBPHP" ] && [[ "${a[0]}" =~ (^|/)php[0-9.]*$ ]]; then
+                kill -9 "${d#/proc/}" 2>/dev/null
+                BB_REST=$((BB_REST + 1))
+            fi
+        done
+        BB_ABOS=0
+        for d in /proc/[0-9]*; do
+            read -r c 2>/dev/null < "$d/comm" || continue
+            [ "$c" = "mosquitto_sub" ] || continue
+            mapfile -d '' -t e 2>/dev/null < "$d/environ" || continue
+            for x in "${e[@]}"; do
+                if [ "$x" = "XDG_CONFIG_HOME=$BBDIR/mosquitto" ]; then kill -9 "${d#/proc/}" 2>/dev/null; BB_ABOS=$((BB_ABOS + 1)); fi
+            done
+        done
+        [ "$BB_REST" -gt 0 ] && echo "<WARNING> Befehlsbruecke: $BB_REST Dienst(e) erst mit kill -9 beendet."
+        [ "$BB_ABOS" -gt 0 ] && echo "<WARNING> Befehlsbruecke: $BB_ABOS mosquitto_sub erst mit kill -9 beendet."
+        if [ -d "$BBDIR" ]; then
+            for f in "$BBDIR/mosquitto/mosquitto_sub" "$BBDIR/mosquitto/mosquitto_pub"; do
+                if [ -f "$f" ]; then
+                    n=$(stat -c %s "$f" 2>/dev/null || echo 64)
+                    head -c "$n" /dev/zero > "$f" 2>/dev/null
+                fi
+            done
+            rm -rf "${BBDIR:?}"
+        fi
+        if [ -e "$BBDIR/mosquitto/mosquitto_sub" ] || [ -e "$BBDIR/mosquitto/mosquitto_pub" ]; then
+            echo "<WARNING> Befehlsbruecke: Optionsdateien liegen noch unter $BBDIR/mosquitto - von Hand entfernen."
+        else
+            echo "<OK> Befehlsbruecke angehalten, ihre Zugangsdaten entfernt."
+        fi ;;
+esac
+
 # 1. Den Dienst anhalten, bevor etwas verschwindet. Er haelt eine
 #    Modbus-Verbindung offen, und manche Speicher lassen nur eine zu.
 DIENST="$BASE/bin/plugins/$PFOLDER/dienst.sh"

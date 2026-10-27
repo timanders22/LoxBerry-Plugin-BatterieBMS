@@ -551,6 +551,142 @@ function bm_profile_eingebaut()
         ),
 
         /* -----------------------------------------------------------------
+         * Sungrow SBR ueber einen SH-Hybridwechselrichter (Gruppe 31, 0.9.38)
+         *
+         * UNGEPRUEFT AM GERAET. Quelle: Sungrow "Communication Protocol of
+         * Residential Hybrid Inverter" V1.1.11 (2025-11-17). Alle Zahlen hier
+         * sind PROTOKOLLADRESSEN = Dokumentadresse minus 1 (Abschnitt 1.2,
+         * Punkt 4.1). Gelesen nur mit FC 4 (Tabelle 3 "Running Information"
+         * kennt nur 0x04). U32/S32 "little-endian for double-word" -> wort
+         * nieder. "Nicht verfuegbar" ist 0xFFFF (U16) bzw. 0x7FFF (S16,
+         * Punkt 4.5) - deshalb 'leer'.
+         *   UBAT 13019 u16 x0,1 V | SOC 13022 u16 x0,1 % | SOH 13023 u16 x0,1 %
+         *   TBAT 13024 s16 x0,1 Grad (Pack - KEIN TMIN/TMAX im Dokument; der
+         *        Temperaturschutz greift ueber TBAT)
+         *   PBAT 5213 s32 x1 W, wort nieder ("recommended instead of 13022";
+         *        Richtung nicht beschrieben - Schalter "Vorzeichen" am Geraet
+         *        pruefen)
+         *   IBAT 5630 s16 x0,1 A
+         * 5213 und 5630 sind optional (N5): nicht jedes Modell beantwortet sie.
+         * Schreiben (Abschnitt 3.2/3.5, eindeutig belegt): 13049 EMS-Modus
+         * (2 = Zwang, 0 = Eigenverbrauch), 13050 Befehl (0xAA laden, 0xBB
+         * entladen, 0xCC Stop), 13051 Leistung in W. "sperren" bleibt die
+         * Hausregel "entladen mit 0 W" (N11: ob "Discharge 0 W" am Geraet
+         * dasselbe tut wie 0xCC, ist ungemessen). NICHT uebernommen: externer
+         * EMS-Herzschlag 13079/13080 (stuende die Totmannzeit doppelt), Max-/
+         * Min-SOC (nicht eindeutig zuzuordnen), 33047/33048.
+         * Das Dokument traegt einen Weitergabevermerk - hier stehen nur
+         * Registernummern und die Fassung, kein Abdruck.
+         * ----------------------------------------------------------------- */
+        'sungrow_sbr' => array(
+            'name'      => 'Sungrow SBR (ueber SH-Hybridwechselrichter, Modbus-TCP)',
+            'transport' => 'modbus_tcp',
+            'port'      => 502,
+            'unit'      => 1,
+            'stand'     => 'unbestaetigt',
+            'quelle'    => 'Sungrow Communication Protocol of Residential Hybrid Inverter V1.1.11 (2025-11-17), '
+                         . 'Tabelle 3 (FC 4) und Abschnitte 3.2/3.5; Protokolladressen = Dokument minus 1. '
+                         . 'An keinem Geraet gemessen.',
+            'hinweis'   => 'BM_PROFIL.H_SUNGROW',
+            'bloecke'   => array(
+                array('fc' => 4, 'start' => 13019, 'anzahl' => 6),
+                array('fc' => 4, 'start' => 5213, 'anzahl' => 2, 'optional' => true),
+                array('fc' => 4, 'start' => 5630, 'anzahl' => 1, 'optional' => true),
+            ),
+            'felder' => array(
+                'UBAT' => array('reg' => 13019, 'typ' => 'u16', 'faktor' => 0.1, 'nk' => 1, 'leer' => 65535),
+                'SOC'  => array('reg' => 13022, 'typ' => 'u16', 'faktor' => 0.1, 'nk' => 1, 'leer' => 65535),
+                'SOH'  => array('reg' => 13023, 'typ' => 'u16', 'faktor' => 0.1, 'nk' => 1, 'leer' => 65535),
+                'TBAT' => array('reg' => 13024, 'typ' => 's16', 'faktor' => 0.1, 'nk' => 1, 'leer' => 32767),
+                'PBAT' => array('reg' => 5213, 'typ' => 's32', 'faktor' => 1, 'nk' => 0, 'wort' => 'nieder',
+                                'leer' => 2147483647),
+                'IBAT' => array('reg' => 5630, 'typ' => 's16', 'faktor' => 0.1, 'nk' => 1, 'leer' => 32767),
+            ),
+            'rechnung'  => array(),
+            'zellen'    => array(),
+            'steuerung_stand' => 'unbestaetigt',
+            'steuerung' => array(
+                'laden' => array(
+                    'text' => 'BM_STEUER.SG_LADEN',
+                    'schritte' => array(
+                        array('reg' => 13049, 'typ' => 'u16', 'wert' => 2),
+                        array('reg' => 13050, 'typ' => 'u16', 'wert' => 0xAA),
+                        array('reg' => 13051, 'typ' => 'u16', 'wert' => '@watt'),
+                    ),
+                ),
+                'entladen' => array(
+                    'text' => 'BM_STEUER.SG_ENTLADEN',
+                    'schritte' => array(
+                        array('reg' => 13049, 'typ' => 'u16', 'wert' => 2),
+                        array('reg' => 13050, 'typ' => 'u16', 'wert' => 0xBB),
+                        array('reg' => 13051, 'typ' => 'u16', 'wert' => '@watt'),
+                    ),
+                ),
+                'automatik' => array(
+                    'text' => 'BM_STEUER.SG_AUTOMATIK',
+                    'schritte' => array(
+                        array('reg' => 13049, 'typ' => 'u16', 'wert' => 0),
+                        array('reg' => 13050, 'typ' => 'u16', 'wert' => 0xCC),
+                    ),
+                ),
+            ),
+        ),
+
+        /* -----------------------------------------------------------------
+         * Victron GX - Batteriedienst (z. B. Pylontech ueber CAN), Gruppe 31
+         *
+         * UNGEPRUEFT AM GERAET. Quelle: Victron CCGX-Modbus-TCP-register-list
+         * Rev 55 (github.com/victronenergy/dbus_modbustcp, attributes.csv),
+         * Dienst com.victronenergy.battery. Unit-ID: bevorzugt 225 (CAN-bus
+         * BMS, /DeviceInstance 512); seit Venus 2.60 werden Unit-IDs je Anlage
+         * vergeben - am GX unter Settings -> Integrations -> Modbus TCP server
+         * -> Available services ablesen. FC 3 und FC 4 antworten gleich.
+         *   PBAT 258 s16 x1 W (Victron: positiv = laden - am Geraet bestaetigen)
+         *   UBAT 259 u16 x0,01 V | IBAT 261 s16 x0,1 A | TBAT 262 s16 x0,1 Grad
+         *   SOC 266 u16 x0,1 % | SOH 304 u16 x0,1 % | TMIN 318 / TMAX 319 s16
+         *   x0,1 Grad | UZMIN 1290 / UZMAX 1291 u16 x0,01 V
+         * Fuer einen ungueltigen dbus-Wert liefert der GX 0 (mappings.cpp) -
+         * deshalb 'leer' => 0 bei SOH, TMIN, TMAX, UZMIN, UZMAX (dort ist 0
+         * physikalisch unmoeglich bzw. bedeutungslos; SOC, PBAT, IBAT 0 sind
+         * echte Werte). 304, 318 und 1290 sind optionale Bloecke (N5).
+         * KEINE Schreibbefehle: die GX-Liste kennt keinen Batterie-Sollwert in
+         * W; ESS regelt ueber den Netz-Sollwert - eine andere Regelgroesse
+         * (Entscheidung 4: Schreiben nur, wo eindeutig belegt).
+         * Pylontech DIREKT (RS485-Konsole) bleibt das Profil pylontech_konsole.
+         * ----------------------------------------------------------------- */
+        'victron_gx' => array(
+            'name'      => 'Victron GX - Batterie (z. B. Pylontech ueber CAN, Modbus-TCP)',
+            'transport' => 'modbus_tcp',
+            'port'      => 502,
+            'unit'      => 225,
+            'stand'     => 'unbestaetigt',
+            'quelle'    => 'Victron CCGX-Modbus-TCP-register-list Rev 55 (github.com/victronenergy/dbus_modbustcp, '
+                         . 'attributes.csv), Dienst com.victronenergy.battery. An keinem Geraet gemessen.',
+            'hinweis'   => 'BM_PROFIL.H_VICTRON',
+            'bloecke'   => array(
+                array('fc' => 3, 'start' => 258, 'anzahl' => 9),
+                array('fc' => 3, 'start' => 304, 'anzahl' => 1, 'optional' => true),
+                array('fc' => 3, 'start' => 318, 'anzahl' => 2, 'optional' => true),
+                array('fc' => 3, 'start' => 1290, 'anzahl' => 2, 'optional' => true),
+            ),
+            'felder' => array(
+                'PBAT'  => array('reg' => 258, 'typ' => 's16', 'faktor' => 1, 'nk' => 0),
+                'UBAT'  => array('reg' => 259, 'typ' => 'u16', 'faktor' => 0.01, 'nk' => 2),
+                'IBAT'  => array('reg' => 261, 'typ' => 's16', 'faktor' => 0.1, 'nk' => 1),
+                'TBAT'  => array('reg' => 262, 'typ' => 's16', 'faktor' => 0.1, 'nk' => 1),
+                'SOC'   => array('reg' => 266, 'typ' => 'u16', 'faktor' => 0.1, 'nk' => 1),
+                'SOH'   => array('reg' => 304, 'typ' => 'u16', 'faktor' => 0.1, 'nk' => 1, 'leer' => 0),
+                'TMIN'  => array('reg' => 318, 'typ' => 's16', 'faktor' => 0.1, 'nk' => 1, 'leer' => 0),
+                'TMAX'  => array('reg' => 319, 'typ' => 's16', 'faktor' => 0.1, 'nk' => 1, 'leer' => 0),
+                'UZMIN' => array('reg' => 1290, 'typ' => 'u16', 'faktor' => 0.01, 'nk' => 2, 'leer' => 0),
+                'UZMAX' => array('reg' => 1291, 'typ' => 'u16', 'faktor' => 0.01, 'nk' => 2, 'leer' => 0),
+            ),
+            'rechnung'  => array(),
+            'zellen'    => array(),
+            'steuerung' => array(),
+        ),
+
+        /* -----------------------------------------------------------------
          * Freies Modbus-Profil
          *
          * Vorlage zum Herunterladen und Anpassen. Ein eigenes Profil ist eine
@@ -690,7 +826,10 @@ function bm_vorgaben()
         'geraete'        => array(),
         'intervall'      => 30,     // Sekunden zwischen zwei Abrufen
         'zelltakt'       => 300,    // Sekunden zwischen zwei Zelldaten-Abrufen
-        'mqtt_ein'       => 0,
+        /* Gruppe 31 (E-E5): Neuinstallation an - Werte ueber das MQTT-Gateway V2 sind die Hausform. Eine
+         * eingerichtete Datei ohne den Schluessel liest bm_config() als 0 (Lese-Regel), ein Update aendert
+         * also nichts; preupgrade.sh nennt den Stand. */
+        'mqtt_ein'       => 1,
         'mqtt_topic'     => 'batteriebms',
         'steuerung_ein'  => 0,
         'soc_min'        => 10,     // untere Grenze fuer erzwungenes Entladen
@@ -734,6 +873,26 @@ function bm_vorgaben()
         'wache_sperren_ein' => 0,       // fremde Schreiber mit 409 abweisen
         'wache_erlaubt'     => '',      // erlaubte Schreiber: Kennung, Adresse oder beides
         'fuehrung'          => 'beide', // beide | loxone | evcc
+        /* Gruppe 31 (0.9.38, Entwurf 2.8): alle neuen Schalter ab Werk aus.
+         * befehle_mqtt_ein: Befehlsbruecke 1.0.1 (wirkt nur mit mqtt_ein UND steuerung_ein fuer eingreifende
+         * Befehle). endpunkt_ein: Lesezweig des HTTP-Endpunkts fuer Loxone - Neuinstallation 0, bestehende
+         * Anlagen 1 (Lese-Regel in bm_config() und postupgrade.sh). spotladen_*: Spotpreis-Laden im Plugin
+         * (Abnehmer haus/strompreis, Grenze in ENDPREIS ct/kWh). ausgleich_*: Ausgleichsladen auf 100 % bei
+         * hoher Zelldrift. Eine Sicherung ohne diese Schluessel behaelt den geltenden Wert (N12). */
+        'befehle_mqtt_ein'    => 0,
+        'endpunkt_ein'        => 0,
+        'spotladen_ein'       => 0,
+        'spotladen_geraet'    => 1,
+        'spotladen_grenze_ct' => 25,     // Endpreis ct/kWh brutto - nicht der Boersenanteil
+        'spotladen_rang'      => 3,      // 0 = aus; sonst nur in den k guenstigsten Stunden
+        'spotladen_ziel'      => 80,     // Ziel-Ladezustand in Prozent
+        'spotladen_watt'      => 0,      // Ladeleistung - Pflicht (0 = nicht eingestellt)
+        'ausgleich_ein'       => 0,
+        'ausgleich_start_mv'  => 80,     // Zelldrift, ab der ausgeloest wird
+        'ausgleich_rueck_mv'  => 30,     // Rueckkehrschwelle
+        'ausgleich_watt'      => 0,      // Ladeleistung - Pflicht
+        'ausgleich_max_min'   => 240,    // Hoechstdauer in Minuten
+        'ausgleich_abstand_tage' => 7,   // fruehestens wieder nach
     );
 }
 
@@ -760,10 +919,21 @@ function bm_wert_grenzen()
         'zeitueberschreitung' => array(1, 30),
         'drift_warnung'       => array(1, 2000),
         'temp_max'            => array(0, 100),
-        'temp_min'            => array(0, 100),
+        'temp_min'            => array(-30, 30),   // Gruppe 31 (E3): Kaeltegrenze auch unter 0 Grad
         'evcc_geraet'         => array(1, 99),
         'evcc_ladewatt'       => array(0, 30000),
         'wache_fenster_min'   => array(1, 120),    // Energie-1 C1
+        // Gruppe 31 (Entwurf 2.6.3 und 7.4)
+        'spotladen_geraet'    => array(1, 99),
+        'spotladen_grenze_ct' => array(-20, 100),
+        'spotladen_rang'      => array(0, 48),
+        'spotladen_ziel'      => array(20, 100),
+        'spotladen_watt'      => array(0, 30000),
+        'ausgleich_start_mv'  => array(20, 500),
+        'ausgleich_rueck_mv'  => array(5, 490),
+        'ausgleich_watt'      => array(0, 30000),
+        'ausgleich_max_min'   => array(30, 720),
+        'ausgleich_abstand_tage' => array(1, 60),
     );
 }
 
@@ -786,7 +956,9 @@ function bm_wert_pruefen($schluessel, $wert)
         if (is_array($wert) || is_object($wert) || is_bool($wert) || $wert === null) {
             return sprintf(bm_t('EINST.FEHLER_ZAHL'), $schluessel);
         }
-        if (preg_match('/^[0-9]+$/', trim((string) $wert)) !== 1) {
+        // Gruppe 31 (E3): ein Minus nur bei Schluesseln mit negativer Untergrenze (temp_min, Preisgrenze).
+        $bm_muster = ($grenzen[$schluessel][0] < 0) ? '/^-?[0-9]+$/' : '/^[0-9]+$/';
+        if (preg_match($bm_muster, trim((string) $wert)) !== 1) {
             return sprintf(bm_t('EINST.FEHLER_ZAHL'), $schluessel);
         }
         $z = (int) $wert;
@@ -800,6 +972,10 @@ function bm_wert_pruefen($schluessel, $wert)
         case 'mqtt_ein':
         case 'steuerung_ein':
         case 'evcc_ein':
+        case 'befehle_mqtt_ein':   // Gruppe 31
+        case 'endpunkt_ein':
+        case 'spotladen_ein':
+        case 'ausgleich_ein':
             return in_array((string) $wert, array('0', '1'), true)
                 ? '' : sprintf(bm_t('EINST.FEHLER_ZAHL'), $schluessel);
         case 'mitschnitt_bis':
@@ -1001,6 +1177,27 @@ function bm_profil_pruefen($pr)
             }
         }
     }
+    /* Gruppe 31 (N4/N5): 'leer' ist eine Zahl oder eine Liste von Zahlen, 'optional' an einem Leseblock
+     * true oder false. */
+    foreach (array('felder', 'rechnung') as $ab) {
+        foreach ((array) (isset($pr[$ab]) ? $pr[$ab] : array()) as $fn => $fd) {
+            if (!is_array($fd) || !isset($fd['leer'])) {
+                continue;
+            }
+            foreach ((array) $fd['leer'] as $bm_l) {
+                if (!is_int($bm_l) && !(is_string($bm_l) && preg_match('/^[0-9]{1,10}\z/', $bm_l))) {
+                    $bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL_LEER'), bm_e((string) $fn));
+                    break;
+                }
+            }
+        }
+    }
+    foreach ((array) (isset($pr['bloecke']) ? $pr['bloecke'] : array()) as $bm_b) {
+        if (is_array($bm_b) && isset($bm_b['optional']) && !is_bool($bm_b['optional'])) {
+            $bean[] = bm_t('EINST.FEHLER_PROFIL_OPTIONAL');
+            break;
+        }
+    }
     foreach (bm_profil_doppelregister($pr) as $dr) {
         $bean[] = bm_e($dr);
     }
@@ -1027,7 +1224,7 @@ function bm_einmal_lesen()
         return null;
     }
     $aus = array();
-    foreach (array('meldungen', 'fehler') as $k) {
+    foreach (array('meldungen', 'fehler', 'warnungen') as $k) {   // Gruppe 31: warnungen (gelb, B13)
         $aus[$k] = array();
         if (isset($d[$k]) && is_array($d[$k])) {
             foreach ($d[$k] as $m) {
@@ -1067,13 +1264,17 @@ function bm_eingabe_felder($form)
             'skalar' => array('intervall', 'zelltakt', 'zeitueberschreitung', 'drift_warnung',
                               'verlauf_tage', 'temp_max', 'temp_min', 'totmann', 'soc_min', 'soc_max',
                               'schreibbremse', 'wartezeit', 'evcc_geraet', 'evcc_ladewatt',
-                              'wache_fenster_min', 'wache_erlaubt', 'fuehrung'),
+                              'wache_fenster_min', 'wache_erlaubt', 'fuehrung',
+                              // Gruppe 31: Spotpreis-Laden im Plugin und Ausgleichsladen
+                              'spotladen_geraet', 'spotladen_grenze_ct', 'spotladen_rang', 'spotladen_ziel',
+                              'spotladen_watt', 'ausgleich_start_mv', 'ausgleich_rueck_mv', 'ausgleich_watt',
+                              'ausgleich_max_min', 'ausgleich_abstand_tage'),
             'haken'  => array('steuerung_ein', 'evcc_ein', 'wache_ein', 'wache_lb_melden',
-                              'wache_sperren_ein'),
+                              'wache_sperren_ein', 'spotladen_ein', 'ausgleich_ein'),
             'zeilen' => array('g_name', 'g_profil', 'g_ip', 'g_port', 'g_unit', 'g_dev', 'g_baud',
                               'g_nennkapaz', 'g_max_laden', 'g_max_entladen', 'g_vorzeichen',
                               'g_schreiben')),
-        'mqtt'      => array('skalar' => array('mqtt_topic'), 'haken' => array('mqtt_ein'),
+        'mqtt'      => array('skalar' => array('mqtt_topic'), 'haken' => array('mqtt_ein', 'befehle_mqtt_ein'),
                              'zeilen' => array()),
         'trocken'   => array('skalar' => array('test_geraet', 'test_watt'), 'haken' => array(),
                              'zeilen' => array()),
@@ -1372,12 +1573,32 @@ function bm_config()
     bm_konfig_lage($zustand === 'ok' ? 'ok' : $zustand);
 
     $d = json_decode($roh, true);
+    /* Gruppe 31 (E-E13, E-E5): Lese-Regel fuer den Bestand - eine eingerichtete Datei ohne endpunkt_ein
+     * behaelt den HTTP-Lesezweig (1), ohne mqtt_ein bleibt MQTT aus (0, wie vor 0.9.38). Keine Datei oder
+     * "{}" (Neuinstallation): die Vorgaben. */
+    if (is_array($d) && $d) {
+        $bm_eingerichtet = bm_endpunkt_lese_regel(array_diff_key($d, array('endpunkt_ein' => 1)));
+        if (!array_key_exists('mqtt_ein', $d) && !empty($bm_eingerichtet['endpunkt_ein'])) {
+            $d['mqtt_ein'] = 0;
+        }
+        $d = bm_endpunkt_lese_regel($d);
+    }
     $cfg = array_merge(bm_vorgaben(), is_array($d) ? $d : array());
     // Die EVCC-Felder werden hier begrenzt und nicht erst beim Benutzen: sie
     // koennen auch aus einer von Hand bearbeiteten Datei kommen.
     $cfg['evcc_ein']      = empty($cfg['evcc_ein']) ? 0 : 1;
     $cfg['evcc_geraet']   = max(1, min(99, (int) $cfg['evcc_geraet']));
     $cfg['evcc_ladewatt'] = max(0, min(30000, (int) $cfg['evcc_ladewatt']));
+    // Gruppe 31: die neuen Haken tragen 0 oder 1, die Zahlen bleiben in ihren Grenzen.
+    foreach (bm_haken_g31() as $bm_hk) {
+        $cfg[$bm_hk] = empty($cfg[$bm_hk]) ? 0 : 1;
+    }
+    foreach (array('spotladen_geraet', 'spotladen_grenze_ct', 'spotladen_rang', 'spotladen_ziel',
+                   'spotladen_watt', 'ausgleich_start_mv', 'ausgleich_rueck_mv', 'ausgleich_watt',
+                   'ausgleich_max_min', 'ausgleich_abstand_tage') as $bm_zk) {
+        $bm_gr = bm_wert_grenzen()[$bm_zk];
+        $cfg[$bm_zk] = max($bm_gr[0], min($bm_gr[1], (int) $cfg[$bm_zk]));
+    }
     return $cfg;
 }
 
@@ -2433,7 +2654,10 @@ function bm_dienst($befehl)
     // Sonderzeichen und laesst ein Leerzeichen im Pfad unangetastet - der
     // Aufruf zerfiele dann in zwei Worte. Hausregel aus AudiConnect.
     @exec(escapeshellarg($skript) . ' ' . escapeshellarg($befehl) . ' 2>&1', $ausgabe, $code);
-    return array($code === 0 ? 1 : 0, implode("\n", $ausgabe));
+    /* Gruppe 31 (B13, nur die Meldung): das dritte Feld ist der Rueckgabewert von dienst.sh - 3 heisst
+     * "angehalten, aber ein Zwang ist nicht zurueckgenommen", 4 "nicht zuruecknehmbar" (E2). Die
+     * Oberflaeche zeigt beides gelb statt rot. */
+    return array($code === 0 ? 1 : 0, implode("\n", $ausgabe), (int) $code);
 }
 
 /* ==================================================================
@@ -2526,11 +2750,11 @@ function bm_befehl_absetzen($befehl, $wartezeit = null)
     $wartezeit = max(0, min(30, (int) $wartezeit));
     list($ok, $kennung) = bm_befehl_ablegen($befehl);
     if (!$ok) {
-        return array(0, $kennung);
+        return array(0, $kennung, 0, '', '');
     }
     $a = bm_befehl_antworten(array($kennung), $wartezeit);
     return isset($a[$kennung]) ? $a[$kennung]
-        : array(2, sprintf(bm_t('DIENST.KEINE_ANTWORT'), $wartezeit));
+        : array(2, sprintf(bm_t('DIENST.KEINE_ANTWORT'), $wartezeit), 0, 'keine_antwort', '');
 }
 
 /**
@@ -2547,8 +2771,8 @@ function bm_befehl_ablegen($befehl)
     if (bm_dienst_pid() === 0) {
         return array(0, bm_t('TEST.M_DIENST_LAEUFT_NICHT'));
     }
-    $p = bm_paths();
-    $ordner = $p['datadir'] . '/befehle';
+    // Gruppe 31 (N1): die Warteschlange des Dienstes liegt in auftraege/ - befehle/ gehoert der Befehlsbruecke.
+    $ordner = bm_auftraege_ordner();
     if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) {
         return array(0, sprintf(bm_t('DIENST.ORDNER_WARTESCHLANGE'), $ordner));
     }
@@ -2584,10 +2808,14 @@ function bm_befehl_antworten(array $kennungen, $wartezeit)
             if (is_file($antwort)) {
                 $a = bm_json_lesen($antwort);
                 @unlink($antwort);
-                // X-7: drittes Feld 1 = unveraendert, nichts gesendet.
-                $aus[$kennung] = array((int) (isset($a['ok']) ? $a['ok'] : 0),
+                // X-7: drittes Feld 1 = unveraendert, nichts gesendet. Gruppe 31 (N7/N6): viertes Feld 'bremse',
+                // wenn der Dienst mit 2 geantwortet hat (Schreibbremse, Nachholmappe); fuenftes die ASCII-Quittung.
+                $ok = (int) (isset($a['ok']) ? $a['ok'] : 0);
+                $aus[$kennung] = array($ok,
                                        (string) (isset($a['meldung']) ? $a['meldung'] : ''),
-                                       empty($a['unveraendert']) ? 0 : 1);
+                                       empty($a['unveraendert']) ? 0 : 1,
+                                       $ok === 2 ? 'bremse' : '',
+                                       (isset($a['quittung']) && is_string($a['quittung'])) ? $a['quittung'] : '');
                 unset($offen[$j]);
             }
         }
@@ -3741,6 +3969,25 @@ function bm_wert_aus(array $regs, array $feld)
     }
     $typ = isset($feld['typ']) ? $feld['typ'] : 'u16';
     $roh = $regs[$reg];
+    /* Gruppe 31 (N4): 'leer' - Rohwert oder Liste von Rohwerten, die "kein Wert" bedeuten (Sungrow 0xFFFF bei
+     * u16, 0x7FFF bei s16, 0x7FFFFFFF bei s32; Victron 0 fuer einen ungueltigen dbus-Wert). Verglichen wird
+     * der UNVERARBEITETE Wert (bei 32 Bit beide Worte in der Reihenfolge des Profils, ohne Vorzeichen). Bis
+     * 0.9.37 gingen solche Werte als Messwert durch (Probe P2/P3: SOH 6553,5 %, TBAT 3276,7 Grad). */
+    if (isset($feld['leer'])) {
+        $bm_vgl = $roh;
+        if ($typ === 'u32' || $typ === 's32' || $typ === 'f32') {
+            if (!isset($regs[$reg + 1])) {
+                return null;
+            }
+            $bm_vgl = (isset($feld['wort']) && $feld['wort'] === 'nieder')
+                ? (($regs[$reg + 1] << 16) | $regs[$reg]) : (($regs[$reg] << 16) | $regs[$reg + 1]);
+        }
+        foreach ((array) $feld['leer'] as $bm_l) {
+            if (is_numeric($bm_l) && (int) $bm_l === (int) $bm_vgl) {
+                return null;
+            }
+        }
+    }
 
     /* B13: bis 0.9.15 hatte der switch darunter kein default. Ein vertippter
      * oder anders geschriebener Typ ('S16', 'int16', 'i16') fiel still auf
@@ -4118,14 +4365,16 @@ function bm_abo_datei($praefix, $schreiben = false)
 
 function bm_abo_text()
 {
+    /* Gruppe 31 (Entscheidung 3): die Weiche des MQTT-Gateways V2 - unter Gateway V1 das Abo <praefix>/#
+     * (Abo-Datei, Rueckfall), unter Gateway V2 die Datenpunkte der Hakenliste anhaken; nicht feststellbar: beides. */
     $m = bm_mqtt_zustand();
     $f = isset($m['fassung']) ? (int) $m['fassung'] : 0;
+    $cfg = bm_config();
+    $text = bm_gateway_info((string) $cfg['mqtt_topic']);
     if ($f <= 0) {
-        return bm_t('MQTT.ABO_UNBEKANNT');
+        return $text;
     }
-    $gemessen = ' <span class="sm-mono">'
-              . sprintf(bm_t('MQTT.ABO_GEMESSEN'), $f) . '</span>';
-    return bm_t($f >= 2 ? 'MQTT.ABO_V2' : 'MQTT.ABO_WARNUNG') . $gemessen;
+    return $text . ' <span class="sm-mono">' . sprintf(bm_t('MQTT.ABO_GEMESSEN'), $f) . '</span>';
 }
 
 
@@ -4935,39 +5184,44 @@ function bm_mqtt_paare(array $abbild, $melden = true, $cfg = null)
     }
     $geraete = (isset($abbild['geraete']) && is_array($abbild['geraete']))
         ? $abbild['geraete'] : array();
+    // Gruppe 31 (-1-Regel, Fall c): die Speicher, deren Ausfall dieser Durchlauf meldet (vom Dienst, nur zum Senden).
+    $ausfall = (isset($abbild['ausfall']) && is_array($abbild['ausfall'])) ? $abbild['ausfall'] : array();
     $paare = array(
         'ok'      => (int) (isset($abbild['ok']) ? $abbild['ok'] : 0),
         'geraete' => count($geraete),
-        /* Der Zeitstempel des Abbilds - neu in 0.9.7.
-         *
-         * Der Endpunkt fuer den Miniserver liefert seit jeher ALTER; der
-         * MQTT-Zweig lieferte nichts dergleichen. Bei einem Push-Weg ist das
-         * Alter zum Sendezeitpunkt auch immer 0 - was fehlte, ist der
-         * Zeitstempel, aus dem sich das Alter auf der Gegenseite bilden laesst.
-         *
-         * Ohne ihn ist ein toter Dienst von einem gesunden nicht zu
-         * unterscheiden: es wird schlicht nichts mehr gesendet, die zuletzt
-         * gesendeten Werte stehen weiter im Broker, und geraetN/ok behaelt die
-         * 1, die es zuletzt hatte. Das ist die stille Falschaussage, und die
-         * ist schlimmer als eine Fehlermeldung.
+        /* Der Zeitstempel des Abbilds - neu in 0.9.7. Seit 0.9.38 traegt das
+         * Lebenszeichen status/* im festen 60-s-Takt die Aussage "der Dienst
+         * lebt" (bm_lebenszeichen_paare()); ok/ts/geraete bleiben fuer fremde
+         * Abos und EVCC-Anleitungen (E-E4).
          *
          * Loxone rechnet in Sekunden seit dem 01.01.2009. Das Alter ergibt
-         * sich dort als (Loxone-Zeit + 1230768000) - ts. Der Satz steht auch
-         * im Reiter Einbindung in Loxone. */
+         * sich dort als (Loxone-Zeit + 1230768000) - ts. */
         'ts'      => (int) (isset($abbild['ts']) ? $abbild['ts'] : 0),
     );
-    /* Diese Geraetethemen gehen retained hinaus und tragen, was das BMS
-     * meldet. Ist der Abruf gescheitert (ok=0), meldet es nichts - dann gehen
-     * sie gar nicht hinaus, und im Broker bleibt der letzte gemessene Stand.
-     * Bis 0.9.27 ging hier ein retained '-' (bm_mqtt_nutzlast()) ueber den
-     * Geraetestand: eine Aussage des Dienstes ("weiss ich nicht") in einem
-     * Geraetethema (Regeln/07, Abschnitt 3, "Ueber MQTT geht bei einer
-     * Stoerung nur das Signal hinaus, nicht die Werte"; in WSL gemessen,
-     * Pruefung-BatterieBMS-0.9.28, Faelle R13/R14). */
+    /* Die -1-Regel (Gruppe 31, Entscheidung 3, Hausform G16 ff.; N15: der Kopf
+     * sagte bis 0.9.37 "ist der Abruf gescheitert, gehen sie gar nicht hinaus" -
+     * das stimmte nur, weil die Felder null waren). Drei Faelle:
+     *  (a) Abruf gelungen, Feld fehlt (das Profil liefert es nicht oder ein
+     *      Leerwert, N4): Zahl -1, Temperatur -999 - "kein Wert", keine Stoerung.
+     *  (b) einzelner Aussetzer (ok = 0, nicht laenger als bm_ok_grenze()): wie
+     *      bisher - die Messwerte gehen nicht hinaus und bleiben im Broker und im
+     *      Virtuellen Eingang stehen, geraetN/ok = 0 sagt es (Regeln/07, "nur das
+     *      Signal", Faelle R13/R14 von 0.9.28).
+     *  (c) Ausfall (ok = 0 laenger als bm_ok_grenze()): EINMAL je Ausfall alle
+     *      fluechtigen Zahlenthemen dieses Speichers auf -1 bzw. -999; die
+     *      zurueckbehaltenen Zustaende (fehler, warnung, modus, bmsalarm*,
+     *      sollwert, sollart, sollquelle) bleiben - zuletzt bekannter Stand,
+     *      geraetN/ok und status/ok sagen "alt". Modul- und Zellthemen bekommen
+     *      kein -1 (wechselnde Menge). Fehler- und Alarmtext tragen beim Ausfall
+     *      den Klartext des Abrufs (sie beschreiben ihn) und gehen nicht auf "-".
+     * pbat/ibat: -1 kann auch ein echter Wert sein - mit geraetN/ok lesen. */
     $nurBeiAntwort = array('fehler' => true, 'warnung' => true, 'modus' => true);
+    $sp = bm_spotladen_lesen();
+    $ag = bm_ausgleich_lesen();
     foreach ($geraete as $nr => $e) {
         $vor = 'geraet' . (int) $nr;
         $geraetOk = !empty($e['ok']);
+        $meldeAusfall = !$geraetOk && in_array((int) $nr, $ausfall, true);
         foreach (array('SOC' => 'soc', 'SOH' => 'soh', 'UBAT' => 'ubat', 'IBAT' => 'ibat',
                        'PBAT' => 'pbat', 'TMAX' => 'tmax', 'TMIN' => 'tmin',
                        'UZMAX' => 'uzmax', 'UZMIN' => 'uzmin', 'UZDIFF' => 'uzdiff',
@@ -4975,11 +5229,17 @@ function bm_mqtt_paare(array $abbild, $melden = true, $cfg = null)
                        'ZELLEN' => 'zellen', 'FEHLER' => 'fehler', 'WARNUNG' => 'warnung',
                        'MODUS' => 'modus', 'UZMINMOD' => 'uzminmod',
                        'UZMINZELLE' => 'uzminzelle', 'RESTKWH' => 'restkwh',
-                       'RESTZEIT' => 'restzeit', 'ALARM' => 'alarm') as $feld => $thema) {
+                       'RESTZEIT' => 'restzeit', 'ALARM' => 'alarm', 'TBAT' => 'tbat') as $feld => $thema) {
             if (!$geraetOk && isset($nurBeiAntwort[$thema])) {
                 continue;
             }
-            $paare[$vor . '/' . $thema] = isset($e[$feld]) ? $e[$feld] : null;
+            $w = isset($e[$feld]) ? $e[$feld] : null;
+            if ($geraetOk && $w === null) {
+                $w = bm_mqtt_fehlwert($thema);                       // (a)
+            } elseif ($meldeAusfall && $thema !== 'alarm') {
+                $w = bm_mqtt_fehlwert($thema);                       // (c)
+            }
+            $paare[$vor . '/' . $thema] = $w;
         }
         $paare[$vor . '/alarmtext'] = isset($e['alarmtext']) ? $e['alarmtext'] : null;
         /* Der Geraetealarm neben dem Sammelmerker (Klasse E, 19.09.2026).
@@ -5007,14 +5267,40 @@ function bm_mqtt_paare(array $abbild, $melden = true, $cfg = null)
         $paare[$vor . '/sollwert_alter'] = (int) (isset($e['sollwert_alter'])
             ? $e['sollwert_alter'] : -1);
         $paare[$vor . '/sollart'] = bm_sollart($soll);
+        /* Gruppe 31: Temperaturschutz (0 frei, 1 TEMP_MIN, 2 TEMP_MAX, -1 ungeprueft) aus dem letzten Durchlauf,
+         * fuer die Aktion "laden"; Ausgleichsladen (0 bereit, 1 laeuft, 2 abgebrochen, -1 aus) und
+         * Spotpreis-Laden (0 wartet, 1 laedt, 2 gesperrt, -1 aus/ohne Preis) - Zustaende, retained. */
+        $paare[$vor . '/temp_schutz'] = bm_temp_schutz_zahl($e, $cfg);
+        if (empty($cfg['ausgleich_ein'])) {
+            $paare[$vor . '/ausgleich'] = -1;
+        } elseif (!empty($ag['laeuft'])) {
+            $paare[$vor . '/ausgleich'] = ((int) $ag['geraet'] === (int) $nr) ? 1 : 0;
+        } else {
+            $paare[$vor . '/ausgleich'] = isset($ag['wert']) ? max(-1, min(2, (int) $ag['wert'])) : 0;
+        }
+        $paare[$vor . '/spotladen'] = (!empty($cfg['spotladen_ein']) && isset($sp['geraet'], $sp['wert'])
+            && (int) $sp['geraet'] === (int) $nr) ? max(-1, min(2, (int) $sp['wert'])) : -1;
         foreach ((array) (isset($e['module']) ? $e['module'] : array()) as $m => $md) {
             $mv = $vor . '/modul/' . (int) $m;
             $paare[$mv . '/uzmax'] = isset($md['uzmax']) ? $md['uzmax'] : null;
             $paare[$mv . '/uzmin'] = isset($md['uzmin']) ? $md['uzmin'] : null;
             $paare[$mv . '/uzdiff'] = isset($md['uzdiff']) ? $md['uzdiff'] : null;
             $paare[$mv . '/tmax'] = isset($md['tmax']) ? $md['tmax'] : null;
-            foreach ((array) (isset($md['zellen']) ? $md['zellen'] : array()) as $z => $wert) {
+            $zl = (array) (isset($md['zellen']) ? $md['zellen'] : array());
+            foreach ($zl as $z => $wert) {
                 $paare[$mv . '/zelle/' . (int) $z] = $wert;
+            }
+            /* Gruppe 31 (Entscheidung 4, E-E6): die Zellansicht kompakt je Modul - "3312;3315;3309;..." (mV in der
+             * Reihenfolge der Zellnummern, eine fehlende Zelle "-", hoechstens 32 Werte). Fuer das Dashboard
+             * (abonniert <praefix>/+/modul/+/zellen direkt am Broker: 8 Themen statt 128); nicht in der
+             * V2-Hakenliste. Die Einzelthemen bleiben. */
+            if ($zl) {
+                $hoechste = min(32, max(array_map('intval', array_keys($zl))));
+                $liste = array();
+                for ($z = 1; $z <= $hoechste; $z++) {
+                    $liste[] = (isset($zl[$z]) && is_numeric($zl[$z])) ? (string) (0 + $zl[$z]) : '-';
+                }
+                $paare[$mv . '/zellen'] = implode(';', $liste);
             }
         }
     }
@@ -5088,6 +5374,9 @@ function bm_mqtt_zustandsthemen()
         'sollart',      // derselbe als Zahl
         'sollquelle',   // wer ihn gesetzt hat
         'mode',         // evcc/mode
+        'temp_schutz',  // Gruppe 31: Temperaturschutz (0/1/2, -1)
+        'ausgleich',    // Gruppe 31: Ausgleichsladen (0/1/2, -1)
+        'spotladen',    // Gruppe 31: Spotpreis-Laden im Plugin (0/1/2, -1)
     );
 }
 
@@ -5102,6 +5391,11 @@ function bm_mqtt_retained($thema)
 function bm_mqtt_themen()
 {
     return array(
+        // Gruppe 31: das Lebenszeichen des Dienstes im festen 60-s-Takt (nie retained; status/ok Noncached).
+        'status/zaehler'           => 'BM_MQTT.S_ZAEHLER',
+        'status/ok'                => 'BM_MQTT.S_OK',
+        'status/alter'             => 'BM_MQTT.S_ALTER',
+        'status/ts'                => 'BM_MQTT.S_TS',
         'ok'                       => 'BM_MQTT.OK',
         'geraete'                  => 'BM_MQTT.GERAETE',
         'ts'                       => 'BM_MQTT.TS',
@@ -5112,6 +5406,7 @@ function bm_mqtt_themen()
         'geraetN/pbat'             => 'BM_MQTT.PBAT',
         'geraetN/tmax'             => 'BM_MQTT.TMAX',
         'geraetN/tmin'             => 'BM_MQTT.TMIN',
+        'geraetN/tbat'             => 'BM_MQTT.TBAT',
         'geraetN/uzmax'            => 'BM_MQTT.UZMAX',
         'geraetN/uzmin'            => 'BM_MQTT.UZMIN',
         'geraetN/uzdiff'           => 'BM_MQTT.UZDIFF',
@@ -5123,6 +5418,7 @@ function bm_mqtt_themen()
         'geraetN/warnung'          => 'BM_MQTT.WARNUNG',
         'geraetN/modus'            => 'BM_MQTT.MODUS',
         'geraetN/ok'               => 'BM_MQTT.GOK',
+        'geraetN/alter'            => 'BM_MQTT.GALTER',
         'geraetN/ts'               => 'BM_MQTT.GTS',
         'geraetN/fehlertext'       => 'BM_MQTT.FEHLERTEXT',
         'geraetN/sollwert'         => 'BM_MQTT.SOLLWERT',
@@ -5137,11 +5433,15 @@ function bm_mqtt_themen()
         'geraetN/alarmtext'        => 'BM_MQTT.ALARMTEXT',
         'geraetN/bmsalarm'         => 'BM_MQTT.BMSALARM',
         'geraetN/bmsalarmtext'     => 'BM_MQTT.BMSALARMTEXT',
+        'geraetN/temp_schutz'      => 'BM_MQTT.TEMP_SCHUTZ',
+        'geraetN/ausgleich'        => 'BM_MQTT.AUSGLEICH',
+        'geraetN/spotladen'        => 'BM_MQTT.SPOTLADEN',
         'geraetN/modul/M/uzmax'    => 'BM_MQTT.M_UZMAX',
         'geraetN/modul/M/uzmin'    => 'BM_MQTT.M_UZMIN',
         'geraetN/modul/M/uzdiff'   => 'BM_MQTT.M_UZDIFF',
         'geraetN/modul/M/tmax'     => 'BM_MQTT.M_TMAX',
         'geraetN/modul/M/zelle/Z'  => 'BM_MQTT.M_ZELLE',
+        'geraetN/modul/M/zellen'   => 'BM_MQTT.M_ZELLEN',
         // Nur wenn EVCC eingeschaltet ist. Eigener Zweig, weil EVCC genau
         // diese Groessen liest und das Vorzeichen ANDERS zaehlt - siehe
         // bm_evcc_leistung().
@@ -5423,11 +5723,12 @@ function bm_mitschnitt_schalten($sekunden)
 /** Eine Zeile in den Mitschnitt. Tut nichts, solange er nicht laeuft. */
 function bm_mitschnitt($richtung, $roh, array $g = array())
 {
-    static $an = null, $bis = 0;
-    if ($an === null || time() > $bis) {
+    static $an = null, $bis = 0, $gelesen = 0;
+    if ($an === null || time() > $bis || time() - $gelesen >= 2) {
         $cfg = bm_config();
         $bis = (int) $cfg['mitschnitt_bis'];
         $an = ($bis > time());
+        $gelesen = time();
     }
     if (!$an) {
         return;
@@ -5445,8 +5746,7 @@ function bm_mitschnitt($richtung, $roh, array $g = array())
     $ziel = isset($g['name']) ? $g['name'] : '';
     @file_put_contents($d, '[' . date('H:i:s') . '] ' . $richtung . ' ' . $ziel . ' '
         . strlen((string) $roh) . ' B  ' . strtoupper(bin2hex(substr((string) $roh, 0, 128)))
-        . "
-", FILE_APPEND | LOCK_EX);
+        . "\n", FILE_APPEND | LOCK_EX);
 }
 
 /* ---------------- Modbus: Bits lesen (FC 1 und FC 2) ----------------
@@ -5614,7 +5914,7 @@ function bm_trockenlauf($nr, $aktion, $watt)
 function bm_selbsttest_endpunkt($aktion = 'status')
 {
     $p = bm_paths();
-    $url = 'http://127.0.0.1/plugins/' . $p['plugin'] . '/index.php?token='
+    $url = 'http://' . bm_webhost_lokal() . '/plugins/' . $p['plugin'] . '/index.php?token='
          . rawurlencode(bm_token()) . '&aktion=' . rawurlencode($aktion);
     $text = '';
     $code = 0;
@@ -5623,6 +5923,7 @@ function bm_selbsttest_endpunkt($aktion = 'status')
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_TIMEOUT, 8);
         curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 4);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
         $text = (string) curl_exec($ch);
         $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $fehler = curl_error($ch);
@@ -5636,7 +5937,7 @@ function bm_selbsttest_endpunkt($aktion = 'status')
         }
     } elseif (ini_get('allow_url_fopen')) {
         $ctx = stream_context_create(array('http' => array('timeout' => 8,
-            'ignore_errors' => true)));
+            'ignore_errors' => true, 'follow_location' => 0)));
         $text = (string) @file_get_contents($url, false, $ctx);
         $code = 0;
         /* C11: die vordefinierte Variable der Antwortkopfzeilen ist in PHP 8.5
@@ -5658,15 +5959,18 @@ function bm_selbsttest_endpunkt($aktion = 'status')
     } else {
         return array(-1, 0, bm_t('TEST.A_EP_NICHT_MESSBAR'), $url);
     }
-    $erste = trim(strtok($text, "
-"));
+    $erste = trim(strtok($text, "\n"));
     $gut = ($code === 200) && (strpos($erste, 'BMS;') === 0 || strpos($erste, 'LISTE;') === 0
                                || strpos($erste, 'SUMME;') === 0);
     /* Seit B51 antwortet der Endpunkt ohne Daten mit 503 und nennt den Grund.
      * Das ist die vorgesehene Antwort, keine falsche - sonst stuende auf jeder
-     * Anlage ohne eingerichteten Speicher hier ein Kreuz. */
+     * Anlage ohne eingerichteten Speicher hier ein Kreuz. Gruppe 31: ebenso 403
+     * ENDPUNKT_AUS, wenn der Lesezweig abgeschaltet ist (endpunkt_ein = 0). */
     if (!$gut && $code === 503 && strpos($erste, ';GRUND=') !== false
         && (strpos($erste, 'BMS;') === 0 || strpos($erste, 'SUMME;') === 0)) {
+        $gut = true;
+    }
+    if (!$gut && $code === 403 && $erste === 'BMS;OK=0;GRUND=ENDPUNKT_AUS') {
         $gut = true;
     }
     return array($gut ? 1 : 0, $code, $erste !== '' ? $erste : bm_t('TEST.A_EP_LEER'), $url);
@@ -6223,4 +6527,1447 @@ function bm_wachposten()
         return bm_t('WACHE.FALSCH');
     }
     return '';
+}
+
+/* ==================================================================
+ * Gruppe 31 (0.9.38): Temperaturschutz beim Zwang (Entscheidung 2, Vorrang)
+ *
+ * Zweite Linie hinter dem BMS: ein Lade- oder Entladezwang wird abgewiesen
+ * bzw. zurueckgenommen, wenn die gemessene Zelltemperatur ausserhalb der
+ * Grenzen temp_min/temp_max liegt. Bauart marstek_schutz_pruefen() (Marstek
+ * Venus E 1.1.27): NUR ein frischer, plausibler Messwert sperrt; ein
+ * fehlender, alter oder unplausibler Wert sperrt NICHT und gibt auch nichts
+ * frei (er wird nur genannt).
+ *   laden    : TMIN < temp_min  -> TEMP_MIN ;  TMAX > temp_max -> TEMP_MAX
+ *   entladen : TMAX > temp_max  -> TEMP_MAX   (Entladen bei Kaelte bleibt frei)
+ * Fehlt TMIN bzw. TMAX, gilt TBAT (Sungrow und Victron melden teils nur die
+ * Pack-Temperatur - ohne Ersatz waere der Schutz dort stumm). sperren und
+ * automatik entnehmen bzw. laden nichts zusaetzlich und bleiben aussen vor.
+ * Vergleich streng (<, >) wie bm_alarm_geraet(): dieselbe Grenze meldet und
+ * sperrt. Kein Haken - der Schutz ist immer an; wer ihn praktisch abschalten
+ * will, setzt die Grenzen weit (temp_min -30, temp_max 100).
+ * ================================================================== */
+
+/** Eine Temperatur des Abbilds als Zahl - nur, wenn sie im Bereich von bm_status_felder() liegt (0x7FFF ist
+ *  3276,7 Grad und kein Messwert, N4). Sonst null. */
+function bm_temp_wert(array $e, $feld)
+{
+    if (!isset($e[$feld]) || !is_numeric($e[$feld])) {
+        return null;
+    }
+    $f = bm_status_felder();
+    $v = (float) $e[$feld];
+    return ($v < $f[$feld][2] || $v > $f[$feld][3]) ? null : $v;
+}
+
+/** Ist der Abbild-Eintrag frisch? ok = 1 und der letzte Erfolg hoechstens bm_ok_grenze() (3 Takte) alt. */
+function bm_temp_frisch(array $e, array $cfg, $jetzt = null)
+{
+    $jetzt = ($jetzt === null) ? time() : (int) $jetzt;
+    $ts = isset($e['ok_ts']) ? (int) $e['ok_ts'] : 0;
+    return !empty($e['ok']) && $ts > 0 && ($jetzt - $ts) >= 0 && ($jetzt - $ts) <= bm_ok_grenze($cfg);
+}
+
+/** Die Temperatur fuer Meldungen: eine Nachkommastelle, ohne ".0". */
+function bm_temp_zahl($v)
+{
+    $t = rtrim(rtrim(number_format((float) $v, 1, '.', ''), '0'), '.');
+    return $t === '-0' ? '0' : $t;
+}
+
+/**
+ * Das Urteil. Rueckgabe array(code, text, ascii):
+ *   code  '' frei | 'TEMP_MIN' | 'TEMP_MAX'
+ *   text  bei einer Sperre die Meldung (DIENST.TEMP_ZU_KALT/_WARM, mit Gradzeichen); sonst '' oder der Merker
+ *         'TEMP_UNGEPRUEFT' (Wert alt oder Abruf gescheitert) bzw. 'TEMP_UNBEKANNT' (keine Temperatur geliefert)
+ *   ascii dieselbe Meldung ohne Gradzeichen fuer die Quittung der Befehlsbruecke (N6: bb_grund_ascii() machte aus
+ *         dem Gradzeichen "__")
+ */
+function bm_temp_schutz($aktion, array $e, array $cfg, $frisch)
+{
+    if ($aktion !== 'laden' && $aktion !== 'entladen') {
+        return array('', '', '');
+    }
+    if (!$frisch) {
+        return array('', 'TEMP_UNGEPRUEFT', '');
+    }
+    $tmin = bm_temp_wert($e, 'TMIN');
+    $tmax = bm_temp_wert($e, 'TMAX');
+    $tbat = bm_temp_wert($e, 'TBAT');
+    if ($tmin === null) {
+        $tmin = $tbat;
+    }
+    if ($tmax === null) {
+        $tmax = $tbat;
+    }
+    if ($tmax !== null && $tmax > (int) $cfg['temp_max']) {
+        return array('TEMP_MAX', sprintf(bm_t('DIENST.TEMP_ZU_WARM'), bm_temp_zahl($tmax), (int) $cfg['temp_max']),
+            sprintf(bm_t('DIENST.TEMP_ZU_WARM_ASCII'), bm_temp_zahl($tmax), (int) $cfg['temp_max']));
+    }
+    if ($aktion === 'laden' && $tmin !== null && $tmin < (int) $cfg['temp_min']) {
+        return array('TEMP_MIN', sprintf(bm_t('DIENST.TEMP_ZU_KALT'), bm_temp_zahl($tmin), (int) $cfg['temp_min']),
+            sprintf(bm_t('DIENST.TEMP_ZU_KALT_ASCII'), bm_temp_zahl($tmin), (int) $cfg['temp_min']));
+    }
+    if ($tmin === null && $tmax === null) {
+        return array('', 'TEMP_UNBEKANNT', '');
+    }
+    return array('', '', '');
+}
+
+/** Der Wert fuer geraetN/temp_schutz aus dem letzten Durchlauf, fuer die Aktion "laden": 0 frei, 1 TEMP_MIN,
+ *  2 TEMP_MAX, -1 ungeprueft (Wert alt, Abruf gescheitert) oder keine Temperatur geliefert. */
+function bm_temp_schutz_zahl(array $e, array $cfg)
+{
+    list($code, $text) = bm_temp_schutz('laden', $e, $cfg, bm_temp_frisch($e, $cfg));
+    if ($code === 'TEMP_MIN') {
+        return 1;
+    }
+    if ($code === 'TEMP_MAX') {
+        return 2;
+    }
+    return ($text === '') ? 0 : -1;
+}
+
+/* ==================================================================
+ * Gruppe 31 (N1, Pflicht): die Warteschlange des Dienstes liegt in einem
+ * EIGENEN Ordner data/plugins/<ordner>/auftraege/. Bis 0.9.37 war es
+ * befehle/ - genau der Datenordner der Befehlsbruecke 1.0.1 (zustand.json,
+ * waechter.json, mosquitto/). bm_warteschlange() nahm JEDE *.json, loeschte
+ * sie und beantwortete sie: in der Probe probe_n1_g31 war nach EINEM Durchgang
+ * nur noch mosquitto/ da - die Bruecke haette alle 300 ms ihren Zustand und
+ * der Waechter seine Neustartbremse verloren (gleicher Befund wie Anker N1).
+ * Doppelt gesichert: eigener Ordner UND nur Dateinamen der eigenen Form
+ * (bin2hex(random_bytes(8)) = 16 Hexzeichen).
+ * ================================================================== */
+if (!defined('BM_AUFTRAG_MUSTER')) {
+    define('BM_AUFTRAG_MUSTER', '/^[0-9a-f]{16}\.json\z/');
+}
+
+function bm_auftraege_ordner()
+{
+    return bm_paths()['datadir'] . '/auftraege';
+}
+
+/** Gehoert diese Datei zur Warteschlange? Nur der Dateiname der eigenen Form. */
+function bm_auftrag_datei_gilt($datei)
+{
+    return preg_match(BM_AUFTRAG_MUSTER, basename((string) $datei)) === 1;
+}
+
+/* ==================================================================
+ * Gruppe 31 (B4d): die letzten Zeilen einer Datei, ohne sie ganz zu lesen.
+ * Bis 0.9.37 lasen der Reiter Logdateien und der Mitschnitt mit file() die
+ * GANZE Datei in den Speicher. Jetzt hoechstens die letzten $bytes, ab der
+ * ersten vollstaendigen Zeile. Rueckgabe: Zeilen in Dateireihenfolge, ohne
+ * Leerzeilen.
+ * ================================================================== */
+function bm_datei_ende($pfad, $bytes = 262144)
+{
+    $groesse = @filesize($pfad);
+    if ($groesse === false || $groesse <= 0) {
+        return array();
+    }
+    $fh = @fopen($pfad, 'rb');
+    if ($fh === false) {
+        return array();
+    }
+    $ab = max(0, $groesse - (int) $bytes);
+    if ($ab > 0) {
+        fseek($fh, $ab);
+    }
+    $roh = (string) stream_get_contents($fh);
+    fclose($fh);
+    if ($ab > 0) {
+        $nl = strpos($roh, "\n");
+        $roh = ($nl === false) ? '' : (string) substr($roh, $nl + 1);
+    }
+    $zeilen = array();
+    foreach (preg_split('/\r?\n/', $roh) as $z) {
+        if ($z !== '') {
+            $zeilen[] = $z;
+        }
+    }
+    return $zeilen;
+}
+
+/* ==================================================================
+ * Gruppe 31 (N12, E-E10): Schluessel, die eine Sicherung aus einer
+ * Vorfassung nicht kennt. Fehlen sie beim Zurueckspielen, gilt der
+ * GELTENDE Wert, nicht der Werkswert - eine Sicherung aus 0.9.37 setzte
+ * sonst endpunkt_ein auf 0, und der Bestand verloere still seinen
+ * HTTP-Lesezweig. Stehen sie in der Sicherung, gelten sie (das Zurueckspielen
+ * soll die Anlage wiederherstellen - auch die eingreifenden Haken).
+ * ================================================================== */
+function bm_sicherung_spaete_schluessel()
+{
+    return array('befehle_mqtt_ein', 'endpunkt_ein',
+        'spotladen_ein', 'spotladen_geraet', 'spotladen_grenze_ct', 'spotladen_rang', 'spotladen_ziel',
+        'spotladen_watt',
+        'ausgleich_ein', 'ausgleich_start_mv', 'ausgleich_rueck_mv', 'ausgleich_watt', 'ausgleich_max_min',
+        'ausgleich_abstand_tage');
+}
+
+/** Die Haken der 0.9.38 (0/1). */
+function bm_haken_g31()
+{
+    return array('befehle_mqtt_ein', 'endpunkt_ein', 'spotladen_ein', 'ausgleich_ein');
+}
+
+/* ==================================================================
+ * Gruppe 31 (Entscheidung 3, E-E2): MQTT-Gateway V2 - Namenstabelle,
+ * V2-Hakenliste, Noncached, Lebenszeichen status/*, -1-Regel.
+ *
+ * Gesendet wird wie bisher ueber den UDP-Eingang des MQTT-Gateways V2
+ * (bm_mqtt_senden()). Das Gateway V2 reicht nur Datenpunkte an den
+ * Miniserver weiter, die in seiner Hakenliste angehakt sind (Opt-In je
+ * Thema); Werte, die sich nicht aendern, kommen nach einem Neustart des
+ * Miniservers erst mit der naechsten Aenderung - ausser der Datenpunkt ist
+ * "Noncached". Deshalb gehoeren Namenstabelle und Hakenliste ins Plugin.
+ * Die Abo-Datei <praefix>/# bleibt der Rueckfall fuer Anlagen auf Gateway V1.
+ * ================================================================== */
+
+/** Der Name, unter dem das MQTT-Gateway (V2 wie V1) einen Wert an Loxone gibt: Praefix + "_" + Thema, "/", "%"
+ *  und Leerzeichen werden "_" (build_vi_name). EINE Stelle fuer Namenstabelle, Hakenliste und Bausteinliste. */
+function bm_gateway_name($praefix, $thema)
+{
+    return str_replace(array('/', '%', ' '), '_', (string) $praefix . '_' . (string) $thema);
+}
+
+/** Die Text-Themen (letzter Namensteil; Fehlwert "-" statt -1). Alles andere ist Zahl. */
+function bm_mqtt_textthemen()
+{
+    return array('alarmtext', 'bmsalarmtext', 'fehlertext', 'sollwert', 'sollquelle', 'mode');
+}
+
+/** Ist dieses Thema (ohne Praefix) ein Text? Modul-Zelllisten "modul/M/zellen" sind Text, geraetN/zellen
+ *  (die Zellzahl) ist eine Zahl. */
+function bm_mqtt_ist_text($thema)
+{
+    $thema = (string) $thema;
+    if (preg_match('#^geraet[0-9]+/modul/[0-9]+/zellen\z#', $thema) || preg_match('#modul/M/zellen\z#', $thema)) {
+        return true;
+    }
+    $teile = explode('/', $thema);
+    return in_array(end($teile), bm_mqtt_textthemen(), true);
+}
+
+/** Der Fehlwert "keine Aussage" eines Zahlenthemas: Temperaturen -999, sonst -1 (Hausform G16 ff.). */
+function bm_mqtt_fehlwert($thema)
+{
+    $teile = explode('/', (string) $thema);
+    return in_array(end($teile), array('tmax', 'tmin', 'tbat'), true) ? -999 : -1;
+}
+
+/** Die 16 Haken der V2-Hakenliste fuer das Musterprojekt (Speicher 1, Entwurf 2.7). */
+function bm_v2_haken()
+{
+    return array('status/zaehler', 'status/ok', 'geraetN/ok', 'geraetN/alter', 'geraetN/soc', 'geraetN/soh',
+        'geraetN/uzdiff', 'geraetN/tmax', 'geraetN/tmin', 'geraetN/pbat', 'geraetN/zyklen', 'geraetN/restkwh',
+        'geraetN/restzeit', 'geraetN/sollart', 'geraetN/fehler', 'geraetN/warnung');
+}
+
+/** Datenpunkte, die im Gateway V2 "Noncached" angehakt werden (Hausform "ok Noncached"). */
+function bm_v2_noncached()
+{
+    return array('status/ok', 'geraetN/ok');
+}
+
+/** Wo der Wert im Musterprojekt steht (Seiten "BatterieBMS" und "BatterieBMS Spotpreis-Laden"), Speicher 1. */
+function bm_mp_stellen()
+{
+    return array(
+        'status/zaehler' => 'BatterieBMS #40', 'geraetN/ok' => 'BatterieBMS #1, Spotpreis-Laden #1',
+        'geraetN/alter' => 'BatterieBMS #2', 'geraetN/soc' => 'BatterieBMS #3, Spotpreis-Laden #2',
+        'geraetN/soh' => 'BatterieBMS #4', 'geraetN/uzdiff' => 'BatterieBMS #5', 'geraetN/tmax' => 'BatterieBMS #6',
+        'geraetN/pbat' => 'BatterieBMS #22', 'geraetN/zyklen' => 'BatterieBMS #23',
+        'geraetN/restkwh' => 'BatterieBMS #24', 'geraetN/restzeit' => 'BatterieBMS #25',
+        'geraetN/sollart' => 'BatterieBMS #26, Spotpreis-Laden #19', 'geraetN/fehler' => 'BatterieBMS #27',
+        'geraetN/warnung' => 'BatterieBMS #28', 'geraetN/tmin' => 'BatterieBMS #29',
+    );
+}
+
+/** Wertebereich und Fehlwert je Stamm fuer die Namenstabelle (Text, kein HTML). */
+function bm_mqtt_bereich($stamm)
+{
+    if (bm_mqtt_ist_text($stamm)) {
+        return bm_t('MQTT.B_TEXT');
+    }
+    $fest = array(
+        'status/zaehler' => '0 … 999', 'status/ok' => '0 / 1', 'ok' => '0 / 1', 'geraetN/ok' => '0 / 1',
+        'status/alter' => bm_t('MQTT.B_SEKUNDEN'), 'geraetN/alter' => bm_t('MQTT.B_SEKUNDEN'),
+        'status/ts' => bm_t('MQTT.B_UNIX'), 'ts' => bm_t('MQTT.B_UNIX'), 'geraetN/ts' => bm_t('MQTT.B_UNIX'),
+        'geraetN/temp_schutz' => '0 / 1 / 2 (-1)', 'geraetN/ausgleich' => '0 / 1 / 2 (-1)',
+        'geraetN/spotladen' => '0 / 1 / 2 (-1)', 'geraetN/sollart' => '0 … 4',
+    );
+    if (isset($fest[$stamm])) {
+        return $fest[$stamm];
+    }
+    $teile = explode('/', $stamm);
+    return in_array(end($teile), array('tmax', 'tmin', 'tbat'), true) ? bm_t('MQTT.B_TEMPERATUR') : bm_t('MQTT.B_ZAHL');
+}
+
+/**
+ * Die Namenstabelle (Entwurf 2.7): je Thema aus bm_mqtt_themen() (EINE Quelle fuer Sendeliste, Reiter,
+ * Hakenliste und Bausteinliste) der Gateway-Name, die Bauform (Virtueller Eingang bzw. Texteingang), die
+ * Bedeutung, Wertebereich und Fehlwert, ob zurueckbehalten, ob in der V2-Hakenliste des Musterprojekts (16 Haken
+ * bei Speicher 1), ob "Noncached" und die Stelle im Musterprojekt. Speicher konkret aus dem Abbild (ohne Abbild
+ * Speicher 1 als Muster); Modul- und Zellthemen als Musterzeile ohne Kopierknopf.
+ */
+function bm_mqtt_namenstabelle($cfg)
+{
+    $w = (is_array($cfg) && isset($cfg['mqtt_topic'])) ? bm_mqtt_thema_saeubern((string) $cfg['mqtt_topic']) : '';
+    if ($w === '') {
+        $w = 'batteriebms';
+    }
+    $haken = bm_v2_haken();
+    $nc = bm_v2_noncached();
+    $mp = bm_mp_stellen();
+    $nummern = array_keys(bm_werte());
+    if (!$nummern) {
+        $nummern = array_keys(bm_geraete());
+    }
+    if (!$nummern) {
+        $nummern = array(1);
+    }
+    $aus = array();
+    foreach (bm_mqtt_themen() as $stamm => $bez) {
+        $konkret = array();
+        $muster = (strpos($stamm, '/modul/M/') !== false);
+        if (strpos($stamm, 'geraetN/') === 0) {
+            foreach ($nummern as $n) {
+                $konkret[] = array('geraet' . (int) $n . '/' . substr($stamm, 8), (int) $n === 1);
+            }
+        } else {
+            $konkret[] = array($stamm, true);
+        }
+        $text = bm_mqtt_ist_text($stamm);
+        foreach ($konkret as $k) {
+            $aus[] = array(
+                'thema' => $k[0], 'stamm' => $stamm, 'voll' => $w . '/' . $k[0],
+                'name' => bm_gateway_name($w, $k[0]), 'text' => $text, 'bez' => $bez,
+                'bereich' => bm_mqtt_bereich($stamm), 'fehlwert' => $text ? '-' : (string) bm_mqtt_fehlwert($stamm),
+                'retain' => bm_mqtt_retained($k[0]),
+                'haken' => $k[1] && in_array($stamm, $haken, true),
+                'noncached' => $k[1] && in_array($stamm, $nc, true),
+                'alt' => in_array($stamm, array('ok', 'ts', 'geraete'), true),
+                'muster' => $muster,
+                'mp' => ($k[1] && isset($mp[$stamm])) ? $mp[$stamm] : '',
+            );
+        }
+    }
+    return $aus;
+}
+
+/** Die Gatewayfassung aus der general.json: 2 (V2), 1 (V1) oder 0 (nicht feststellbar). */
+function bm_gateway_fassung()
+{
+    $m = bm_mqtt_zustand();
+    return isset($m['fassung']) ? max(0, (int) $m['fassung']) : 0;
+}
+
+/** Die Weiche fuer die Reiter (Regeln/07 xx_mqtt_gateway_info()): unter Gateway V1 das Abo <praefix>/#, unter
+ *  Gateway V2 die Datenpunkte der Hakenliste anhaken; unbekannt nennt beides. Rueckgabe HTML (Texte aus der
+ *  Sprachdatei, Praefix maskiert). */
+function bm_gateway_info($praefix)
+{
+    $f = bm_gateway_fassung();
+    $p = bm_e(bm_mqtt_thema_saeubern((string) $praefix));
+    if ($f >= 2) {
+        return sprintf(bm_t('MQTT.WEICHE_V2'), $p);
+    }
+    if ($f === 1) {
+        return sprintf(bm_t('MQTT.WEICHE_V1'), $p);
+    }
+    return sprintf(bm_t('MQTT.WEICHE_UNBEKANNT'), $p, $p);
+}
+
+/**
+ * Stehen status/ok und geraet1/ok im Gateway V2 "Noncached"? Nur lesen (config/system/subscriptions.json bzw.
+ * die Gateway-Datei der Anlage, je nachdem, was es gibt). Rueckgabe array(lage, fehlende Namen):
+ *   lage 'ok' | 'fehlt' | 'unbekannt' (keine Datei, Gateway nicht V2, MQTT aus)
+ * Fuer den Hinweis im healthcheck (Hausform "healthcheck meldet fehlende Noncached-Haken").
+ */
+function bm_v2_noncached_lage($cfg)
+{
+    if (empty($cfg['mqtt_ein']) || bm_gateway_fassung() < 2) {
+        return array('unbekannt', array());
+    }
+    $p = bm_paths();
+    if ($p['home'] === '') {
+        return array('unbekannt', array());
+    }
+    $roh = '';
+    foreach (array('/config/system/subscriptions.json', '/config/system/mqttgateway.json') as $f) {
+        if (is_readable($p['home'] . $f)) {
+            $roh .= (string) @file_get_contents($p['home'] . $f, false, null, 0, 4194304);
+        }
+    }
+    if ($roh === '') {
+        return array('unbekannt', array());
+    }
+    $w = bm_mqtt_thema_saeubern((string) $cfg['mqtt_topic']);
+    $fehlt = array();
+    foreach (array('status/ok', 'geraet1/ok') as $t) {
+        $name = bm_gateway_name($w, $t);
+        // Ein Eintrag, der den Namen bzw. das Thema traegt und in dessen Naehe "noncached" mit true/1 steht.
+        $treffer = false;
+        foreach (array($name, $w . '/' . $t) as $such) {
+            $pos = strpos($roh, '"' . $such . '"');
+            if ($pos !== false) {
+                $stueck = substr($roh, max(0, $pos - 200), 600);
+                if (preg_match('/"?noncached"?\s*[:=]\s*("?1"?|true)/i', $stueck)) {
+                    $treffer = true;
+                }
+            }
+        }
+        if (!$treffer) {
+            $fehlt[] = $name;
+        }
+    }
+    return array($fehlt ? 'fehlt' : 'ok', $fehlt);
+}
+
+/**
+ * Das Lebenszeichen status/* (Entwurf 2.3, Hausform Anker N4) im FESTEN 60-s-Takt - unabhaengig vom Abruftakt
+ * (5 bis 3600 s). Bei intervall 600 s meldete ein Zaehler je Durchlauf in der Validierung des Musterprojekts
+ * (Tmc 300 s) faelschlich "Lebenszeichen fehlt"; ob der Speicher liefert, sagen geraetN/ok und geraetN/alter.
+ *   status/zaehler  0 ... 999 umlaufend, je Lebenszeichen +1 (nur im Speicher des Dienstes)
+ *   status/ok       1 nur, wenn das Abbild ok = 1 meldet UND nicht aelter als bm_ok_grenze() ist
+ *   status/alter    Sekunden seit dem letzten Abbild, -1 noch keins
+ *   status/ts       Unixzeit des Lebenszeichens
+ *   geraetN/alter   Sekunden seit dem letzten erfolgreichen Abruf dieses Speichers, -1 nie
+ * Nie retained, am Aenderungsfilter vorbei. Rueckgabe: die Paare (Thema ohne Praefix => Wert).
+ */
+function bm_lebenszeichen_paare(array $cfg, $zaehler, $jetzt = null)
+{
+    $jetzt = ($jetzt === null) ? time() : (int) $jetzt;
+    $l = bm_loxone();
+    $ts = (is_array($l) && isset($l['ts'])) ? (int) $l['ts'] : 0;
+    $alter = $ts > 0 ? max(0, $jetzt - $ts) : -1;
+    $ok = (is_array($l) && !empty($l['ok']) && $alter >= 0 && $alter <= bm_ok_grenze($cfg)) ? 1 : 0;
+    $paare = array('status/zaehler' => ((int) $zaehler) % 1000, 'status/ok' => $ok,
+                   'status/alter' => $alter, 'status/ts' => $jetzt);
+    $geraete = (is_array($l) && isset($l['geraete']) && is_array($l['geraete'])) ? $l['geraete'] : array();
+    foreach ($geraete as $nr => $e) {
+        $okts = isset($e['ok_ts']) ? (int) $e['ok_ts'] : 0;
+        $paare['geraet' . (int) $nr . '/alter'] = $okts > 0 ? min(86400, max(0, $jetzt - $okts)) : -1;
+    }
+    return $paare;
+}
+
+/** Zeilen roh an den UDP-Eingang des MQTT-Gateways V2 schicken (publish, nie retain) - fuer das Lebenszeichen.
+ *  Rueckgabe: Zahl der gesendeten Zeilen, -1 ohne Sockets/Port. */
+function bm_mqtt_udp_publish(array $paare, $praefix)
+{
+    if (!function_exists('socket_create')) {
+        return -1;
+    }
+    $z = bm_mqtt_zustand();
+    if (!$z['udpport']) {
+        return -1;
+    }
+    $s = @socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
+    if (!$s) {
+        return -1;
+    }
+    $n = 0;
+    foreach ($paare as $k => $v) {
+        $thema = bm_mqtt_thema_saeubern($praefix . '/' . $k);
+        $wert = bm_mqtt_wert_saeubern($v);
+        if ($thema === '' || $wert === '') {
+            continue;
+        }
+        $msg = 'publish ' . $thema . ' ' . $wert;
+        @socket_sendto($s, $msg, strlen($msg), 0, '127.0.0.1', $z['udpport']);
+        usleep(BM_MQTT_PAUSE_US);
+        $n++;
+    }
+    socket_close($s);
+    return $n;
+}
+
+/** Das Lebenszeichen senden (nur mit "Werte ueber MQTT"). $zaehler zaehlt der Dienst weiter. */
+function bm_lebenszeichen_senden(array $cfg, &$zaehler)
+{
+    if (empty($cfg['mqtt_ein'])) {
+        return 0;
+    }
+    $w = bm_mqtt_thema_saeubern((string) $cfg['mqtt_topic']);
+    if ($w === '') {
+        $w = 'batteriebms';
+    }
+    $n = bm_mqtt_udp_publish(bm_lebenszeichen_paare($cfg, $zaehler), $w);
+    $zaehler = ((int) $zaehler + 1) % 1000;
+    return $n;
+}
+
+/* ==================================================================
+ * Gruppe 31 (Entscheidung 3, E-E13): endpunkt_ein - der Lesezweig des
+ * HTTP-Endpunkts fuer Loxone (status, zellen, liste, summe, roh). Lese-Regel
+ * fuer den Bestand: eine Datei, die schon etwas ausser aktionstoken und
+ * Merkern (_...) traegt, ist eine BESTEHENDE Anlage - ohne den Schluessel gilt
+ * dort 1. Keine Datei oder "{}" (Neuinstallation): die Vorgabe 0.
+ * Kriterium Anker N11: bm_token() speichert beim ersten Oeffnen die volle
+ * Konfiguration mit den NEUEN Vorgaben - "Token vorhanden" ist deshalb kein
+ * Merkmal einer bestehenden Anlage.
+ * ================================================================== */
+function bm_endpunkt_lese_regel(array $d)
+{
+    if (array_key_exists('endpunkt_ein', $d)) {
+        return $d;
+    }
+    $eingerichtet = 0;
+    foreach (array_keys($d) as $k) {
+        $k = (string) $k;
+        if ($k !== 'aktionstoken' && !($k !== '' && $k[0] === '_')) {
+            $eingerichtet = 1;
+            break;
+        }
+    }
+    $d['endpunkt_ein'] = $eingerichtet;
+    return $d;
+}
+
+/** Die lesenden Aktionen, die endpunkt_ein sperrt (evcc bleibt offen - N8: EVCC liest den Speicher als
+ *  Batteriezaehler ueber HTTP; selftest und die schaltenden Aufrufe mit Token ebenso). */
+function bm_endpunkt_lesezweig()
+{
+    return array('status', 'zellen', 'liste', 'summe', 'roh');
+}
+
+/* ==================================================================
+ * Gruppe 31 (B9): die Adresse des eigenen Webservers - der Port aus der
+ * general.json (Webserverport), sonst 80. Bis 0.9.37 stand
+ * http://127.0.0.1/... fest; auf einer Anlage mit anderem Port pruefte der
+ * Selbsttest einen fremden Dienst bzw. nichts. Bauart ACTi/Marstek M4.
+ * ================================================================== */
+function bm_webport()
+{
+    $p = bm_paths();
+    if ($p['home'] === '') {
+        return 80;
+    }
+    $gen = bm_json_lesen($p['home'] . '/config/system/general.json');
+    $port = 0;
+    if (is_array($gen)) {
+        foreach (array('Webserver', 'webserver') as $ab) {
+            if (isset($gen[$ab]) && is_array($gen[$ab])) {
+                foreach (array('Port', 'port') as $k) {
+                    if (isset($gen[$ab][$k]) && is_numeric($gen[$ab][$k])) {
+                        $port = (int) $gen[$ab][$k];
+                    }
+                }
+            }
+        }
+    }
+    return ($port > 0 && $port <= 65535) ? $port : 80;
+}
+
+/** "127.0.0.1" bzw. "127.0.0.1:8080" fuer die Pruefadresse; dazu der Port fuer die Adresse in Loxone. */
+function bm_webhost_lokal()
+{
+    $port = bm_webport();
+    return '127.0.0.1' . ($port === 80 ? '' : ':' . $port);
+}
+
+/* ==================================================================
+ * Gruppe 31 (Entscheidung 3, E-E11): EINE Annahme fuer den HTTP-Endpunkt
+ * und die Befehlsbruecke 1.0.1.
+ *
+ * Der Ablauf stand bis 0.9.37 im Endpunkt (webfrontend/html/index.php ab
+ * der Uebersetzung von batteriemodus): Ziel der EVCC-Betriebsart,
+ * Wattpflicht, Freigabe 403 STEUERUNG_AUS (nie fuer abruf und die
+ * Ruecknahmen, C3), Schreiber-Wache 409, Dienst 503, Merkmal "gleichwert"
+ * (X-7), Einreihen ueber bm_befehl_absetzen() und die Antwortzeile. Jetzt
+ * hier, wortgleich; der Endpunkt prueft weiter Token, Aktion und Parameter
+ * und gibt danach nur Code und Zeile aus - die Ausgaben sind byte-gleich mit
+ * 0.9.37 (im Bau je Fall mit php-cgi verglichen).
+ *
+ * $roh: array('aktion', 'geraet' (Zahl), 'watt' ('' = nicht angegeben),
+ *       'modus' (nur batteriemodus))
+ * $von: die Kennung der Schreiber-Wache ('' ohne; die Bruecke uebergibt
+ *       'mqtt' - die Rolle bleibt dabei die des Weges: batteriemodus EVCC,
+ *       alles andere Loxone)
+ * $quelle: '' (HTTP) oder 'mqtt' - fuer die Herkunft im Sollwert
+ *       ("MQTT/Loxone", "MQTT/EVCC") und das Protokoll
+ * Rueckgabe array(HTTP-Code, Antwortzeile(n), OK (0/1/2), Zusatz):
+ *   Zusatz array('art' => 'bremse'|'keine_antwort'|'', 'meldung' =>
+ *   Meldung des Dienstes, 'quittung' => ASCII-Grund fuer die Bruecke)
+ * ================================================================== */
+
+/** Eine Ablehnung der Annahme ins Protokoll - fuer HTTP wie bm_ep_log() des Endpunkts (gebremst je Grund und
+ *  Absender), fuer die Bruecke mit der Kennung mqtt. */
+function bm_annahme_log($grund, $zusatz, $quelle)
+{
+    if ((string) $quelle === 'mqtt') {
+        bm_log_gebremst('bb_' . $grund, 'Befehlsbruecke: Befehl abgewiesen - ' . $grund
+            . ($zusatz !== '' ? ' (' . $zusatz . ')' : ''), 3600);
+        return;
+    }
+    $von = isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : '?';
+    $von = preg_replace('/[^0-9a-fA-F:.]/', '', $von);
+    bm_log_gebremst('ep_' . $grund . '_' . $von,
+        'Endpunkt: Aufruf von ' . ($von === '' ? '?' : $von) . ' abgewiesen - '
+        . $grund . ($zusatz !== '' ? ' (' . $zusatz . ')' : ''), 3600);
+}
+
+/**
+ * Die Schreiber-Wache fuer einen Befehl (aus bm_ep_wache() des Endpunkts, ohne Ausgabe): merken und melden, und
+ * nur mit "Fremde Schreiber abweisen" einen Sollwert abweisen. Ruecknahmen nie.
+ * Rueckgabe array(abweisen, zusatz fuer die Antwortzeile, Antwortzeilen bei abweisen).
+ */
+function bm_wache_anwenden($nr, $von, $evcc_weg, $aktion, $ruecknahme, $watt, $quelle = '')
+{
+    $w = bm_wache_einstellungen(bm_config());
+    $ip = ((string) $quelle === 'mqtt') ? '' : bm_wache_absender();
+    // Ueber die Bruecke heisst der Schreiber "mqtt"; die Rolle ist die des Weges (EVCC ueber batteriemodus).
+    $rolle = bm_wache_rolle((string) $von === 'mqtt' ? '' : $von, $evcc_weg);
+    list($aktiv, $erlaubt, $fehler, $grund) = bm_wache_sperre_urteil($w, $von, $ip, $rolle);
+    if ($fehler !== '') {
+        bm_log_gebremst('wache_liste', 'Schreiber-Wache: "Fremde Schreiber abweisen" ist eingeschaltet, '
+            . 'aber weder eine Fuehrung gewaehlt noch eine brauchbare Liste erlaubter Schreiber da - die '
+            . 'Sperre wirkt NICHT, bis das im Reiter Einstellungen berichtigt ist.', 3600);
+    }
+    $abweisen = $aktiv && !$erlaubt && !$ruecknahme;
+    $art = $ruecknahme ? 'ruecknahme'
+        : ($aktion . (($aktion === 'laden' || $aktion === 'entladen') ? ' ' . (int) $watt . ' W' : ''));
+    $wer = ($von !== '' ? $von : 'ohne Kennung') . '@' . ($ip !== '' ? $ip : '?');
+    $zusatz = '';
+    if ((int) $w['wache_ein'] === 1) {
+        $m = bm_wache_merken((int) $nr, $von, $ip, $rolle, $art, $abweisen, $w);
+        if ($m['anzahl'] > 1) {
+            $zusatz .= ';SCHREIBER=' . (int) $m['anzahl'];
+        }
+        if (!$m['merker']) {
+            $zusatz .= ';WACHE=MERKER';
+        }
+        if (!$ruecknahme && !bm_wache_fuehrt($w['fuehrung'], $rolle)) {
+            bm_log_gebremst('wache_fuehrung_' . (int) $nr . '_' . $rolle, 'Schreiber-Wache, Speicher '
+                . (int) $nr . ': ' . $art . ' von ' . $wer . ' (Rolle ' . bm_wache_rollenname($rolle)
+                . '), eingestellt ist "Fuehrung: ' . bm_wache_rollenname($w['fuehrung']) . '" - '
+                . ($abweisen ? 'abgewiesen (409).' : ((int) $w['wache_sperren_ein'] === 1
+                    ? 'nicht abgewiesen (die Sperre wirkt nicht, siehe die Zeile dazu).'
+                    : 'nicht abgewiesen (Sperren aus).')),
+                60 * (int) $w['wache_fenster_min']);
+        }
+    }
+    if (!$abweisen) {
+        return array(false, $zusatz, '');
+    }
+    $zeilen = sprintf("SET;OK=0;GRUND=FREMDSCHREIBER;AKTION=%s;GERAET=%d%s\n", $aktion, (int) $nr, $zusatz)
+        . (($grund === 'FUEHRUNG')
+            ? 'Die Fuehrung steht auf ' . bm_wache_rollenname($w['fuehrung']) . '; dieser Sollwert hat die Rolle '
+              . bm_wache_rollenname($rolle) . ". Nichts eingereiht (Reiter Einstellungen, Schreiber-Wache).\n"
+            : "Dieser Schreiber steht nicht in der Liste der erlaubten Schreiber. Nichts eingereiht "
+              . "(Reiter Einstellungen, Schreiber-Wache).\n");
+    bm_annahme_log('FREMDSCHREIBER', $art . ', ' . $wer . ', ' . $grund, $quelle);
+    return array(true, $zusatz, $zeilen);
+}
+
+function bm_befehl_annehmen(array $roh, $von, $quelle)
+{
+    $cfg = bm_config();
+    $aktion = isset($roh['aktion']) ? (string) $roh['aktion'] : '';
+    $nr = isset($roh['geraet']) ? (int) $roh['geraet'] : 1;
+    $watt = (isset($roh['watt']) && (string) $roh['watt'] !== '') ? (string) (int) $roh['watt'] : '';
+    $mqtt = ((string) $quelle === 'mqtt');
+    $z = array('art' => '', 'meldung' => '', 'quittung' => '');
+
+    /* Betriebsart von EVCC in eine Aktion dieses Plugins uebersetzen. Abgewiesen wird, was nicht in der Tabelle
+     * steht - nicht auf 'normal' zurechtgebogen. */
+    $war_modus = ($aktion === 'batteriemodus');
+    if ($war_modus) {
+        $ziel = bm_evcc_modus(isset($roh['modus']) ? (string) $roh['modus'] : '');
+        if ($ziel === '') {
+            return array(400, "SET;OK=0;GRUND=MODUS_UNBEKANNT\nErlaubt sind 1/normal, 2/hold und 3/charge.\n", 0, $z);
+        }
+        if ($ziel === 'laden' && $watt === '') {
+            // Aus dem Netz laden ohne Leistungsangabe waere geraten.
+            $vorgabe = (int) $cfg['evcc_ladewatt'];
+            if ($vorgabe <= 0) {
+                return array(400, "SET;OK=0;GRUND=WATT_FEHLT\n"
+                    . "Fuer modus=3 braucht es watt=W oder eine Vorgabe in den Einstellungen.\n", 0, $z);
+            }
+            $watt = (string) $vorgabe;
+        }
+        $aktion = $ziel;
+    }
+    /* Woher kam der Befehl? 'batteriemodus' ist der Weg, den EVCC benutzt, alles uebrige kommt vom Miniserver -
+     * ueber HTTP oder (seit 0.9.38) ueber die Befehlsbruecke. */
+    $befehl = array('aktion' => $aktion, 'geraet' => $nr,
+                    'quelle' => ($mqtt ? 'MQTT/' : '') . ($war_modus ? 'EVCC' : 'Loxone'));
+    if ($aktion === 'laden' || $aktion === 'entladen') {
+        if ($watt === '') {
+            return array(400, "SET;OK=0;GRUND=WATT_FEHLT\n"
+                . "Fuer laden und entladen ist watt Pflicht. watt=0 gibt die Regie zurueck.\n", 0, $z);
+        }
+        $befehl['watt'] = (int) $watt;
+    }
+    $ruecknahme = ($aktion === 'automatik')
+        || (($aktion === 'laden' || $aktion === 'entladen') && (int) $watt === 0);
+    if ($aktion !== 'abruf' && !$ruecknahme && empty($cfg['steuerung_ein'])) {
+        return array(403, "SET;OK=0;GRUND=STEUERUNG_AUS\nSchreibende Befehle sind gesperrt. Reiter Einstellungen, "
+            . "Haken 'Schreibende Befehle zulassen'.\n", 0, $z);
+    }
+    // Schreiber-Wache - nach der Freigabe, vor dem Dienst und vor dem Einreihen. abruf schreibt nichts.
+    $wz = '';
+    if ($aktion !== 'abruf') {
+        list($abweisen, $wz, $zeilen) = bm_wache_anwenden($nr, (string) $von, $war_modus, $aktion, $ruecknahme,
+            isset($befehl['watt']) ? $befehl['watt'] : 0, $quelle);
+        if ($abweisen) {
+            return array(409, $zeilen, 0, $z);
+        }
+    }
+    if (bm_dienst_pid() === 0) {
+        bm_annahme_log('DIENST_LAEUFT_NICHT', $aktion, $quelle);
+        return array(503, "SET;OK=0;GRUND=DIENST_LAEUFT_NICHT\n"
+            . "Der Abrufdienst laeuft nicht. Reiter Einstellungen, Knopf 'Dienst starten'.\n", 0, $z);
+    }
+    // X-7: Sollwerte tragen das Merkmal "gleichwert"; Ruecknahmen nie.
+    if ($aktion === 'sperren'
+        || (($aktion === 'laden' || $aktion === 'entladen') && (int) $watt > 0)) {
+        $befehl['gleichwert'] = 1;
+    }
+    $antwort = bm_befehl_absetzen($befehl);
+    list($erg, $meldung) = $antwort;
+    $z['art'] = isset($antwort[3]) ? (string) $antwort[3] : '';
+    $z['meldung'] = (string) $meldung;
+    $z['quittung'] = isset($antwort[4]) ? (string) $antwort[4] : '';
+    $zeile = sprintf("SET;OK=%d;AKTION=%s;GERAET=%d;MELDUNG=%s%s%s\n", $erg, $aktion, $nr,
+        str_replace(array("\r", "\n", ';'), ' ', $meldung),
+        !empty($antwort[2]) ? ';UNVERAENDERT=1' : '', $wz);
+    return array($erg === 0 ? 500 : 200, $zeile, (int) $erg, $z);
+}
+
+/**
+ * Die Quittung der Befehlsbruecke aus der Antwort von bm_befehl_annehmen() (N7):
+ *   OK=1 (auch UNVERAENDERT=1)            -> array(true, '')
+ *   OK=2 aus der Schreibbremse            -> array(true, 'eingereiht (Schreibbremse) - der Dienst holt nach')
+ *   OK=2 ohne Antwort binnen Wartezeit    -> array(false, 'KEINE_ANTWORT')
+ *   sonst                                 -> array(false, GRUND bzw. die ASCII-Meldung des Dienstes)
+ */
+function bm_befehl_quittung($r)
+{
+    $ok = isset($r[2]) ? (int) $r[2] : 0;
+    $z = (isset($r[3]) && is_array($r[3])) ? $r[3] : array();
+    if ($ok === 1) {
+        return array(true, '');
+    }
+    if ($ok === 2) {
+        return (isset($z['art']) && $z['art'] === 'bremse')
+            ? array(true, 'eingereiht (Schreibbremse) - der Dienst holt nach')
+            : array(false, 'KEINE_ANTWORT');
+    }
+    if (isset($z['quittung']) && (string) $z['quittung'] !== '') {
+        return array(false, (string) $z['quittung']);
+    }
+    $erste = (string) strtok((string) (isset($r[1]) ? $r[1] : ''), "\n");
+    if (preg_match('/;GRUND=([A-Z_]+)/', $erste, $m)) {
+        return array(false, $m[1]);
+    }
+    if (preg_match('/;MELDUNG=(.*)\z/', $erste, $m)) {
+        $t = trim((string) preg_replace('/;(UNVERAENDERT|SCHREIBER|WACHE)=.*\z/', '', $m[1]));
+        return array(false, $t !== '' ? $t : 'abgelehnt');
+    }
+    return array(false, 'HTTP ' . (int) (isset($r[0]) ? $r[0] : 0));
+}
+
+/* ---------------- Befehlsbruecke 1.0.1 (Entscheidung 3) ---------------- */
+
+/** Die Bruecke als Bibliothek laden (BB_NUR_LADEN) - installiert oder im Archiv. */
+function bm_bruecke_laden()
+{
+    if (function_exists('bb_waechter')) {
+        return true;
+    }
+    $p = bm_paths();
+    $kand = array();
+    if ($p['home'] !== '') {
+        $kand[] = $p['bindir'] . '/befehlsbruecke.php';
+    }
+    $kand[] = dirname(dirname(__DIR__)) . '/bin/befehlsbruecke.php';
+    foreach ($kand as $k) {
+        if (is_file($k)) {
+            if (!defined('BB_NUR_LADEN')) {
+                define('BB_NUR_LADEN', true);
+            }
+            require_once $k;
+            return function_exists('bb_waechter');
+        }
+    }
+    return false;
+}
+
+/** Die Befehlsliste der Bruecke (bb_liste(): EINE Quelle fuer Reiter und Vorlage). array(Liste|null, Fehler). */
+function bm_bruecke_liste()
+{
+    if (!bm_bruecke_laden()) {
+        return array(null, bm_t('BEFEHL.T_NICHT_DA'));
+    }
+    list($z, $fehler) = bb_zuordnung_laden();
+    if ($z === null) {
+        return array(null, $fehler);
+    }
+    $GLOBALS['bb_zuordnung'] = $z;
+    list($fehl) = bb_zuordnung_pruefen($z);
+    if ($fehl) {
+        return array(null, $fehl[0]);
+    }
+    return array(bb_liste($z, bb_einstellungen($z)), '');
+}
+
+/**
+ * Die Bruecke sofort schalten - nach dem Speichern im Reiter MQTT und nach dem Zurueckspielen einer Sicherung
+ * (Bauart fer_bruecke_schalten()). Soll sie laufen (befehle_mqtt_ein UND mqtt_ein): befehlsbruecke.sh start;
+ * sonst, wenn sie laeuft: stop. Rueckgabe array(rc oder null = nichts zu tun, 'start'|'stop'|'', Ausgabe).
+ */
+function bm_bruecke_schalten($cfg)
+{
+    if (!bm_bruecke_laden()) {
+        return array(1, '', bm_t('BEFEHL.T_NICHT_DA'));
+    }
+    $p = bb_pfade();
+    if (!$p) {
+        return array(1, '', bm_t('BEFEHL.T_KEINE_WURZEL'));
+    }
+    if (!empty($cfg['befehle_mqtt_ein']) && !empty($cfg['mqtt_ein'])) {
+        list($rc, $aus) = bb_sh($p, 'start');
+        return array($rc, 'start', $aus);
+    }
+    if (!bb_dienste()) {
+        return array(null, '', '');
+    }
+    list($rc, $aus) = bb_sh($p, 'stop');
+    return array($rc, 'stop', $aus);
+}
+
+/** Meldungen fuer die Oberflaeche nach bm_bruecke_schalten(): array(ok-Meldungen, Fehlermeldungen), maskiert. */
+function bm_bruecke_meldungen($r)
+{
+    list($rc, $art, $aus) = $r;
+    if ($art === 'start') {
+        return $rc === 0 ? array(array(bm_t('BEFEHL.M_EIN') . ' ' . bm_e($aus)), array())
+                         : array(array(), array(sprintf(bm_t('BEFEHL.M_START_FEHL'), bm_e($aus))));
+    }
+    if ($art === 'stop') {
+        return $rc === 0 ? array(array(bm_t('BEFEHL.M_AUS')), array())
+                         : array(array(), array(sprintf(bm_t('BEFEHL.M_STOP_FEHL'), bm_e($aus))));
+    }
+    if ($rc !== null && $rc !== 0) {
+        return array(array(), array(sprintf(bm_t('BEFEHL.M_START_FEHL'), bm_e($aus))));
+    }
+    return array(array(), array());
+}
+
+/**
+ * Lage der Befehlsbruecke fuer Reiter Test und healthcheck: Dienst laeuft (argumentweise), zustand.json juenger
+ * als die Waechtergrenze der Bruecke, Abo steht. Rueckgabe array(true|false|null, Text als HTML) - null heisst
+ * "aus" (Haken).
+ */
+function bm_bruecke_lage()
+{
+    if (!bm_bruecke_laden()) {
+        return array(false, bm_e(bm_t('BEFEHL.T_NICHT_DA')));
+    }
+    if (!bb_pfade()) {
+        return array(null, bm_e(bm_t('BEFEHL.T_KEINE_WURZEL')));
+    }
+    list($soll, $grund) = bb_soll_ermitteln();
+    if ($soll === 1) {
+        return array(null, bm_e(bm_t('BEFEHL.T_AUS')));
+    }
+    if ($soll !== 0) {
+        return array(false, sprintf(bm_e(bm_t('BEFEHL.T_DEFEKT')), bm_e($grund)));
+    }
+    $zu = bb_zustand_lesen();
+    $pids = bb_dienste();
+    $alter = (is_array($zu) && isset($zu['ts'])) ? time() - (int) $zu['ts'] : null;
+    if ($pids && $alter !== null && $alter <= BB_WACHE_GRENZE && !empty($zu['abo'])) {
+        $zl = (isset($zu['zaehler']) && is_array($zu['zaehler'])) ? $zu['zaehler'] : array();
+        $txt = sprintf(bm_e(bm_t('BEFEHL.T_ZUSTAND')), bm_e(implode(' ', $pids)),
+            bm_e(is_string($zu['abo']) ? $zu['abo'] : ''),
+            isset($zl['angenommen']) ? (int) $zl['angenommen'] : 0, isset($zl['abgelehnt']) ? (int) $zl['abgelehnt'] : 0);
+        $lz = (isset($zu['letzter']) && is_array($zu['letzter'])) ? $zu['letzter'] : null;
+        if ($lz !== null && isset($lz['name'])) {
+            $txt .= ' ' . sprintf(bm_e(bm_t('BEFEHL.T_LETZTER')), bm_e((string) $lz['name']),
+                bm_e(isset($lz['ergebnis']) ? (string) $lz['ergebnis'] : '-'),
+                isset($lz['zeit']) ? max(0, time() - (int) $lz['zeit']) : 0);
+        }
+        return array(true, $txt);
+    }
+    return array(false, sprintf(bm_e(bm_t('BEFEHL.T_HAENGT')), $pids ? bm_e(implode(' ', $pids)) : '-',
+        $alter === null ? '-' : (int) $alter));
+}
+
+/* ==================================================================
+ * Gruppe 31 (Entscheidung 3, Nr. 15, E-E7): Abnehmer haus/strompreis -
+ * EINE Dauerverbindung im Dienst, ohne Kindprozess.
+ *
+ * haus/strompreis/zaehler kommt einmal je Minute und ist nicht retained;
+ * eine kurze Sitzung je Durchlauf saehe ihn nur zufaellig (Phasenfalle). Der
+ * Dienst ist ein Dauerlaeufer: er haelt die Verbindung selbst, MQTT 3.1.1
+ * von Hand (Paketbausteine wie bm_mqtt_behalten_fragen(), uebernommen aus
+ * Zendure 0.9.26), nicht blockierend in der 300-ms-Schleife. Kein
+ * Kindprozess - die Sperre dienst.lock vererbt sich nicht. Das Kennwort steht
+ * nur im CONNECT-Paket, nie im Protokoll und nie auf einer Befehlszeile.
+ * ================================================================== */
+
+function bm_mqtt_paket_zk($t)
+{
+    return pack('n', strlen($t)) . $t;
+}
+
+function bm_mqtt_paket_laenge($n)
+{
+    $o = '';
+    do {
+        $b = $n % 128;
+        $n = intdiv($n, 128);
+        if ($n > 0) {
+            $b |= 128;
+        }
+        $o .= chr($b);
+    } while ($n > 0);
+    return $o;
+}
+
+/** Ein Paket aus dem Puffer nehmen: array(Kopfbyte, Rumpf) oder null (unvollstaendig); false = kaputt. */
+function bm_mqtt_paket_nehmen(&$puffer)
+{
+    $l = strlen($puffer);
+    if ($l < 2) {
+        return null;
+    }
+    $n = 0;
+    $mult = 1;
+    $i = 1;
+    for (; $i <= 4; $i++) {
+        if ($i >= $l) {
+            return null;
+        }
+        $b = ord($puffer[$i]);
+        $n += ($b & 127) * $mult;
+        $mult *= 128;
+        if (!($b & 128)) {
+            break;
+        }
+    }
+    if ($i > 4) {
+        return false;
+    }
+    if ($l < $i + 1 + $n) {
+        return null;
+    }
+    $k = ord($puffer[0]);
+    $rumpf = (string) substr($puffer, $i + 1, $n);
+    $puffer = (string) substr($puffer, $i + 1 + $n);
+    return array($k, $rumpf);
+}
+
+/** Die sechs Themen der Nr. 15 unter haus/strompreis/ (Anbieter Spotpreis aWATTar). */
+function bm_haus_themen()
+{
+    return array('aktuell', 'vorschau', 'ab', 'raster', 'zaehler', 'anbieter');
+}
+
+/** Die Verbindung aufbauen (blockierend nur fuer CONNECT/CONNACK/SUBACK, hoechstens 3 s). Rueckgabe array(
+ *  Verbindungszustand oder null, Grund). */
+function bm_haus_verbinden()
+{
+    $m = bm_mqtt_zustand();
+    if (!$m['gefunden']) {
+        return array(null, 'in der general.json steht kein MQTT-Abschnitt');
+    }
+    $host = trim((string) $m['broker']);
+    if ($host === '' || $host === 'localhost') {
+        $host = '127.0.0.1';
+    }
+    $port = (int) $m['brokerport'];
+    if ($port <= 0 || $port > 65535) {
+        $port = 1883;
+    }
+    $s = @stream_socket_client('tcp://' . $host . ':' . $port, $errno, $errstr, 2);
+    if (!$s) {
+        return array(null, 'keine Verbindung zum Broker ' . $host . ':' . $port . ' ('
+            . bm_text_sauber((string) $errstr, 120) . ')');
+    }
+    stream_set_timeout($s, 2);
+    $benutzer = (string) $m['user'];
+    $kennwort = (string) $m['pw'];
+    $flags = 0x02;
+    $nutz = bm_mqtt_paket_zk('batteriebms-' . bm_paths()['plugin'] . '-preis-' . getmypid());
+    if ($benutzer !== '') {
+        $flags |= 0x80;
+        if ($kennwort !== '') {
+            $flags |= 0x40;
+        }
+        $nutz .= bm_mqtt_paket_zk($benutzer);
+        if ($kennwort !== '') {
+            $nutz .= bm_mqtt_paket_zk($kennwort);
+        }
+    }
+    $kopf = bm_mqtt_paket_zk('MQTT') . chr(4) . chr($flags) . pack('n', 60);
+    if (@fwrite($s, chr(0x10) . bm_mqtt_paket_laenge(strlen($kopf . $nutz)) . $kopf . $nutz) === false) {
+        fclose($s);
+        return array(null, 'CONNECT liess sich nicht senden');
+    }
+    $puffer = '';
+    $ende = microtime(true) + 3.0;
+    $verbunden = false;
+    $abonniert = false;
+    while (microtime(true) < $ende && !$abonniert) {
+        $t = @fread($s, 4096);
+        if ($t === false || ($t === '' && feof($s))) {
+            break;
+        }
+        $puffer .= (string) $t;
+        while (($pk = bm_mqtt_paket_nehmen($puffer)) !== null) {
+            if ($pk === false) {
+                fclose($s);
+                return array(null, 'unlesbare Antwort des Brokers');
+            }
+            $art = $pk[0] >> 4;
+            if ($art === 2) {
+                if (strlen($pk[1]) < 2 || ord($pk[1][1]) !== 0) {
+                    $cn = strlen($pk[1]) >= 2 ? ord($pk[1][1]) : -1;
+                    $ct = array(1 => 'Protokollfassung abgelehnt', 2 => 'Client-Kennung abgelehnt',
+                                3 => 'Broker nicht verfuegbar', 4 => 'Benutzername oder Kennwort falsch',
+                                5 => 'nicht autorisiert');
+                    fclose($s);
+                    return array(null, 'CONNACK ' . $cn . ' (' . (isset($ct[$cn]) ? $ct[$cn] : 'unbekannter Code')
+                        . ')' . ($benutzer === '' ? ', ohne Anmeldung' : ', mit Anmeldung'));
+                }
+                $verbunden = true;
+                $sub = pack('n', 1) . bm_mqtt_paket_zk('haus/strompreis/#') . chr(0);
+                @fwrite($s, chr(0x82) . bm_mqtt_paket_laenge(strlen($sub)) . $sub);
+            } elseif ($art === 9) {
+                $rc = (string) substr($pk[1], 2);
+                if ($rc === '' || ord($rc[0]) >= 0x80) {
+                    fclose($s);
+                    return array(null, 'SUBACK: der Broker hat das Abonnement abgelehnt');
+                }
+                $abonniert = true;
+            }
+        }
+    }
+    if (!$verbunden || !$abonniert) {
+        fclose($s);
+        return array(null, $verbunden ? 'der Broker hat das Abonnement nicht bestaetigt'
+                                       : 'der Broker hat auf CONNECT nicht geantwortet');
+    }
+    stream_set_blocking($s, false);
+    $jetzt = time();
+    return array(array('s' => $s, 'puffer' => $puffer, 'werte' => array(), 'zaehler_ts' => 0,
+                       'zaehler_wert' => null, 'ping' => $jetzt, 'pong' => $jetzt, 'seit' => $jetzt), '');
+}
+
+/** Die Verbindung pflegen - in JEDEM Schleifendurchgang, nicht blockierend: lesen, was anliegt (stream_select
+ *  0 s), PUBLISH zerlegen (nur QoS 0, nur die sechs Themen, Nutzlast <= 4096 Byte), PINGREQ alle 30 s; ohne
+ *  PINGRESP binnen 90 s oder bei EOF: false (der Dienst trennt und verbindet gebremst neu). */
+function bm_haus_pflegen(array &$v, $jetzt = null)
+{
+    $jetzt = ($jetzt === null) ? time() : (int) $jetzt;
+    if (!isset($v['s']) || !is_resource($v['s'])) {
+        return false;
+    }
+    $r = array($v['s']);
+    $w = null;
+    $e = null;
+    $n = @stream_select($r, $w, $e, 0, 0);
+    if ($n === false) {
+        return false;
+    }
+    if ($n > 0) {
+        $t = @fread($v['s'], 65536);
+        if ($t === false || ($t === '' && feof($v['s']))) {
+            return false;
+        }
+        $v['puffer'] .= (string) $t;
+        if (strlen($v['puffer']) > 65536) {
+            return false;     // Puffer uebervoll - lieber neu verbinden
+        }
+        while (($pk = bm_mqtt_paket_nehmen($v['puffer'])) !== null) {
+            if ($pk === false) {
+                return false;
+            }
+            $art = $pk[0] >> 4;
+            if ($art === 13) {
+                $v['pong'] = $jetzt;
+            } elseif ($art === 3 && strlen($pk[1]) >= 2) {
+                if ((($pk[0] >> 1) & 3) !== 0) {
+                    continue;   // nur QoS 0
+                }
+                $tl = unpack('n', substr($pk[1], 0, 2));
+                $thema = (string) substr($pk[1], 2, $tl[1]);
+                $wert = (string) substr($pk[1], 2 + $tl[1]);
+                if (strpos($thema, 'haus/strompreis/') !== 0 || strlen($wert) > 4096) {
+                    continue;
+                }
+                $k = substr($thema, 16);
+                if (!in_array($k, bm_haus_themen(), true)) {
+                    continue;
+                }
+                $v['werte'][$k] = $wert;
+                // Der Zaehler zaehlt nur LIVE: nicht zurueckbehalten und gewechselt.
+                if ($k === 'zaehler' && !($pk[0] & 1) && $wert !== $v['zaehler_wert']) {
+                    $v['zaehler_wert'] = $wert;
+                    $v['zaehler_ts'] = $jetzt;
+                }
+            }
+        }
+    }
+    if ($jetzt - (int) $v['ping'] >= 30) {
+        @fwrite($v['s'], chr(0xC0) . chr(0));
+        $v['ping'] = $jetzt;
+    }
+    if ($jetzt - (int) $v['pong'] > 90) {
+        return false;
+    }
+    return true;
+}
+
+function bm_haus_trennen(array &$v)
+{
+    if (isset($v['s']) && is_resource($v['s'])) {
+        @fwrite($v['s'], chr(0xE0) . chr(0));
+        @fclose($v['s']);
+    }
+    $v = array();
+}
+
+/** Die Vorschau als Stundenliste ts => ct/kWh (Abschrift marstek_haus_preisliste(), aber in ct statt EUR):
+ *  Raster 900 -> Stundenmittel, eine angebrochene Randstunde faellt weg. null = unbrauchbar. */
+function bm_haus_preisliste($vorschau, $ab, $raster)
+{
+    if (!is_string($vorschau) || strlen($vorschau) > 4096
+            || !preg_match('/^-?\d{1,4}(\.\d{1,3})?(;-?\d{1,4}(\.\d{1,3})?)*\z/', $vorschau)) {
+        return null;
+    }
+    if (!is_numeric($ab) || !is_numeric($raster)) {
+        return null;
+    }
+    $ab = (int) $ab;
+    $raster = (int) $raster;
+    if (!in_array($raster, array(900, 3600), true) || $ab <= 0 || $ab % $raster !== 0) {
+        return null;
+    }
+    $summe = array();
+    $zahl = array();
+    foreach (explode(';', $vorschau) as $i => $ct) {
+        $ts = $ab + $i * $raster;
+        $h = $ts - ($ts % 3600);
+        if (!isset($summe[$h])) {
+            $summe[$h] = 0.0;
+            $zahl[$h] = 0;
+        }
+        $summe[$h] += (float) $ct;
+        $zahl[$h]++;
+    }
+    $out = array();
+    foreach ($summe as $h => $s) {
+        if ($raster === 900 && $zahl[$h] < 4) {
+            continue;
+        }
+        $out[$h] = round($s / $zahl[$h], 3);
+    }
+    ksort($out);
+    return $out;
+}
+
+/**
+ * Die Lage der Preisquelle (Abschrift marstek_preis_quelle(), Entwurf 2.6.2). Rueckgabe array(lage, liste):
+ *   'haus'                 der Zaehler wechselte binnen 120 s live, raster 900|3600, ab <= jetzt im Raster, die
+ *                          Vorschau taugt und deckt die laufende Stunde
+ *   'schweigt'             kein Live-Zaehler binnen 120 s (oder keine Verbindung)
+ *   'unbrauchbar'          Werte da, aber nicht im Muster
+ *   'deckt_stunde_nicht'   die Liste beginnt zu spaet oder endet vor dem Ende der laufenden Stunde
+ */
+function bm_preis_quelle($v, $jetzt = null)
+{
+    $jetzt = ($jetzt === null) ? time() : (int) $jetzt;
+    if (!is_array($v) || !isset($v['zaehler_ts']) || (int) $v['zaehler_ts'] <= 0
+        || $jetzt - (int) $v['zaehler_ts'] > 120) {
+        return array('schweigt', array());
+    }
+    $w = (isset($v['werte']) && is_array($v['werte'])) ? $v['werte'] : array();
+    $ab = (isset($w['ab']) && is_numeric($w['ab'])) ? (int) $w['ab'] : 0;
+    $r = (isset($w['raster']) && is_numeric($w['raster'])) ? (int) $w['raster'] : 0;
+    $vs = isset($w['vorschau']) ? (string) $w['vorschau'] : '';
+    $liste = ($vs !== '' && $vs !== '-') ? bm_haus_preisliste($vs, $ab, $r) : null;
+    if ($liste === null || !$liste) {
+        return array('unbrauchbar', array());
+    }
+    $hstart = $jetzt - ($jetzt % 3600);
+    $n = count(explode(';', $vs));
+    if ($ab > $hstart || $ab + $n * $r < $hstart + 3600 || !isset($liste[$hstart])) {
+        return array('deckt_stunde_nicht', $liste);
+    }
+    return array('haus', $liste);
+}
+
+/** Preis jetzt, Rang der laufenden Stunde und die drei guenstigsten Stunden aus einer Stundenliste (ab der
+ *  laufenden Stunde bis zum Ende der Vorschau). */
+function bm_preis_rang(array $liste, $jetzt = null)
+{
+    $jetzt = ($jetzt === null) ? time() : (int) $jetzt;
+    $hstart = $jetzt - ($jetzt % 3600);
+    $rest = array();
+    foreach ($liste as $ts => $ct) {
+        if ((int) $ts >= $hstart) {
+            $rest[(int) $ts] = (float) $ct;
+        }
+    }
+    if (!isset($rest[$hstart])) {
+        return array(null, 0, 0, array());
+    }
+    $cur = $rest[$hstart];
+    $rang = 1;
+    foreach ($rest as $ct) {
+        if ($ct < $cur) {
+            $rang++;
+        }
+    }
+    asort($rest);
+    return array($cur, $rang, count($rest), array_slice(array_keys($rest), 0, 3));
+}
+
+/** Den Zustand der Preisquelle fuer Reiter Test und healthcheck ablegen (data/.../haus_strompreis.json) - keine
+ *  Zugangsdaten. */
+function bm_haus_preis_schreiben(array $d)
+{
+    $js = json_encode($d, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    return is_string($js) && bm_datei_schreiben(bm_paths()['datadir'] . '/haus_strompreis.json', $js, 0644);
+}
+
+function bm_haus_preis_lesen()
+{
+    $d = bm_json_lesen(bm_paths()['datadir'] . '/haus_strompreis.json');
+    return is_array($d) ? $d : array();
+}
+
+/* ==================================================================
+ * Gruppe 31: Zustandsdateien des Spotpreis-Ladens und des Ausgleichsladens
+ * (geschrieben vom Dienst, gelesen von Reiter Test, healthcheck und MQTT).
+ * ================================================================== */
+function bm_spotladen_lesen()
+{
+    $d = bm_json_lesen(bm_paths()['datadir'] . '/spotladen.json');
+    return is_array($d) ? $d : array();
+}
+
+function bm_ausgleich_lesen()
+{
+    $d = bm_json_lesen(bm_paths()['datadir'] . '/ausgleich.json');
+    return is_array($d) ? $d : array();
+}
+
+/* ==================================================================
+ * Gruppe 31 (E2, Entscheidung 1): ein offener Zwang, den dieses Plugin
+ * NICHT zuruecknehmen kann, wird erkennbar - und laesst sich nach einer
+ * Pruefung am Geraet verwerfen.
+ *
+ * Aufloesbar ist ein Zwang, wenn der Speicher unter dieser Nummer in der Liste
+ * steht (und ihm die Datei gehoert) ODER die Sollwertdatei Anschrift UND
+ * Ruecknahme-Schrittfolge traegt (dann nimmt bm_zwang_verwaist() ihn zurueck).
+ * Unaufloesbar ist eine Datei ohne Ruecknahme-Schritte oder ohne Anschrift fuer
+ * einen entfernten Speicher (Pruefbericht B13: "keine Ruecknahme-Schrittfolge
+ * gespeichert"). Fuer solche Zwaenge startet der Waechter den Dienst nicht mehr
+ * neu (bin/dienst.sh stop rc 4) - bis 0.9.37 lief er dafuer jede Minute an.
+ * ================================================================== */
+function bm_soll_aufloesbar($nr, $soll, $geraete = null)
+{
+    if ($geraete === null) {
+        $geraete = bm_geraete();
+    }
+    if (!is_array($soll)) {
+        return false;
+    }
+    // Dieselbe Regel wie bm_soll_gehoert() im Dienst (C4) - hier ohne den Dienst, damit Oberflaeche und
+    // bin/dienst.sh sie auch nutzen koennen.
+    if (isset($geraete[$nr]) && (!isset($soll['anschrift']) || !is_array($soll['anschrift'])
+            || bm_anschrift_gleich($soll['anschrift'], bm_geraet_anschrift($geraete[$nr])))) {
+        return true;
+    }
+    return isset($soll['anschrift']) && is_array($soll['anschrift'])
+        && isset($soll['ruecknahme']) && is_array($soll['ruecknahme']) && $soll['ruecknahme'];
+}
+
+/** Die offenen Zwaenge getrennt: array(aufloesbar nr => soll, unaufloesbar nr => soll). */
+function bm_zwang_aufteilen()
+{
+    $geraete = bm_geraete();
+    $auf = array();
+    $un = array();
+    foreach (bm_zwang_offen() as $nr => $soll) {
+        if (bm_soll_aufloesbar($nr, $soll, $geraete)) {
+            $auf[$nr] = $soll;
+        } else {
+            $un[$nr] = $soll;
+        }
+    }
+    return array($auf, $un);
+}
+
+/** Fuer bin/dienst.sh: die Namen der AUFLOESBAREN offenen Zwaenge (leer = keiner). */
+function bm_zwang_aufloesbar_namen()
+{
+    list($auf) = bm_zwang_aufteilen();
+    return $auf ? bm_zwang_namen($auf) : '';
+}
+
+/**
+ * "Zwang am Geraet geprueft - Sollwert verwerfen" (Reiter Einstellungen, nur mit Bestaetigungshaken). Das Plugin
+ * schreibt dabei NICHTS an den Speicher. Die Datei wird umbenannt in soll_geraetN.verworfen.json (ein Stand,
+ * ueberschreibt den vorigen; kein stilles Loeschen), Protokollzeile mit Inhalt und Zeit, LoxBerry-Meldung Stufe
+ * Info. Rueckgabe array(ok, Text).
+ */
+function bm_soll_verwerfen($nr)
+{
+    $nr = (int) $nr;
+    $datei = bm_paths()['datadir'] . '/soll_geraet' . $nr . '.json';
+    if (!is_file($datei)) {
+        return array(0, sprintf(bm_t('EINST.VERWERFEN_KEINE'), $nr));
+    }
+    $inhalt = (string) @file_get_contents($datei);
+    $ziel = bm_paths()['datadir'] . '/soll_geraet' . $nr . '.verworfen.json';
+    if (!@rename($datei, $ziel)) {
+        return array(0, sprintf(bm_t('EINST.VERWERFEN_FEHL'), $nr));
+    }
+    @unlink(bm_paths()['datadir'] . '/nachhol_geraet' . $nr . '.json');
+    @unlink(bm_paths()['datadir'] . '/zwang_gemeldet_geraet' . $nr . '.json');
+    $text = sprintf(bm_t('EINST.VERWERFEN_LOG'), $nr, bm_text_sauber($inhalt, 300));
+    bm_log($text);
+    $skript = dirname(dirname(__DIR__)) . '/bin/bm_notify.php';
+    $p = bm_paths();
+    if ($p['home'] !== '') {
+        $skript = $p['bindir'] . '/bm_notify.php';
+    }
+    if (is_file($skript)) {
+        $php = (defined('PHP_BINARY') && PHP_BINARY !== '') ? PHP_BINARY : 'php';
+        @exec(escapeshellarg($php) . ' ' . escapeshellarg($skript) . ' 6 ' . escapeshellarg($text) . ' '
+            . escapeshellarg((string) $p['plugin']) . ' 2>&1', $aus, $rc);
+    }
+    return array(1, sprintf(bm_t('EINST.VERWERFEN_OK'), $nr));
+}
+
+/* ==================================================================
+ * Gruppe 31 (Entscheidung 3, E-E14): bin/healthcheck - die Stufen, nur aus
+ * vorhandenen Dateien (kein Modbus, kein Broker, nichts angelegt;
+ * bm_nur_lesen(true) setzt der Aufrufer). Skala von LoxBerry:
+ *   3 Fehler   Dienst soll laufen und laeuft nicht; Abbild aelter als
+ *              bm_waechter_grenze(); Konfiguration nicht in Ordnung; ein
+ *              Zwang, dessen Ruecknahme scheiterte oder der sich nicht
+ *              aufloesen laesst (E2)
+ *   4 Warnung  ein Speicher stumm laenger als bm_ok_grenze(); Geraetealarm
+ *              (Fehler-/Warnbits, Drift, Temperatur); Temperaturschutz sperrt
+ *              gerade; Befehlsbruecke soll laufen und haengt; der Waechter hat
+ *              in den letzten 24 h neu gestartet
+ *   6 Hinweis  kein Speicher eingerichtet; Spotpreis-Laden an und die Quelle
+ *              schweigt; Ausgleichsladen laeuft; unter MQTT-Gateway V2 fehlt
+ *              der Noncached-Haken bei status/ok oder geraet1/ok
+ *   5          sonst: "n Speicher, alle antworten; letzter Abruf vor n s"
+ * Rueckgabe array(Stufe, Text) - Text ohne HTML, ohne Zugangsdaten.
+ * ================================================================== */
+function bm_gesundheit($jetzt = null)
+{
+    $jetzt = ($jetzt === null) ? time() : (int) $jetzt;
+    $cfg = bm_config();
+    $p = bm_paths();
+    $geraete = bm_geraete();
+    $l = bm_loxone();
+    $werte = (is_array($l) && isset($l['geraete']) && is_array($l['geraete'])) ? $l['geraete'] : array();
+    $fehler = array();
+    $warn = array();
+    $hinweis = array();
+
+    if (bm_konfig_lage() !== 'ok') {
+        $fehler[] = sprintf(bm_t('HEALTH.KONFIG'), bm_konfig_lage());
+    }
+    $pid = bm_dienst_pid();
+    if (bm_dienst_soll() && $pid === 0) {
+        $fehler[] = bm_t('HEALTH.DIENST_STEHT');
+    }
+    $alter = (is_array($l) && isset($l['ts'])) ? $jetzt - (int) $l['ts'] : -1;
+    if ($geraete && $pid !== 0 && ($alter < 0 || $alter > bm_waechter_grenze($cfg))) {
+        $fehler[] = sprintf(bm_t('HEALTH.ABBILD_ALT'), $alter < 0 ? '-' : (string) $alter, bm_waechter_grenze($cfg));
+    }
+    list(, $un) = bm_zwang_aufteilen();
+    if ($un) {
+        $fehler[] = sprintf(bm_t('HEALTH.ZWANG_UNAUFLOESBAR'), bm_zwang_namen($un));
+    }
+    foreach ($werte as $nr => $e) {
+        $name = isset($e['name']) ? (string) $e['name'] : sprintf(bm_t('ALLG.SPEICHER_NAME'), (int) $nr);
+        if (isset($e['sollwert_ruecknahme']) && $e['sollwert_ruecknahme'] === 'gescheitert') {
+            $fehler[] = sprintf(bm_t('HEALTH.RUECKNAHME'), $name);
+        }
+        $okts = isset($e['ok_ts']) ? (int) $e['ok_ts'] : 0;
+        if (empty($e['ok']) && ($okts <= 0 || $jetzt - $okts > bm_ok_grenze($cfg))) {
+            $warn[] = sprintf(bm_t('HEALTH.STUMM'), $name);
+        }
+        if (!empty($e['ok'])) {
+            $ga = bm_alarm_geraet($e, $cfg);
+            if ($ga) {
+                $warn[] = $name . ': ' . implode(' | ', $ga);
+            }
+            $ts = bm_temp_schutz_zahl($e, $cfg);
+            if ($ts === 1 || $ts === 2) {
+                $warn[] = sprintf(bm_t('HEALTH.TEMP_SPERRT'), $name);
+            }
+        }
+    }
+    if (!empty($cfg['befehle_mqtt_ein']) && !empty($cfg['mqtt_ein'])) {
+        list($bl) = bm_bruecke_lage();
+        if ($bl === false) {
+            $warn[] = bm_t('HEALTH.BRUECKE');
+        }
+    }
+    $nm = $p['datadir'] . '/waechter_neustart';
+    if (is_file($nm) && $jetzt - (int) @filemtime($nm) < 86400) {
+        $warn[] = bm_t('HEALTH.WAECHTER');
+    }
+    if (!$geraete) {
+        $hinweis[] = bm_t('HEALTH.KEIN_SPEICHER');
+    }
+    if (!empty($cfg['spotladen_ein'])) {
+        $hp = bm_haus_preis_lesen();
+        if (!isset($hp['lage']) || $hp['lage'] !== 'haus') {
+            $hinweis[] = sprintf(bm_t('HEALTH.PREIS_SCHWEIGT'), isset($hp['lage']) ? (string) $hp['lage'] : '-');
+        }
+    }
+    $ag = bm_ausgleich_lesen();
+    if (!empty($cfg['ausgleich_ein']) && !empty($ag['laeuft'])) {
+        $hinweis[] = sprintf(bm_t('HEALTH.AUSGLEICH'), (int) round(($jetzt - (int) $ag['start']) / 60));
+    }
+    list($nl, $nf) = bm_v2_noncached_lage($cfg);
+    if ($nl === 'fehlt') {
+        $hinweis[] = sprintf(bm_t('HEALTH.NONCACHED'), implode(', ', $nf));
+    }
+    if ($fehler) {
+        return array(3, implode(' | ', array_merge($fehler, $warn)));
+    }
+    if ($warn) {
+        return array(4, implode(' | ', $warn));
+    }
+    if ($hinweis) {
+        return array(6, implode(' | ', $hinweis));
+    }
+    return array(5, sprintf(bm_t('HEALTH.GUT'), count($geraete), $alter < 0 ? '-' : (string) $alter));
+}
+
+/* ==================================================================
+ * Gruppe 31 (Entscheidung 3, E-E11): die Vorlage der Befehle ueber das
+ * MQTT-Gateway V2 - aus bb_liste() der Befehlsbruecke (EINE Quelle fuer Reiter
+ * und Vorlage), als Virtueller Ausgang am UDP-Eingang des Gateways
+ * (/dev/udp/<LoxBerry>/<Udpinport>). Rueckgabe array(Dateiname, XML) oder
+ * array('', Fehlertext).
+ * ================================================================== */
+function bm_vorlage_ausgang_mqtt()
+{
+    list($liste, $fehler) = bm_bruecke_liste();
+    if ($liste === null) {
+        return array('', $fehler);
+    }
+    $m = bm_mqtt_zustand();
+    $port = !empty($m['udpport']) ? (int) $m['udpport'] : 11884;
+    return array('VQ_BMS_MQTT.xml', bb_vorlage($liste, bm_hostname(), $port));
 }

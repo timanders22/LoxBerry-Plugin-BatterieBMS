@@ -1,0 +1,7 @@
+# Diese Pakete installiert LoxBerry mit "apt-get -y install" - als root, waehrend der Plugin-Installation
+# (postinstall.sh laeuft als loxberry und koennte es nicht).
+#
+# Gruppe 31 (0.9.38, Entscheidung 3): mosquitto_sub/_pub fuer die Befehlsbruecke (im LoxBerry-Grundabbild
+# ohnehin vorhanden; Hausform). Der Abnehmer haus/strompreis braucht es nicht - der Dienst haelt die
+# Verbindung selbst (MQTT 3.1.1 von Hand, kein Kindprozess).
+mosquitto-clients

@@ -8,6 +8,7 @@
  *   bms_dienst.php --selbsttest   Pruefungen ohne Geraet, Klartextausgabe
  *   bms_dienst.php --mqtt-leeren  zurueckbehaltene MQTT-Themen der Linie leeren
  *                                 (aus uninstall/uninstall)
+ *   jeder andere Schalter         Hilfe auf STDERR, Rueckgabewert 2 (B12a, 0.9.38)
  *
  * Der Dienst ist die EINZIGE Stelle, die mit einem Speicher spricht. Weder die
  * Oberflaeche noch der Miniserver-Endpunkt oeffnen selbst eine Verbindung.
@@ -114,6 +115,11 @@ function bm_abruf_modbus(array $g, array $pr, $tmo)
         }
         $regs = array();
         $fehler = '';
+        /* Gruppe 31 (N5): ein Block mit 'optional' => true, der nicht beantwortet wird, legt nicht mehr
+         * den ganzen Speicher still - seine Felder bleiben leer (gebremste Protokollzeile), die
+         * Verbindung wird verworfen und fuer den naechsten Block neu aufgebaut. Bis 0.9.37 brach der
+         * erste Blockfehler den Abruf ab (ok = 0 fuer alles) - ein Sungrow-Modell ohne 5213/5630 oder ein
+         * GX ohne 1290 stuende sonst ganz auf "gestoert" (Entwurf 7.2). */
         foreach ((array) $pr['bloecke'] as $block) {
             $bfc = (int) $block['fc'];
             // FC 1 und 2 liefern Bits, FC 3 und 4 Woerter. Beide landen in
@@ -124,6 +130,19 @@ function bm_abruf_modbus(array $g, array $pr, $tmo)
             $teil = ($bfc === 1 || $bfc === 2)
                 ? bm_bits_lesen($s, $g, $bfc, (int) $block['start'], (int) $block['anzahl'])
                 : bm_register_lesen($s, $g, $bfc, (int) $block['start'], (int) $block['anzahl']);
+            if (isset($teil['_fehler']) && !empty($block['optional'])) {
+                bm_log_gebremst('optional' . (int) $g['nr'] . '_' . (int) $block['start'], $g['name']
+                    . ': der optionale Block ab Register ' . (int) $block['start'] . ' wurde nicht beantwortet ('
+                    . $teil['_fehler'] . ') - seine Felder bleiben leer, der Speicher gilt weiter als erreichbar.',
+                    3600);
+                bm_verbindung_verwerfen($g);
+                $s = bm_verbindung_holen($g, $tmo, false);
+                if (is_array($s)) {
+                    $fehler = $s['_fehler'];
+                    break;
+                }
+                continue;
+            }
             if (isset($teil['_fehler'])) {
                 $fehler = 'Block ab Register ' . (int) $block['start'] . ': ' . $teil['_fehler'];
                 break;
@@ -172,6 +191,11 @@ function bm_modbus_auswerten(array $regs, array $pr)
         }
         $werte[$feld] = bm_wert_aus($regs, $beschreibung);
     }
+    /* Gruppe 31 (N4): ein Wert ausserhalb des Bereichs von bm_status_felder() ist kein Messwert - etwa
+     * SOH 6553,5 % (Sungrow 0xFFFF "nicht verfuegbar") oder 3276,7 Grad (0x7FFF). Er bleibt leer, und das
+     * Protokoll sagt es (gebremst). Schuetzt auch eigene Profile. Die Leerwerte selbst kennt ein Profil ueber
+     * den Feldschluessel 'leer' (bm_wert_aus()). */
+    $bm_bereich = bm_status_felder();
     foreach ((array) $pr['rechnung'] as $feld => $r) {
         if (!array_key_exists($feld, $werte) || !isset($r['art']) || $r['art'] !== 'produkt') {
             continue;
@@ -182,6 +206,16 @@ function bm_modbus_auswerten(array $regs, array $pr)
                                       'faktor' => $r['b_faktor'], 'nk' => 4));
         if ($a !== null && $b !== null) {
             $werte[$feld] = round($a * $b, isset($r['nk']) ? (int) $r['nk'] : 0);
+        }
+    }
+    foreach ($werte as $feld => $w) {
+        if ($w !== null && isset($bm_bereich[$feld])
+            && ($w < $bm_bereich[$feld][2] || $w > $bm_bereich[$feld][3])) {
+            bm_log_gebremst('unplausibel_' . $feld . '_' . (isset($pr['name']) ? md5((string) $pr['name']) : ''),
+                'Profil ' . (isset($pr['name']) ? $pr['name'] : '?') . ' liefert einen unplausiblen Wert: '
+                . $feld . ' = ' . $w . ' (Bereich ' . $bm_bereich[$feld][2] . ' bis ' . $bm_bereich[$feld][3]
+                . ') - das Feld bleibt leer.', 3600);
+            $werte[$feld] = null;
         }
     }
     return array('werte' => $werte, 'regs' => $regs);
@@ -273,8 +307,15 @@ function bm_zellen_byd(array $g, array $pr, $tmo, $bmsIndex = 1)
                 continue;
             }
             $wort = (int) $daten[$tab + $m * $tje + $i];
-            $temps[] = ($wort >> 8) & 0xFF;
-            $temps[] = $wort & 0xFF;
+            /* Gruppe 31 (B11): je Byte vorzeichenbehaftet (int8). Annahme, nicht belegt - der Sammelwert
+             * 0x0507 (TMIN) ist s16, bei Frost waere ein Byte 0xFB sonst 251 Grad statt -5. Unplausible Werte
+             * (ausserhalb -40 ... 100 Grad, bm_status_felder()) gehen nicht in tmax/tmin des Moduls. */
+            foreach (array(($wort >> 8) & 0xFF, $wort & 0xFF) as $bm_b) {
+                $bm_t = bm_int8($bm_b);
+                if ($bm_t >= -40 && $bm_t <= 100) {
+                    $temps[] = $bm_t;
+                }
+            }
         }
         $module[$m + 1] = array(
             'zellen' => $spannungen,
@@ -286,6 +327,13 @@ function bm_zellen_byd(array $g, array $pr, $tmo, $bmsIndex = 1)
         );
     }
     return array('module' => $module);
+}
+
+/** Gruppe 31 (B11): ein Byte als int8 (0xFB -> -5). */
+function bm_int8($b)
+{
+    $b = (int) $b & 0xFF;
+    return $b > 127 ? $b - 256 : $b;
 }
 
 /* ==================================================================
@@ -1084,6 +1132,9 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
     $abbild = array('ts' => time(), 'ok' => 0, 'geraete' => array());
     $stoerung = '';
     $okZahl = 0;
+    // Gruppe 31 (-1-Regel c): gemeldete Ausfaelle je Nummer (nur in diesem Prozess) und die dieses Durchlaufs.
+    static $bm_ausfall_gemeldet = array();
+    $bm_ausfall_jetzt = array();
 
     foreach ($geraete as $nr => $g) {
         $pr = isset($profile[$g['profil']]) ? $profile[$g['profil']] : null;
@@ -1115,6 +1166,18 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
             $stoerung = $g['name'] . ': ' . $ausfall[$nr]['text'];
             $eintrag['OK'] = 0;
             $eintrag['ALTER'] = 0;
+            /* Gruppe 31: auch in der Ausfallpause den Zeitstempel des letzten Erfolgs behalten (wie der Kopf
+             * oben verspricht - bis 0.9.37 fiel er hier weg, geraetN/ts ging auf 0) und den Ausfall EINMAL
+             * melden (-1-Regel, Fall c): die Pause beginnt nach drei Fehlschlaegen, also meist vor der
+             * Grenze von drei Takten. */
+            $bm_vp = bm_werte();
+            $eintrag['ok_ts'] = isset($bm_vp[$nr]['ok_ts']) ? (int) $bm_vp[$nr]['ok_ts'] : 0;
+            $eintrag['zell_ts'] = isset($bm_vp[$nr]['zell_ts']) ? (int) $bm_vp[$nr]['zell_ts'] : 0;
+            if (!isset($bm_ausfall_gemeldet[$nr])
+                && ((int) $eintrag['ok_ts'] <= 0 || time() - (int) $eintrag['ok_ts'] > bm_ok_grenze($cfg))) {
+                $bm_ausfall_gemeldet[$nr] = time();
+                $bm_ausfall_jetzt[] = (int) $nr;
+            }
             $abbild['geraete'][$nr] = $eintrag;
             continue;
         }
@@ -1163,6 +1226,7 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
                         $eintrag['module'] = bm_module_vorher($nr);
                     } else {
                         $eintrag['module'] = $zellen['module'];
+                        $eintrag['zell_ts'] = time();   // Gruppe 31: Zeitpunkt des Zelldatenabrufs
                     }
                 } elseif ($kannZellen) {
                     // Zwischen zwei Zelldatenabrufen die vorigen behalten,
@@ -1271,8 +1335,9 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
                 && $eintrag['SOC'] <= (int) $cfg['soc_min']) {
                 $fenster = sprintf(bm_t('DIENST.SOC_ZU_NIEDRIG'), $eintrag['SOC'], (int) $cfg['soc_min']);
             } elseif ((string) $soll['aktion'] === 'laden' && (int) $soll['watt'] > 0
-                && $eintrag['SOC'] >= (int) $cfg['soc_max']) {
-                $fenster = sprintf(bm_t('DIENST.SOC_ZU_HOCH'), $eintrag['SOC'], (int) $cfg['soc_max']);
+                && $eintrag['SOC'] >= bm_soc_ober($cfg, isset($soll['quelle']) ? (string) $soll['quelle'] : '')) {
+                $fenster = sprintf(bm_t('DIENST.SOC_ZU_HOCH'), $eintrag['SOC'],
+                    bm_soc_ober($cfg, isset($soll['quelle']) ? (string) $soll['quelle'] : ''));
             }
             if ($fenster !== '') {
                 list($okF, $meldF) = bm_steuern($g, $pr, 'automatik', 0);
@@ -1289,6 +1354,37 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
                         . ' ' . $meldF . ' Es wird im naechsten Durchlauf erneut versucht. '
                         . 'BITTE AM GERAET PRUEFEN.', 900);
                     $stoerung = $g['name'] . ': ' . $fenster . ' ' . $meldF;
+                    $eintrag['sollwert_ruecknahme'] = 'gescheitert';
+                }
+            }
+        }
+        /* Gruppe 31 (Entscheidung 2, Vorrang): Temperaturschutz auch WAEHREND des Zwangs - derselbe frisch
+         * gemessene Durchlauf wie das Ladezustandsfenster, nur wenn das Fenster nichts fand. Verletzung ->
+         * automatik; bei Erfolg Sollwertdatei weg und eine LoxBerry-Meldung (einmal je Zwang, er endet
+         * damit), sonst bleibt sie, der naechste Durchlauf versucht es erneut. Die Ruecknahme haengt nie an
+         * den Freigaben (C3). Eigene Protokolltexte (N2: die Zeile des Fensters passte nicht). */
+        if ($soll && isset($soll['aktion']) && !empty($eintrag['ok']) && (int) $soll['watt'] > 0) {
+            list($bm_tc, $bm_tt) = bm_temp_schutz((string) $soll['aktion'], $eintrag, $cfg, true);
+            if ($bm_tc !== '') {
+                list($okT, $meldT) = bm_steuern($g, $pr, 'automatik', 0);
+                bm_gleichwert_nachher($nr, 'automatik', 0, false);   // X-7
+                $bm_tw = ($bm_tc === 'TEMP_MIN') ? bm_temp_wert($eintrag, 'TMIN') : bm_temp_wert($eintrag, 'TMAX');
+                if ($bm_tw === null) {
+                    $bm_tw = bm_temp_wert($eintrag, 'TBAT');
+                }
+                $bm_tg = ($bm_tc === 'TEMP_MIN') ? (int) $cfg['temp_min'] : (int) $cfg['temp_max'];
+                $bm_zw = $soll['aktion'] . ':' . (int) $soll['watt'];
+                if ($okT) {
+                    bm_soll_loeschen($nr);
+                    $bm_rt = sprintf(bm_t('DIENST.TEMP_RUECK'), $g['name'], bm_temp_zahl($bm_tw),
+                        $bm_tc === 'TEMP_MIN' ? '<' : '>', $bm_tg, $bm_zw);
+                    bm_log($bm_rt . ' ' . $meldT);
+                    bm_benachrichtigen(3, $bm_rt);
+                    $soll = array();
+                } else {
+                    bm_log_gebremst('temp_rueck' . $nr, sprintf(bm_t('DIENST.TEMP_RUECK_FEHL'), $g['name'],
+                        bm_temp_zahl($bm_tw), $bm_tc === 'TEMP_MIN' ? '<' : '>', $bm_tg, $bm_zw) . ' ' . $meldT, 900);
+                    $stoerung = $g['name'] . ': ' . $bm_tt . ' ' . $meldT;
                     $eintrag['sollwert_ruecknahme'] = 'gescheitert';
                 }
             }
@@ -1357,9 +1453,25 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
             $eintrag['OK'] = 1;
             $eintrag['ok_ts'] = time();
             bm_verlauf_schreiben($nr, $eintrag);
+            unset($bm_ausfall_gemeldet[$nr]);
         } else {
             $eintrag['OK'] = 0;
             $eintrag['ok_ts'] = isset($vorher[$nr]['ok_ts']) ? (int) $vorher[$nr]['ok_ts'] : 0;
+            /* Gruppe 31 (-1-Regel, Fall c): ein AUSFALL (ok = 0 laenger als bm_ok_grenze()) wird EINMAL
+             * je Ausfall gemeldet - die fluechtigen Zahlenthemen gehen dann auf -1 bzw. -999
+             * (bm_mqtt_paare()). Ein einzelner Aussetzer laesst die Werte stehen (Fall b, Regeln/07). */
+            if (!isset($bm_ausfall_gemeldet[$nr])
+                && ((int) $eintrag['ok_ts'] <= 0 || time() - (int) $eintrag['ok_ts'] > bm_ok_grenze($cfg))) {
+                $bm_ausfall_gemeldet[$nr] = time();
+                $bm_ausfall_jetzt[] = (int) $nr;
+            }
+        }
+        /* Gruppe 31: Zeitpunkt des letzten Zelldatenabrufs (Ausgleichsladen zaehlt zwei aufeinander
+         * folgende). Ohne eigenen Zellabruf (Modbus-Register, Pylontech) zaehlt jeder gelungene Abruf. */
+        if (!isset($eintrag['zell_ts'])) {
+            $bm_kz = isset($pr['zellen']['verfahren']) && $pr['zellen']['verfahren'] === 'byd_bms';
+            $eintrag['zell_ts'] = (!$bm_kz && $eintrag['ok']) ? time()
+                : (isset($vorher[$nr]['zell_ts']) ? (int) $vorher[$nr]['zell_ts'] : 0);
         }
         $eintrag['ALTER'] = 0;
         $abbild['geraete'][$nr] = $eintrag;
@@ -1400,7 +1512,10 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
     bm_tmp_aufraeumen(bm_paths()['datadir']);
 
     if (!empty($cfg['mqtt_ein'])) {
-        bm_veroeffentlichen($abbild, (string) $cfg['mqtt_topic']);
+        // Gruppe 31: die Ausfaelle dieses Durchlaufs reisen nur zum Senden mit, nicht ins Abbild.
+        $bm_mq = $abbild;
+        $bm_mq['ausfall'] = $bm_ausfall_jetzt;
+        bm_veroeffentlichen($bm_mq, (string) $cfg['mqtt_topic']);
     }
     return $abbild;
 }
@@ -1588,7 +1703,12 @@ function bm_alte_befehle_verwerfen()
     $p = bm_paths();
     $jetzt = time();
     clearstatcache();
-    foreach ((array) glob($p['datadir'] . '/befehle/*.json') as $datei) {
+    // Gruppe 31 (N1): eigener Ordner auftraege/ und nur Dateinamen der eigenen Form - befehle/ ist der
+    // Datenordner der Befehlsbruecke.
+    foreach ((array) glob(bm_auftraege_ordner() . '/*.json') as $datei) {
+        if (!bm_auftrag_datei_gilt($datei)) {
+            continue;
+        }
         $mt = @filemtime($datei);
         $alter = ($mt === false) ? null : $jetzt - (int) $mt;
         if (bm_befehl_alter_gilt($alter)) {
@@ -1624,7 +1744,7 @@ function bm_warteschlange(&$letzteSchreibzeit)
 {
     $p = bm_paths();
     $cfg = bm_config();
-    $ordner = $p['datadir'] . '/befehle';
+    $ordner = bm_auftraege_ordner();   // Gruppe 31 (N1): nicht mehr befehle/ (Datenordner der Bruecke)
     $antworten = $p['datadir'] . '/antworten';
     if (!is_dir($ordner)) {
         return false;
@@ -1688,6 +1808,9 @@ function bm_warteschlange(&$letzteSchreibzeit)
     }
 
     foreach ((array) glob($ordner . '/*.json') as $datei) {
+        if (!bm_auftrag_datei_gilt($datei)) {
+            continue;   // Gruppe 31 (N1): nur die eigene Form - nie eine fremde Datei fressen
+        }
         $kennung = basename($datei, '.json');
         clearstatcache(true, $datei);
         $mt = @filemtime($datei);
@@ -1716,6 +1839,10 @@ function bm_warteschlange(&$letzteSchreibzeit)
         // X-7: derselbe Sollwert ging vor weniger als 60 s schon hinaus.
         if (!empty($erg[2])) {
             $antwort['unveraendert'] = 1;
+        }
+        // Gruppe 31 (N6): die Ablehnung als ASCII fuer die Quittung der Befehlsbruecke.
+        if (isset($erg[3]) && (string) $erg[3] !== '') {
+            $antwort['quittung'] = (string) $erg[3];
         }
         bm_json_schreiben($antworten . '/' . $kennung . '.json', $antwort);
         bm_log('Befehl ' . $befehl['aktion'] . ': '
@@ -1965,12 +2092,28 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
     $werte = bm_werte();
     $soc = isset($werte[$nr]['SOC']) ? $werte[$nr]['SOC'] : null;
     if ($soc !== null) {
-        if ($aktion === 'laden' && $soc >= (int) $cfg['soc_max']) {
-            return array(0, sprintf(bm_t('DIENST.SOC_ZU_HOCH'), $soc, (int) $cfg['soc_max']));
+        // Gruppe 31 (E-E20): fuer die Quelle "Ausgleich" gilt als Obergrenze 100 statt soc_max.
+        if ($aktion === 'laden' && $soc >= bm_soc_ober($cfg, $bm_quelle)) {
+            return array(0, sprintf(bm_t('DIENST.SOC_ZU_HOCH'), $soc, bm_soc_ober($cfg, $bm_quelle)));
         }
         if ($aktion === 'entladen' && $soc <= (int) $cfg['soc_min']) {
             return array(0, sprintf(bm_t('DIENST.SOC_ZU_NIEDRIG'), $soc, (int) $cfg['soc_min']));
         }
+    }
+
+    /* Gruppe 31 (Entscheidung 2, VORRANG): Temperaturschutz - nach Grenze und Ladezustandsfenster, VOR
+     * der Gleichwert-Antwort (N2: sonst bekaeme ein bei Frost wiederholter Sollwert "UNVERAENDERT" statt
+     * der Ablehnung) und VOR der Schreibbremse (sonst landete er in der Nachholmappe; die laeuft beim
+     * Nachholen ohnehin wieder hier durch). Messwert aus dem Abbild des letzten Durchlaufs wie das
+     * Ladezustandsfenster, Frische ueber ok_ts. Ablehnung gebremst ins Protokoll (300 s je Speicher und
+     * Aktion) - der Absender bekommt sie ohnehin zurueck; das vierte Feld ist die ASCII-Fassung fuer die
+     * Quittung der Befehlsbruecke (N6). */
+    $bm_e = (isset($werte[$nr]) && is_array($werte[$nr])) ? $werte[$nr] : array();
+    list($bm_tcode, $bm_ttext, $bm_tascii) = bm_temp_schutz($aktion, $bm_e, $cfg, bm_temp_frisch($bm_e, $cfg));
+    if ($bm_tcode !== '') {
+        bm_log_gebremst('temp_ab' . $nr . $aktion, $g['name'] . ': ' . $aktion . ':' . $watt
+            . ($bm_quelle !== '' ? ' von ' . $bm_quelle : '') . ' - ' . $bm_ttext, 300);
+        return array(0, $bm_ttext, 0, $bm_tascii);
     }
 
     /* X-7: derselbe Sollwert vom Endpunkt innerhalb von 60 s geht nicht
@@ -2021,6 +2164,380 @@ function bm_befehl_ausfuehren(array $befehl, &$letzteSchreibzeit, &$sofortAbruf)
 }
 
 /* ==================================================================
+ * Gruppe 31 (Entscheidung 3, Nr. 15, E-E7/E-E8): Abnehmer haus/strompreis
+ * und Spotpreis-Laden im Plugin
+ *
+ * Die Verbindung haelt der Dienst selbst (bm_haus_verbinden() und
+ * bm_haus_pflegen() in der Bibliothek) - nur, solange "Spotpreis-Laden im
+ * Plugin" eingeschaltet ist. Kein Kindprozess: die Sperre dienst.lock
+ * vererbt sich nicht, der Kommentar am Dateiende ("keine Dauerkinder") bleibt
+ * wahr. Neu verbunden wird gebremst (5 s, dann verdoppelt bis 60 s).
+ *
+ * Das Spotpreis-Laden laedt den gewaehlten Speicher selbst, solange der
+ * ENDPREIS (haus/strompreis/aktuell, ct/kWh brutto - nicht der Boersenanteil)
+ * unter der Grenze liegt und, wenn eingestellt, die laufende Stunde unter den
+ * k guenstigsten bis zum Ende der Vorschau ist. Es laeuft ueber
+ * bm_befehl_ausfuehren() (Quelle "Spotpreis") - mit Wattgrenze,
+ * Ladezustandsfenster, Temperaturschutz, X-7 und Schreibbremse wie jeder
+ * Befehl. Vorrang hat jeder Befehl von aussen (Loxone, EVCC, Bruecke, Reiter
+ * Test): liegt ein fremder Zwang, wartet es, und danach noch 10 min. Es nimmt
+ * nur den EIGENEN Zwang zurueck. Nie zugleich mit dem Ausgleichsladen.
+ * Ab Werk aus.
+ * ================================================================== */
+define('BM_SPOT_QUELLE', 'Spotpreis');
+define('BM_AUSGLEICH_QUELLE', 'Ausgleich');
+define('BM_SPOT_PAUSE_FREMD', 600);
+
+/** Verbindung zum Broker fuer haus/strompreis pflegen - in jedem Schleifendurchgang. $hv: Verbindung (oder
+ *  leer), $hb: Bremse (naechster Versuch, Wartezeit). */
+function bm_haus_lauf(array $cfg, array &$hv, array &$hb)
+{
+    $jetzt = time();
+    if (empty($cfg['spotladen_ein'])) {
+        if ($hv) {
+            bm_haus_trennen($hv);
+            bm_log('Spotpreis-Laden: aus - die Verbindung zu haus/strompreis ist getrennt.');
+        }
+        $hb = array();
+        return;
+    }
+    if (!$hv) {
+        if (isset($hb['naechster']) && $jetzt < (int) $hb['naechster']) {
+            return;
+        }
+        list($neu, $grund) = bm_haus_verbinden();
+        if ($neu === null) {
+            $warte = isset($hb['warte']) ? min(60, 2 * (int) $hb['warte']) : 5;
+            $hb = array('naechster' => $jetzt + $warte, 'warte' => $warte, 'grund' => $grund);
+            bm_log_gebremst('haus_verbinden', 'Spotpreis-Laden: keine Verbindung fuer haus/strompreis - ' . $grund
+                . '. Neuer Versuch in ' . $warte . ' s.', 900);
+            return;
+        }
+        $hv = $neu;
+        $hb = array();
+        bm_log('Spotpreis-Laden: Verbindung fuer haus/strompreis steht (Dauerverbindung des Dienstes).');
+        return;
+    }
+    if (!bm_haus_pflegen($hv, $jetzt)) {
+        bm_haus_trennen($hv);
+        $hb = array('naechster' => $jetzt + 5, 'warte' => 5, 'grund' => 'Verbindung verloren');
+        bm_log_gebremst('haus_verloren', 'Spotpreis-Laden: die Verbindung fuer haus/strompreis ist abgerissen - '
+            . 'neuer Versuch in 5 s.', 900);
+    }
+}
+
+/** Ein Zwang dieses Plugins (Quelle Spotpreis oder Ausgleich) an Nummer $nr? */
+function bm_soll_eigen($soll, $quelle)
+{
+    return is_array($soll) && isset($soll['aktion']) && isset($soll['quelle']) && (string) $soll['quelle'] === $quelle;
+}
+
+/** Das Spotpreis-Laden je Durchlauf. Schreibt spotladen.json (Lage fuer MQTT, Reiter Test, healthcheck) und
+ *  haus_strompreis.json (Zustand der Preisquelle, ohne Zugangsdaten). */
+function bm_spotladen_lauf(array $cfg, array $hv, &$letzteSchreibzeit, &$sofortAbruf)
+{
+    $jetzt = time();
+    $alt = bm_spotladen_lesen();
+    $nr = max(1, (int) $cfg['spotladen_geraet']);
+    $zust = array('ts' => $jetzt, 'geraet' => $nr, 'wert' => -1, 'grund' => 'aus',
+                  'fremd_bis' => isset($alt['fremd_bis']) ? (int) $alt['fremd_bis'] : 0);
+    $soll = bm_soll_lesen($nr);
+    $eigen = bm_soll_eigen($soll, BM_SPOT_QUELLE);
+
+    // Lage der Preisquelle - auch fuer den Reiter Test, wenn der Haken aus ist (dann "aus").
+    $lage = 'aus';
+    $preis = null;
+    $rang = 0;
+    $zahl = 0;
+    $guenstig = array();
+    if (!empty($cfg['spotladen_ein'])) {
+        list($lage, $liste) = bm_preis_quelle($hv, $jetzt);
+        if ($liste) {
+            list($preis, $rang, $zahl, $guenstig) = bm_preis_rang($liste, $jetzt);
+        }
+        $altp = bm_haus_preis_lesen();
+        $seit = (isset($altp['lage'], $altp['seit']) && $altp['lage'] === $lage) ? (int) $altp['seit'] : $jetzt;
+        bm_haus_preis_schreiben(array('lage' => $lage, 'seit' => $seit, 'preis_jetzt' => $preis, 'rang' => $rang,
+            'stunden' => $zahl, 'guenstig' => $guenstig,
+            'zaehler_ts' => isset($hv['zaehler_ts']) ? (int) $hv['zaehler_ts'] : 0,
+            'quelle_anbieter' => isset($hv['werte']['anbieter']) ? bm_text_sauber((string) $hv['werte']['anbieter'], 60) : '',
+            'ts' => $jetzt));
+    }
+
+    if (empty($cfg['spotladen_ein'])) {
+        if ($eigen) {
+            bm_spot_zuruecknehmen($nr, 'Haken aus', $letzteSchreibzeit, $sofortAbruf);
+        }
+        bm_spot_schreiben($zust);
+        return;
+    }
+    // Ein Befehl von aussen hat Vorrang: liegt ein fremder Zwang, wartet das Spotpreis-Laden (und danach 10 min).
+    if (is_array($soll) && isset($soll['aktion']) && !$eigen) {
+        $zust['fremd_bis'] = $jetzt + BM_SPOT_PAUSE_FREMD;
+        $zust['wert'] = 2;
+        $zust['grund'] = 'fremder Zwang (' . bm_text_sauber((string) (isset($soll['quelle']) ? $soll['quelle'] : '?'), 40) . ')';
+        bm_spot_schreiben($zust);
+        return;
+    }
+    $grund = '';
+    if ($lage !== 'haus') {
+        $grund = 'Preisquelle: ' . $lage;
+    } elseif ($preis === null || $preis > (float) $cfg['spotladen_grenze_ct']) {
+        $grund = 'Preis ' . ($preis === null ? '-' : $preis) . ' ct ueber der Grenze ' . (int) $cfg['spotladen_grenze_ct'] . ' ct';
+    } elseif ((int) $cfg['spotladen_rang'] > 0 && $rang > (int) $cfg['spotladen_rang']) {
+        $grund = 'Rang ' . $rang . ' von ' . $zahl . ' - nicht unter den ' . (int) $cfg['spotladen_rang'] . ' guenstigsten';
+    }
+    $gesperrt = '';
+    if ($grund === '') {
+        $w = bm_wache_einstellungen($cfg);
+        $e = bm_werte();
+        $e = isset($e[$nr]) && is_array($e[$nr]) ? $e[$nr] : array();
+        $aus = bm_ausgleich_lesen();
+        if ($jetzt < (int) $zust['fremd_bis']) {
+            $gesperrt = 'Pause nach einem Befehl von aussen (noch ' . ((int) $zust['fremd_bis'] - $jetzt) . ' s)';
+        } elseif ($w['fuehrung'] !== 'beide') {
+            $gesperrt = 'Fuehrung ' . $w['fuehrung'];
+        } elseif (empty($cfg['steuerung_ein'])) {
+            $gesperrt = 'Schreibende Befehle aus';
+        } elseif ((int) $cfg['spotladen_watt'] <= 0) {
+            $gesperrt = 'keine Ladeleistung eingestellt';
+        } elseif (isset($aus['laeuft']) && (int) $aus['laeuft'] === 1) {
+            $gesperrt = 'Ausgleichsladen laeuft';
+        } elseif (!bm_temp_frisch($e, $cfg) || !isset($e['SOC']) || !is_numeric($e['SOC'])) {
+            $gesperrt = 'kein frischer Ladezustand';
+        } elseif ((float) $e['SOC'] >= (float) $cfg['spotladen_ziel']) {
+            $grund = 'Ziel ' . (int) $cfg['spotladen_ziel'] . ' Proz. erreicht';
+        }
+    }
+    if ($grund !== '' || $gesperrt !== '') {
+        if ($eigen) {
+            bm_spot_zuruecknehmen($nr, $grund !== '' ? $grund : $gesperrt, $letzteSchreibzeit, $sofortAbruf);
+        }
+        $zust['wert'] = ($gesperrt !== '') ? 2 : ($lage === 'haus' ? 0 : -1);
+        $zust['grund'] = ($gesperrt !== '') ? $gesperrt : $grund;
+        bm_spot_schreiben($zust);
+        return;
+    }
+    // Bedingung wahr: laden (oder den eigenen Zwang auffrischen - sein eigenes Lebenszeichen).
+    if ($eigen && (string) $soll['aktion'] === 'laden' && (int) $soll['watt'] === (int) $cfg['spotladen_watt']) {
+        bm_soll_schreiben($nr, 'laden', (int) $soll['watt'], BM_SPOT_QUELLE,
+            bm_soll_zusatz_alt($soll, bm_geraet($nr), bm_profil(bm_geraet($nr)['profil'])));
+        $zust['wert'] = 1;
+        $zust['grund'] = 'laedt';
+        bm_spot_schreiben($zust);
+        return;
+    }
+    list($ok, $meld) = bm_befehl_ausfuehren(array('aktion' => 'laden', 'geraet' => $nr,
+        'watt' => (int) $cfg['spotladen_watt'], 'quelle' => BM_SPOT_QUELLE), $letzteSchreibzeit, $sofortAbruf);
+    $zust['wert'] = ((int) $ok === 1) ? 1 : 2;
+    $zust['grund'] = ((int) $ok === 1) ? 'laedt' : bm_text_sauber((string) $meld, 200);
+    if ((int) $ok !== 1) {
+        bm_log_gebremst('spot_ab' . $nr, 'Spotpreis-Laden, Speicher ' . $nr . ': Laden abgelehnt - ' . $meld, 900);
+    } elseif (!$eigen) {
+        bm_log('Spotpreis-Laden, Speicher ' . $nr . ': Endpreis ' . $preis . ' ct (Rang ' . $rang . ' von ' . $zahl
+            . ') unter der Grenze ' . (int) $cfg['spotladen_grenze_ct'] . ' ct - laden mit '
+            . (int) $cfg['spotladen_watt'] . ' W.');
+    }
+    bm_spot_schreiben($zust);
+}
+
+/** Nur den EIGENEN Zwang zuruecknehmen (nie einen fremden). */
+function bm_spot_zuruecknehmen($nr, $grund, &$letzteSchreibzeit, &$sofortAbruf)
+{
+    list($ok, $meld) = bm_befehl_ausfuehren(array('aktion' => 'automatik', 'geraet' => (int) $nr,
+        'quelle' => BM_SPOT_QUELLE), $letzteSchreibzeit, $sofortAbruf);
+    if ($ok) {
+        bm_log('Spotpreis-Laden, Speicher ' . (int) $nr . ': ' . $grund . ' - eigener Zwang zurueckgenommen.');
+    } else {
+        // Gebremst: der naechste Durchlauf versucht es erneut, das Protokoll soll nicht alle 5 s eine Zeile tragen.
+        bm_log_gebremst('spot_rueck' . (int) $nr, 'Spotpreis-Laden, Speicher ' . (int) $nr . ': ' . $grund
+            . ' - eigener Zwang NICHT zurueckgenommen (' . $meld . '). Neuer Versuch im naechsten Durchlauf.', 900);
+    }
+}
+
+function bm_spot_schreiben(array $z)
+{
+    $js = json_encode($z, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if (is_string($js)) {
+        bm_datei_schreiben(bm_paths()['datadir'] . '/spotladen.json', $js, 0644);
+    }
+}
+
+/* ==================================================================
+ * Gruppe 31 (Entscheidung 4, E-E19/E-E20): Ausgleichsladen auf 100 % bei
+ * hoher Zelldrift - eine bewusste, einmalige Wartungsladung. Ab Werk aus.
+ *
+ * Ausloesen nur, wenn ALLES zutrifft: Haken an; Speicher mit Steuerung
+ * "laden" und Schreiben an; "Schreibende Befehle zulassen"; Fuehrung "beide";
+ * KEINE Sollwertdatei (kein fremder Zwang, keine Sperre, kein
+ * Spotpreis-Laden); Zelldrift frisch >= Startschwelle in zwei aufeinander
+ * folgenden Zelldatenabrufen; letzter Ausgleich aelter als der Abstand;
+ * Temperaturschutz frei; Ladezustand frisch < 100. Ende: Drift unter der
+ * Rueckkehrschwelle in zwei Zelldatenabrufen -> automatik. Abbruch:
+ * Hoechstdauer, Temperaturschutz, Speicher stumm laenger als
+ * bm_ok_grenze(), Haken aus; ein Befehl von aussen ersetzt die Sollwertdatei
+ * -> abgebrochen, ohne etwas zurueckzunehmen (der fremde Zwang gewinnt).
+ * soc_max gilt fuer die Quelle "Ausgleich" nicht (Ziel 100 %, E-E20).
+ * ================================================================== */
+function bm_ausgleich_lauf(array $cfg, &$letzteSchreibzeit, &$sofortAbruf)
+{
+    $jetzt = time();
+    $a = bm_ausgleich_lesen();
+    $a += array('laeuft' => 0, 'geraet' => 0, 'start' => 0, 'letzter' => 0, 'ueber' => 0, 'unter' => 0,
+                'zell_ts' => 0, 'wert' => -1, 'grund' => 'aus', 'abbruch' => 0);
+    $werte = bm_werte();
+    $ziel = 0;
+    foreach (bm_geraete() as $nr => $g) {
+        $pr = bm_profil($g['profil']);
+        if ($pr !== null && !empty($g['schreiben']) && !empty($pr['steuerung']['laden']['schritte'])) {
+            $ziel = (int) $nr;
+            break;
+        }
+    }
+    if ((int) $a['laeuft'] === 1) {
+        $nr = (int) $a['geraet'];
+        $soll = bm_soll_lesen($nr);
+        $e = isset($werte[$nr]) && is_array($werte[$nr]) ? $werte[$nr] : array();
+        $abbruch = '';
+        if (!bm_soll_eigen($soll, BM_AUSGLEICH_QUELLE)) {
+            $abbruch = 'Befehl von aussen - der fremde Zwang hat Vorrang';
+            $zurueck = false;
+        } else {
+            $zurueck = true;
+            list($tc) = bm_temp_schutz('laden', $e, $cfg, bm_temp_frisch($e, $cfg));
+            if (empty($cfg['ausgleich_ein'])) {
+                $abbruch = 'Haken aus';
+            } elseif ($jetzt - (int) $a['start'] > 60 * (int) $cfg['ausgleich_max_min']) {
+                $abbruch = 'Hoechstdauer ' . (int) $cfg['ausgleich_max_min'] . ' min erreicht';
+            } elseif ($tc !== '') {
+                $abbruch = 'Temperaturschutz';
+            } elseif (isset($e['ok_ts']) && $jetzt - (int) $e['ok_ts'] > bm_ok_grenze($cfg)) {
+                $abbruch = 'Speicher antwortet nicht';
+            }
+        }
+        if ($abbruch === '' && bm_temp_frisch($e, $cfg) && isset($e['UZDIFF']) && is_numeric($e['UZDIFF'])
+            && isset($e['zell_ts']) && (int) $e['zell_ts'] !== (int) $a['zell_ts']) {
+            $a['zell_ts'] = (int) $e['zell_ts'];
+            $a['unter'] = ((int) $e['UZDIFF'] < (int) $cfg['ausgleich_rueck_mv']) ? (int) $a['unter'] + 1 : 0;
+        }
+        if ($abbruch === '' && (int) $a['unter'] >= 2) {
+            list($ok, $meld) = bm_befehl_ausfuehren(array('aktion' => 'automatik', 'geraet' => $nr,
+                'quelle' => BM_AUSGLEICH_QUELLE), $letzteSchreibzeit, $sofortAbruf);
+            $t = sprintf(bm_t('DIENST.AUSGLEICH_ENDE'), $nr, isset($e['UZDIFF']) ? (int) $e['UZDIFF'] : -1,
+                (int) round(($jetzt - (int) $a['start']) / 60));
+            bm_log($t . ($ok ? '' : ' Ruecknahme FEHLGESCHLAGEN: ' . $meld));
+            bm_benachrichtigen(6, $t);
+            $a = array_merge($a, array('laeuft' => 0, 'letzter' => $jetzt, 'wert' => 0, 'grund' => 'beendet',
+                                       'abbruch' => 0, 'ueber' => 0, 'unter' => 0));
+        } elseif ($abbruch !== '') {
+            if ($zurueck) {
+                bm_befehl_ausfuehren(array('aktion' => 'automatik', 'geraet' => $nr, 'quelle' => BM_AUSGLEICH_QUELLE),
+                    $letzteSchreibzeit, $sofortAbruf);
+            }
+            $t = sprintf(bm_t('DIENST.AUSGLEICH_ABBRUCH'), $nr, $abbruch);
+            bm_log($t);
+            bm_benachrichtigen(6, $t);
+            $a = array_merge($a, array('laeuft' => 0, 'letzter' => $jetzt, 'wert' => 2, 'grund' => $abbruch,
+                                       'abbruch' => 1, 'ueber' => 0, 'unter' => 0));
+        } else {
+            // Der Dienst ist selbst die Quelle der Lebenszeichen dieses Zwangs.
+            bm_soll_schreiben($nr, (string) $soll['aktion'], (int) $soll['watt'], BM_AUSGLEICH_QUELLE,
+                bm_soll_zusatz_alt($soll, bm_geraet($nr), bm_profil(bm_geraet($nr)['profil'])));
+            $a['wert'] = 1;
+            $a['grund'] = 'laeuft';
+        }
+        $a['ts'] = $jetzt;
+        bm_ausgleich_schreiben($a);
+        return;
+    }
+    if (empty($cfg['ausgleich_ein'])) {
+        $a = array_merge($a, array('wert' => -1, 'grund' => 'aus', 'ueber' => 0, 'ts' => $jetzt));
+        bm_ausgleich_schreiben($a);
+        return;
+    }
+    $gesperrt = '';
+    $w = bm_wache_einstellungen($cfg);
+    $e = ($ziel > 0 && isset($werte[$ziel]) && is_array($werte[$ziel])) ? $werte[$ziel] : array();
+    if ($ziel === 0) {
+        $gesperrt = 'kein Speicher mit Ladesteuerung und Schreiben an';
+    } elseif (empty($cfg['steuerung_ein'])) {
+        $gesperrt = 'Schreibende Befehle aus';
+    } elseif ($w['fuehrung'] !== 'beide') {
+        $gesperrt = 'Fuehrung ' . $w['fuehrung'];
+    } elseif ((int) $cfg['ausgleich_watt'] <= 0) {
+        $gesperrt = 'keine Ladeleistung eingestellt';
+    } elseif (is_array(bm_soll_lesen($ziel)) && bm_soll_lesen($ziel)) {
+        $gesperrt = 'ein Zwang liegt';
+    } elseif ($jetzt - (int) $a['letzter'] < 86400 * (int) $cfg['ausgleich_abstand_tage']) {
+        $gesperrt = 'Abstand: frueheste Wiederholung ' . date('d.m. H:i', (int) $a['letzter'] + 86400 * (int) $cfg['ausgleich_abstand_tage']);
+    }
+    // Zwei aufeinander folgende Zelldatenabrufe ueber der Startschwelle (eine Spitze unter Last zaehlt nicht).
+    if ($ziel > 0 && bm_temp_frisch($e, $cfg) && isset($e['UZDIFF']) && is_numeric($e['UZDIFF'])
+        && isset($e['zell_ts']) && (int) $e['zell_ts'] !== (int) $a['zell_ts']) {
+        $a['zell_ts'] = (int) $e['zell_ts'];
+        $a['ueber'] = ((int) $e['UZDIFF'] >= (int) $cfg['ausgleich_start_mv']) ? (int) $a['ueber'] + 1 : 0;
+    }
+    $a['wert'] = (int) $a['abbruch'] === 1 ? 2 : 0;
+    $a['grund'] = $gesperrt !== '' ? 'gesperrt: ' . $gesperrt
+        : 'bereit (Drift ' . (isset($e['UZDIFF']) && is_numeric($e['UZDIFF']) ? (int) $e['UZDIFF'] : '-') . ' mV)';
+    if ($gesperrt === '' && (int) $a['ueber'] >= 2) {
+        list($tc) = bm_temp_schutz('laden', $e, $cfg, true);
+        if ($tc === '' && isset($e['SOC']) && is_numeric($e['SOC']) && (float) $e['SOC'] < 100) {
+            list($ok, $meld) = bm_befehl_ausfuehren(array('aktion' => 'laden', 'geraet' => $ziel,
+                'watt' => (int) $cfg['ausgleich_watt'], 'quelle' => BM_AUSGLEICH_QUELLE), $letzteSchreibzeit,
+                $sofortAbruf);
+            if ((int) $ok === 1) {
+                $t = sprintf(bm_t('DIENST.AUSGLEICH_START'), $ziel, (int) $e['UZDIFF'], (int) $cfg['ausgleich_watt']);
+                bm_log($t);
+                bm_benachrichtigen(6, $t);
+                $a = array_merge($a, array('laeuft' => 1, 'geraet' => $ziel, 'start' => $jetzt, 'wert' => 1,
+                                           'grund' => 'laeuft', 'abbruch' => 0, 'unter' => 0));
+            } else {
+                bm_log_gebremst('ausgleich_ab', 'Ausgleichsladen, Speicher ' . $ziel . ': nicht gestartet - ' . $meld, 3600);
+                $a['grund'] = 'abgelehnt: ' . bm_text_sauber((string) $meld, 200);
+            }
+        }
+    }
+    $a['ts'] = $jetzt;
+    bm_ausgleich_schreiben($a);
+}
+
+function bm_ausgleich_schreiben(array $a)
+{
+    $js = json_encode($a, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if (is_string($js)) {
+        bm_datei_schreiben(bm_paths()['datadir'] . '/ausgleich.json', $js, 0644);
+    }
+}
+
+/* ==================================================================
+ * Gruppe 31 (B12a): bekannte Schalter des Dienstes. Alles andere -> Hilfe
+ * auf STDERR und exit 2, VOR Sperre und Schleife. Bis 0.9.37 lief
+ * "bms_dienst.php --help" als Endlosdienst los (Pruefbericht b13: rc 124 nach
+ * 6 s).
+ * ================================================================== */
+function bm_schalter_pruefen(array $argv)
+{
+    $bekannt = array('--selbsttest', '--mqtt-leeren', '--einmal');
+    $falsch = array();
+    foreach (array_slice($argv, 1) as $a) {
+        $a = (string) $a;
+        if (in_array($a, $bekannt, true) || strncmp($a, '--praefix=', 10) === 0) {
+            continue;
+        }
+        $falsch[] = $a;
+    }
+    return $falsch;
+}
+
+/** Gruppe 31 (E-E20): die obere Ladegrenze eines Ladezwangs - 100 fuer die Quelle "Ausgleich", sonst
+ *  soc_max. */
+function bm_soc_ober(array $cfg, $quelle)
+{
+    return ((string) $quelle === BM_AUSGLEICH_QUELLE) ? 100 : (int) $cfg['soc_max'];
+}
+
+/* ==================================================================
  * Hauptschleife
  * ================================================================== */
 
@@ -2028,7 +2545,7 @@ function bm_dienst_schleife($einmal = false)
 {
     global $bm_laeuft;
     $p = bm_paths();
-    foreach (array($p['datadir'], $p['datadir'] . '/befehle', $p['datadir'] . '/antworten',
+    foreach (array($p['datadir'], bm_auftraege_ordner(), $p['datadir'] . '/antworten',
                    $p['datadir'] . '/verlauf', $p['datadir'] . '/profile', $p['logdir']) as $d) {
         if (!is_dir($d)) {
             @mkdir($d, 0775, true);
@@ -2058,6 +2575,12 @@ function bm_dienst_schleife($einmal = false)
     $letzteSchreibzeit = array();
     $ausfall = array();
     $naechster = 0;
+    // Gruppe 31: Lebenszeichen status/* im festen 60-s-Takt (Zaehler nur in diesem Prozess), Dauerverbindung
+    // fuer haus/strompreis ($bm_hv, nur mit Spotpreis-Laden) samt Bremse ($bm_hb).
+    $bm_lz_zaehler = 0;
+    $bm_lz_naechstes = 0;
+    $bm_hv = array();
+    $bm_hb = array();
 
     while ($bm_laeuft) {
         // Ohne asynchrone Signale (sehr alte PHP-Fassung) hier nachsehen.
@@ -2067,9 +2590,23 @@ function bm_dienst_schleife($einmal = false)
         }
         $cfg = bm_config();
         $sofort = bm_warteschlange($letzteSchreibzeit);
+        if (!$einmal) {
+            bm_haus_lauf($cfg, $bm_hv, $bm_hb);
+        }
         if ($sofort || time() >= $naechster) {
             bm_durchlauf($letzteZellen, $ausfall);
             $naechster = time() + max(5, (int) $cfg['intervall']);
+            // Gruppe 31: die Schreiber AUS dem Plugin selbst - ab Werk aus, Vorrang hat jeder Befehl von aussen.
+            $bm_sa = false;
+            bm_ausgleich_lauf($cfg, $letzteSchreibzeit, $bm_sa);
+            bm_spotladen_lauf($cfg, $bm_hv, $letzteSchreibzeit, $bm_sa);
+            if ($bm_sa) {
+                $naechster = 0;
+            }
+        }
+        if (time() >= $bm_lz_naechstes) {
+            bm_lebenszeichen_senden($cfg, $bm_lz_zaehler);
+            $bm_lz_naechstes = time() + 60;
         }
         if ($einmal) {
             break;
@@ -2084,6 +2621,9 @@ function bm_dienst_schleife($einmal = false)
      * alle uebrigen ueber ihre gemerkte Anschrift (bm_zwang_verwaist()). Bis
      * 0.9.29 lief dieser Weg nur ueber die Liste; ein entfernter oder
      * verschobener Speicher blieb beim Anhalten im Zwang (Fall G2). */
+    if ($bm_hv) {
+        bm_haus_trennen($bm_hv);
+    }
     $bm_ende_geraete = bm_geraete();
     foreach ($bm_ende_geraete as $nr => $g) {
         $soll = bm_soll_lesen($nr);
@@ -2352,6 +2892,66 @@ function bm_selbsttest()
         && $gleich($hw['werte']['SOC'], 50.0) && $gleich($hw['werte']['MODUS'], 2)
         && $gleich($hw['werte']['UBAT'], 512.3) && $gleich($hw['werte']['PBAT'], -1000)
         && $gleich($byd['werte']['SOC'], 77) && $gleich($byd['werte']['PBAT'], 500);
+    /* Gruppe 31 (0.9.38): drei Pruefungen mehr im Rechenkern - B11 (BYD-Zelltemperatur als int8), der
+     * Temperaturschutz (Entscheidung 2) als reine Rechnung und die Profile Sungrow SBR / Victron GX gegen ein
+     * festes Registerabbild samt Leerwerten (N4) und Bereichsgrenze. Werte wie in den Entwurfsproben P1-P3. */
+    $bm_i8 = array(bm_int8(0xFB), bm_int8(0xFE), bm_int8(0x14), bm_int8(0x80));
+    $bm_i8ok = ($bm_i8 === array(-5, -2, 20, -128));
+    $zeilen[] = ($bm_i8ok ? '[OK]   ' : '[FEHL] ') . 'BYD-Zelltemperatur als int8: 0xFB/0xFE/0x14/0x80 = '
+              . implode('/', $bm_i8) . ' (erwartet -5/-2/20/-128)';
+    if (!$bm_i8ok) {
+        $fehler++;
+    }
+    $bm_tc = array_merge(bm_vorgaben(), array('temp_min' => 0, 'temp_max' => 45, 'intervall' => 30));
+    $bm_tf = array(
+        array('laden', array('TMIN' => -5, 'TMAX' => 10), $bm_tc, true, 'TEMP_MIN'),
+        array('entladen', array('TMIN' => -5, 'TMAX' => 10), $bm_tc, true, ''),
+        array('entladen', array('TMIN' => 10, 'TMAX' => 50), $bm_tc, true, 'TEMP_MAX'),
+        array('laden', array('TMIN' => -5), $bm_tc, false, ''),
+        array('laden', array('TMIN' => 3276.7, 'TMAX' => 3276.7), $bm_tc, true, ''),
+        array('laden', array('TMIN' => -5), array_merge($bm_tc, array('temp_min' => -10)), true, ''),
+        array('laden', array('TBAT' => -5), $bm_tc, true, 'TEMP_MIN'),
+        array('sperren', array('TMAX' => 50), $bm_tc, true, ''),
+    );
+    $bm_tist = array();
+    $bm_tok = true;
+    foreach ($bm_tf as $bm_f) {
+        list($bm_c) = bm_temp_schutz($bm_f[0], $bm_f[1], $bm_f[2], $bm_f[3]);
+        $bm_tist[] = $bm_c === '' ? '-' : $bm_c;
+        $bm_tok = $bm_tok && ($bm_c === $bm_f[4]);
+    }
+    $zeilen[] = ($bm_tok ? '[OK]   ' : '[FEHL] ') . 'Temperaturschutz, 8 Faelle (laden/entladen bei Frost und Hitze, '
+              . 'alt, unplausibel, temp_min -10, nur TBAT, sperren): ' . implode(' ', $bm_tist)
+              . ' (erwartet TEMP_MIN - TEMP_MAX - - - TEMP_MIN -)';
+    if (!$bm_tok) {
+        $fehler++;
+    }
+    $bm_sg = bm_modbus_auswerten(array(13019 => 3840, 13020 => 0, 13021 => 0, 13022 => 655, 13023 => 980,
+        13024 => 235, 5213 => 0xFA24, 5214 => 0xFFFF, 5630 => 0xFFD9), $bm_eing['sungrow_sbr']);
+    $bm_sg2 = bm_modbus_auswerten(array(13019 => 3840, 13020 => 0, 13021 => 0, 13022 => 655, 13023 => 0xFFFF,
+        13024 => 0x7FFF), $bm_eing['sungrow_sbr']);
+    $bm_vg = bm_modbus_auswerten(array(258 => 0xFB50, 259 => 5230, 260 => 0, 261 => 0xFF1A, 262 => 190, 263 => 0,
+        264 => 0, 265 => 0, 266 => 712, 304 => 0, 318 => 170, 319 => 210, 1290 => 327, 1291 => 331),
+        $bm_eing['victron_gx']);
+    $bm_vg3 = bm_modbus_auswerten(array(258 => 0, 259 => 5230, 260 => 0, 261 => 0, 262 => 190, 263 => 0, 264 => 0,
+        265 => 0, 266 => 0, 304 => 0, 318 => 0, 319 => 0, 1290 => 0, 1291 => 0), $bm_eing['victron_gx']);
+    $bm_pok = $gleich($bm_sg['werte']['SOC'], 65.5) && $gleich($bm_sg['werte']['SOH'], 98)
+        && $gleich($bm_sg['werte']['UBAT'], 384) && $gleich($bm_sg['werte']['IBAT'], -3.9)
+        && $gleich($bm_sg['werte']['PBAT'], -1500) && $gleich($bm_sg['werte']['TBAT'], 23.5)
+        && $bm_sg2['werte']['SOH'] === null && $bm_sg2['werte']['TBAT'] === null && $bm_sg2['werte']['PBAT'] === null
+        && $gleich($bm_vg['werte']['SOC'], 71.2) && $gleich($bm_vg['werte']['PBAT'], -1200)
+        && $gleich($bm_vg['werte']['IBAT'], -23) && $gleich($bm_vg['werte']['TMIN'], 17)
+        && $gleich($bm_vg['werte']['UZMAX'], 3.31) && $bm_vg['werte']['SOH'] === null
+        && $bm_vg3['werte']['TMIN'] === null && $bm_vg3['werte']['UZMIN'] === null && $gleich($bm_vg3['werte']['SOC'], 0);
+    $zeilen[] = ($bm_pok ? '[OK]   ' : '[FEHL] ') . 'Profile Sungrow SBR und Victron GX gegen festes Registerabbild: '
+              . 'Sungrow SOC ' . var_export($bm_sg['werte']['SOC'], true) . ' (65.5), PBAT s32 wort nieder '
+              . var_export($bm_sg['werte']['PBAT'], true) . ' (-1500), Leerwert SOH '
+              . var_export($bm_sg2['werte']['SOH'], true) . ' (NULL); Victron TMIN ' . var_export($bm_vg['werte']['TMIN'], true)
+              . ' (17.0), Leerwert TMIN ' . var_export($bm_vg3['werte']['TMIN'], true) . ' (NULL), SOC 0 '
+              . var_export($bm_vg3['werte']['SOC'], true) . ' (0.0)';
+    if (!$bm_pok) {
+        $fehler++;
+    }
     $zeilen[] = ($auOk ? '[OK]   ' : '[FEHL] ') . 'Profil gegen festes Registerabbild: Huawei SOC '
               . var_export($hw['werte']['SOC'], true) . ' (erwartet 50.0), MODUS '
               . var_export($hw['werte']['MODUS'], true) . ' (2), UBAT '
@@ -2898,6 +3498,14 @@ if (!$bm_direkt) {
 }
 
 $bm_argv = isset($argv) ? $argv : array();
+/* Gruppe 31 (B12a): unbekannte Schalter -> Hilfe auf STDERR und Rueckgabewert 2, VOR Sperre und Schleife. */
+$bm_falsch = bm_schalter_pruefen($bm_argv);
+if ($bm_falsch) {
+    fwrite(STDERR, 'bms_dienst.php: unbekannter Schalter ' . implode(' ', $bm_falsch) . "\n"
+        . "Aufrufe: bms_dienst.php [--einmal] | --selbsttest | --mqtt-leeren [--praefix=<p>]\n"
+        . "Es wurde nichts abgerufen und nichts geschrieben.\n");
+    exit(2);
+}
 if (in_array('--selbsttest', $bm_argv, true)) {
     exit(bm_selbsttest());
 }
@@ -2973,7 +3581,8 @@ ini_set('error_log', bm_paths()['log']);
  * Dauerlaeufer nimmt eine Sperrdatei"). Der Einmallauf nimmt dieselbe Sperre -
  * er fragt dieselben Geraete. Vererbung an Kindprozesse ist hier unbedenklich:
  * der Dienst startet nur kurzlebige Kinder (stty, command -v), keine
- * Dauerkinder ueber proc_open. */
+ * Dauerkinder ueber proc_open. Gruppe 31: auch die Dauerverbindung fuer
+ * haus/strompreis haelt der Dienst SELBST (kein mosquitto_sub als Kind). */
 $bm_sperrordner = bm_paths()['datadir'];
 if (!is_dir($bm_sperrordner)) {
     @mkdir($bm_sperrordner, 0775, true);

@@ -43,10 +43,13 @@ fi
 # /config/plugins/<ordner>.laeuft an der Laufwerkswurzel (in WSL gemessen,
 # Pruefung-BatterieBMS-0.9.28, Fall K3). Ohne Wurzel wird jetzt nichts
 # angelegt, nichts angehalten und nichts geloescht.
+# Gruppe 31 (B1): <FAIL> und exit 2 wie beim Abbruch der Sicherung weiter unten - plugininstall.pl bricht die
+# Aktualisierung dann VOR purge_installation ab, die Konfiguration bleibt. Bis 0.9.37 stand hier <WARNING> und
+# exit 1, und der Installer machte weiter.
 if [ -z "$BASE" ]; then
-    echo "<WARNING> Es wurde kein LoxBerry-Wurzelverzeichnis gefunden - keine Upgrade-Marke,"
-    echo "<WARNING> kein Dienst angehalten, keine Sicherung angelegt."
-    exit 1
+    echo "<FAIL> Es wurde kein LoxBerry-Wurzelverzeichnis gefunden - keine Upgrade-Marke,"
+    echo "<FAIL> kein Dienst angehalten, keine Sicherung angelegt. Aktualisierung abgebrochen."
+    exit 2
 fi
 
 # ---------- Die Marke "Aktualisierung laeuft" - als Erstes ----------
@@ -68,8 +71,29 @@ fi
 if [ -n "$BASE" ] && [ -s "$MARKE" ]; then
     echo "<OK> Dienststart bis zum Ende der Aktualisierung gesperrt."
 else
-    echo "<WARNING> Die Marke $MARKE liess sich nicht anlegen - der Dienst"
-    echo "<WARNING> koennte waehrend der Aktualisierung anlaufen."
+    # Gruppe 31 (B1, E1): ohne Marke koennte der Dienst waehrend der Aktualisierung anlaufen und den Speicher
+    # mit halb ausgetauschten Dateien fragen - abbrechen, VOR purge_installation (verlustfrei), und kein
+    # "<OK> preupgrade abgeschlossen".
+    echo "<FAIL> Die Marke $MARKE liess sich nicht anlegen - Aktualisierung abgebrochen,"
+    echo "<FAIL> damit die Konfiguration nicht verloren geht. Rechte von $BASE/data/plugins pruefen."
+    exit 2
+fi
+
+# Gruppe 31 (0.9.38, Entscheidung 3; Bauform Ferien 1.2.28): die Befehlsbruecke vor dem Austausch der Dateien
+# anhalten. Die Marke liegt schon - der Waechter im Minutentakt startet sie bis postupgrade.sh nicht neu. Bis 0.9.37
+# gab es keine Bruecke (dann fehlt die Datei).
+BBSH="$BASE/bin/plugins/$PFOLDER/befehlsbruecke.sh"
+if [ -f "$BBSH" ]; then
+    echo "<INFO> Befehlsbruecke: $(timeout 40 bash "$BBSH" stop 2>&1 | head -n 1)"
+fi
+
+# Gruppe 31 (E-E5): Werte ueber das MQTT-Gateway V2 sind seit 0.9.38 bei einer Neuinstallation an; ein Update
+# aendert den Haken nicht - es sagt nur, wenn er aus ist.
+BM_CF="$BASE/config/plugins/$PFOLDER/batteriebms.json"
+if command -v php >/dev/null 2>&1 && [ -f "$BM_CF" ] && php -r '$d = json_decode((string) @file_get_contents($argv[1]), true);
+        exit(is_array($d) && empty($d["mqtt_ein"]) && !empty($d["geraete"]) ? 0 : 1);' "$BM_CF" 2>/dev/null; then
+    echo "<INFO> Werte ueber MQTT sind aus. Hausform ist das MQTT-Gateway V2 (Reiter MQTT, Haken 'Werte ueber MQTT';"
+    echo "<INFO> Datenpunkte im Gateway V2 anhaken - Reiter Einbindung, Namenstabelle)."
 fi
 
 # Anhalten ueber dienst.sh, nicht mit einem eigenen kill.

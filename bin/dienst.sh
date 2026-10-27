@@ -523,6 +523,20 @@ offene_zwaenge() {
     echo "$N"
 }
 
+# Gruppe 31 (E2): die Namen der AUFLOESBAREN offenen Zwaenge (bm_zwang_aufloesbar_namen()). Ohne PHP oder
+# Bibliothek gelten alle als aufloesbar - im Zweifel startet der Waechter den Dienst wie bisher.
+aufloesbare_zwaenge() {
+    LIB="$LBHOMEDIR/webfrontend/html/plugins/$PNAME/bm_lib.php"
+    A=""
+    if command -v php >/dev/null 2>&1 && [ -f "$LIB" ]; then
+        A=$(LBHOMEDIR="$LBHOMEDIR" php -r 'require $argv[1]; bm_nur_lesen(true); echo "OK:" . bm_zwang_aufloesbar_namen();' "$LIB" 2>/dev/null)
+    fi
+    case "$A" in
+        OK:*) echo "${A#OK:}" ;;
+        *) echo "alle" ;;
+    esac
+}
+
 anhalten() {
     rm -f "$SOLL"
     # ALLE eigenen Dienste, nicht nur den aus der PID-Datei. Ein Waise ohne
@@ -533,6 +547,12 @@ anhalten() {
         rm -f "$PID"
         OFFEN=$(offene_zwaenge)
         if [ -n "$OFFEN" ]; then
+            # Gruppe 31 (E2): laesst sich KEINER der offenen Zwaenge mit diesem Plugin zuruecknehmen, bleibt
+            # soll_laufen weg - der Waechter startete den Dienst sonst jede Minute vergeblich.
+            if [ -z "$(aufloesbare_zwaenge)" ]; then
+                echo "laeuft nicht; der Zwang an $OFFEN ist mit diesem Plugin nicht zuruecknehmbar - am Geraet pruefen und in der Oberflaeche verwerfen (Reiter Einstellungen, Sollwert verwerfen)"
+                return 4
+            fi
             # C5: ein Zwang ohne laufenden Dienst - die Spur bleibt, der
             # Waechter startet den Dienst, und der nimmt ihn zurueck.
             touch "$SOLL" 2>/dev/null
@@ -574,6 +594,12 @@ anhalten() {
     # erneut. Bis 0.9.29 meldete "stop" hier "angehalten" mit rc 0.
     OFFEN=$(offene_zwaenge)
     if [ -n "$OFFEN" ]; then
+        # Gruppe 31 (E2): nur fuer AUFLOESBARE Zwaenge bleibt soll_laufen stehen; fuer ausschliesslich
+        # unaufloesbare (keine Ruecknahme-Schritte, keine Anschrift eines entfernten Speichers) Rueckgabewert 4.
+        if [ -z "$(aufloesbare_zwaenge)" ]; then
+            echo "angehalten; der Zwang an $OFFEN ist mit diesem Plugin nicht zuruecknehmbar - am Geraet pruefen und in der Oberflaeche verwerfen (Reiter Einstellungen, Sollwert verwerfen)"
+            return 4
+        fi
         touch "$SOLL" 2>/dev/null
         echo "angehalten, aber Zwang an $OFFEN nicht zurueckgenommen - soll_laufen bleibt stehen"
         return 3

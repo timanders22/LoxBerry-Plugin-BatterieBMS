@@ -1,0 +1,57 @@
+#!/usr/bin/env php
+<?php
+/**
+ * Batterie-Heimspeicher (BMS) - Anschluss an den LoxBerry-Healthcheck (Gruppe 31, 0.9.38, Entscheidung 3, E-E14;
+ * Bauart Docker NG 1.3.20 / Anker SOLIX 0.9.32)
+ *
+ * Seit LoxBerry 2.2 ruft sbin/healthcheck.pl eine ausfuehrbare Datei bin/healthcheck des Plugins auf - einmal mit
+ * 'title', einmal mit 'check' -, und zwar direkt und als Benutzer loxberry (Regeln/02, nie mit bash). Der Installer
+ * legt bin/ rekursiv mit 755 an.
+ *
+ * Antwort: JSON mit desc, status, result, logfile. Status nach der Skala von LoxBerry: 3 = Fehler (rot), 4 = Warnung
+ * (gelb), 5 = in Ordnung (gruen), 6 = Hinweis (blau). healthcheck.pl veroeffentlicht das Ergebnis selbst retained
+ * unter <rechnername>/healthcheck/<titel> - ein Nebeneffekt, kein eigenes MQTT dieses Plugins.
+ *
+ * KEIN Modbus, KEIN Broker, nichts angelegt: bm_nur_lesen(true) wie im Endpunkt; gelesen werden nur die Dateien,
+ * die der Dienst (ebenfalls als loxberry) schreibt. Die Stufen rechnet bm_gesundheit() der Bibliothek.
+ */
+
+error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE);
+ini_set('display_errors', '0');
+
+$bm_was = isset($argv[1]) ? strtolower((string) $argv[1]) : 'check';
+
+if ($bm_was === 'title') {
+    echo "Batterie-Heimspeicher (BMS)\n";
+    exit(0);
+}
+
+// Installiert liegen bin/ und webfrontend/html/ in getrennten Baeumen (<home>/bin/plugins/<ordner>/ und
+// <home>/webfrontend/html/plugins/<ordner>/), im ausgepackten Archiv nebeneinander - welcher Fall vorliegt, sagt
+// der Ablageort selbst (wie bin/bms_dienst.php).
+if (basename(dirname(__DIR__)) === 'plugins') {
+    $bm_lib = dirname(dirname(dirname(__DIR__))) . '/webfrontend/html/plugins/' . basename(__DIR__) . '/bm_lib.php';
+} else {
+    $bm_lib = dirname(__DIR__) . '/webfrontend/html/bm_lib.php';
+}
+if (!is_file($bm_lib)) {
+    // Fail closed, und mit Begruendung.
+    echo json_encode(array(
+        'desc'   => 'Batterie-Heimspeicher (BMS)',
+        'status' => 3,
+        'result' => 'Die Bibliothek bm_lib.php wurde nicht gefunden - das Plugin ist unvollstaendig installiert.',
+    )) . "\n";
+    exit(0);
+}
+require_once $bm_lib;
+bm_nur_lesen(true);
+
+list($bm_status, $bm_text) = bm_gesundheit();
+
+echo json_encode(array(
+    'desc'    => 'Batterie-Heimspeicher (BMS)',
+    'status'  => (int) $bm_status,
+    'result'  => (string) $bm_text,
+    'logfile' => bm_paths()['log'],
+), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
+exit(0);
