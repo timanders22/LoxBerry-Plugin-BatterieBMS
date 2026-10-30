@@ -10,6 +10,14 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.39
+
+Pflegefassung der Nachtwelle (29.10.2026), ohne neue Funktion und ohne Änderung am Verhalten:
+
+* **Befehlsbrücke 1.0.2** (gemeinsame Stammfassung): Die Vorlage „Befehle (MQTT)“ (`VQ_BMS_MQTT.xml`) kommt jetzt
+  mit Windows-Zeilenenden (CRLF) wie die Ausfuhren der Loxone Config. Titel, Adresse und Befehle sind unverändert,
+  ein Neuimport ist nicht nötig. Der Selbsttest der Brücke prüft die Zeilenenden mit.
+
 ## Neu in 0.9.38
 
 * **Temperaturschutz beim Zwang (Vorrang):** ein Ladezwang wird abgewiesen, solange die niedrigste Zelltemperatur unter
