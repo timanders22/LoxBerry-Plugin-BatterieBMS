@@ -973,7 +973,7 @@ function bm_benachrichtigen($schwere, $text)
     }
     $php = (defined('PHP_BINARY') && PHP_BINARY !== '') ? PHP_BINARY : 'php';
     $befehl = escapeshellarg($php) . ' ' . escapeshellarg($skript) . ' ' . (int) $schwere
-        . ' ' . escapeshellarg((string) $text) . ' ' . escapeshellarg((string) bm_paths()['plugin']);
+        . ' ' . bm_shell_arg((string) $text) . ' ' . escapeshellarg((string) bm_paths()['plugin']);
     if (bm_command_da('timeout')) {
         $befehl = 'timeout 20 ' . $befehl;
     }
@@ -1312,6 +1312,7 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
         if ($gruende) {
             bm_log_gebremst('alarm' . $nr, $g['name'] . ': ' . implode(' | ', $gruende), 1800);
         }
+        bm_ansage_alarm($nr, (string) $g['name'], $eintrag, $cfg);     // 0.9.40
 
         // Sollwert und Totmannschaltung
         $soll = bm_soll_lesen($nr);
@@ -2427,6 +2428,7 @@ function bm_ausgleich_lauf(array $cfg, &$letzteSchreibzeit, &$sofortAbruf)
                 (int) round(($jetzt - (int) $a['start']) / 60));
             bm_log($t . ($ok ? '' : ' Ruecknahme FEHLGESCHLAGEN: ' . $meld));
             bm_benachrichtigen(6, $t);
+            bm_ansage_ausgleich($nr, 'SATZ_AUSGLEICH_ENDE');     // 0.9.40
             $a = array_merge($a, array('laeuft' => 0, 'letzter' => $jetzt, 'wert' => 0, 'grund' => 'beendet',
                                        'abbruch' => 0, 'ueber' => 0, 'unter' => 0));
         } elseif ($abbruch !== '') {
@@ -2437,6 +2439,7 @@ function bm_ausgleich_lauf(array $cfg, &$letzteSchreibzeit, &$sofortAbruf)
             $t = sprintf(bm_t('DIENST.AUSGLEICH_ABBRUCH'), $nr, $abbruch);
             bm_log($t);
             bm_benachrichtigen(6, $t);
+            bm_ansage_ausgleich($nr, 'SATZ_AUSGLEICH_ABBRUCH');     // 0.9.40
             $a = array_merge($a, array('laeuft' => 0, 'letzter' => $jetzt, 'wert' => 2, 'grund' => $abbruch,
                                        'abbruch' => 1, 'ueber' => 0, 'unter' => 0));
         } else {

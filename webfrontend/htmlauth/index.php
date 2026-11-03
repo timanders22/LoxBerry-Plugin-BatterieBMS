@@ -898,6 +898,19 @@ if ($bm_post && isset($_POST['endpunkt'])) {
 
 /* ---------------- Gruppe 31 (E2): Zwang am Geraet geprueft - Sollwert verwerfen ----------------
  * Nur mit Bestaetigungshaken (Regeln/04). Das Plugin schreibt dabei NICHTS an den Speicher. */
+/* 0.9.40: Sprachansagen, eigenes Formular. Die Testansage spricht immer. */
+if ($bm_post && isset($_POST['ansage_test'])) {
+    list($bm_at, $bm_ag) = bm_ansage_test();
+    if ($bm_at) { $bm_meldungen[] = bm_e(bm_t('ANSAGEPLUGIN.M_TEST_OK')); } else { $bm_fehler[] = bm_e(bm_t('ANSAGEPLUGIN.M_TEST_FEHL') . ' ' . $bm_ag); }
+    $bm_tab = 'tab-settings';
+}
+if ($bm_post && isset($_POST['ansage_speichern'])) {
+    list($bm_ao, $bm_af, $bm_ah) = bm_ansage_post($_POST);
+    if ($bm_af) { foreach ($bm_af as $bm_ax) { $bm_fehler[] = bm_e($bm_ax); } }
+    elseif ($bm_ao) { $bm_meldungen[] = bm_e(trim(bm_t('ANSAGEPLUGIN.M_OK') . ' ' . implode(' ', $bm_ah))); }
+    else { $bm_fehler[] = bm_e(bm_t('ANSAGEPLUGIN.M_FEHL')); }
+    $bm_tab = 'tab-settings';
+}
 if ($bm_post && isset($_POST['soll_verwerfen'])) {
     $bm_vn = is_string($_POST['soll_verwerfen']) ? trim($_POST['soll_verwerfen']) : '';
     if (empty($_POST['soll_verwerfen_ok'])) {
@@ -1621,6 +1634,7 @@ if ($bm_zauf || $bm_zun) { ?>
 </table>
 <?php } ?>
 
+<?= bm_ansage_form_html(bm_fmt() . '<input data-role="none" type="hidden" name="activetab" value="tab-settings">') ?>
 <h2><?= bm_e(bm_t('EINST.H_SICHERUNG')) ?></h2>
 <p class="sm-hilfe"><?= bm_t('EINST.SICHERUNG_ERKLAERUNG') ?></p>
 <?php /* X-3: dieselbe Pruefung wie das Zurueckspielen; nur Namen, nie Werte. */
