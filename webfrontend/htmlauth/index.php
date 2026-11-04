@@ -158,6 +158,7 @@ if ($bm_post && isset($_POST['vorlage']) && (string) $_POST['vorlage'] === 'mqtt
         $bm_fehler[] = bm_e($bm_vmx);
         $bm_tab = 'tab-loxone';
     } else {
+        while (ob_get_level() > 0) { @ob_end_clean(); }
         header('Content-Type: application/xml; charset=utf-8');
         header('Content-Disposition: attachment; filename="' . $bm_vmn . '"');
         echo $bm_vmx;
@@ -171,6 +172,7 @@ if ($bm_post && isset($_POST['vorlage']) && (string) $_POST['vorlage'] !== 'mqtt
     } else {
         list($bm_name, $bm_inhalt) = bm_vorlage_eingaenge($bm_nr);
     }
+    while (ob_get_level() > 0) { @ob_end_clean(); }
     header('Content-Type: application/xml; charset=utf-8');
     // Die Anfuehrungszeichen um den Dateinamen sind Pflicht - ohne sie bricht
     // jeder Name, der ein Leerzeichen enthaelt.
@@ -188,6 +190,7 @@ if ($bm_post && isset($_POST['profil_export'])) {
         $bm_tab = 'tab-settings';
     } else {
         unset($bm_pr['herkunft'], $bm_pr['datei']);
+        while (ob_get_level() > 0) { @ob_end_clean(); }
         header('Content-Type: application/json; charset=utf-8');
         header('Content-Disposition: attachment; filename="' . preg_replace('/[^a-z0-9_]/', '', $bm_pk) . '.json"');
         echo json_encode($bm_pr, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
@@ -224,6 +227,7 @@ if ($bm_post && isset($_POST['konfig_export'])) {
                            '_warnung' => sprintf(bm_t('EINST.SICHERUNG_WARNUNG_KOPF'),
                                                  implode(', ', $bm_x3))) + $bm_ex;
         }
+        while (ob_get_level() > 0) { @ob_end_clean(); }
         header('Content-Type: application/json; charset=utf-8');
         header('Content-Disposition: attachment; filename="batteriebms_'
              . date('Ymd_His') . '.json"');
