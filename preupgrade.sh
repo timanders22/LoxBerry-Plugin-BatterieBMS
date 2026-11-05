@@ -7,6 +7,10 @@
 # ein alter Prozess stehen, kommt der neue nicht mehr an das Geraet heran.
 ARGV3=$3
 PFOLDER="${ARGV3:-batteriebms}"
+# 05.11.2026: ein Ordnername mit "/" oder "." waere ein Pfad hinaus (dieselbe Formel wie MGiSmart und Govee).
+case "$PFOLDER" in
+    ''|.|..|*/*) echo "<FAIL> Unbrauchbarer Ordnername '$PFOLDER' - nichts angefasst."; exit 2 ;;
+esac
 # Wurzel, in dieser Reihenfolge (Regeln/06: ohne brauchbare Wurzel warnen
 # statt vollziehen; dieselbe Regel wie bin/dienst.sh):
 #   1. das fuenfte Argument - der Installer uebergibt dort die LoxBerry-Wurzel
@@ -384,6 +388,8 @@ else
 fi
 
 if [ $FEHLER -ne 0 ]; then
+    # 05.11.2026: nach dem Abbruch laufen postinstall und postupgrade nie; die Marke raeumte sonst niemand weg.
+    rm -f "$MARKE" 2>/dev/null
     exit 2
 fi
 if [ -n "$ZWANG_OFFEN" ]; then

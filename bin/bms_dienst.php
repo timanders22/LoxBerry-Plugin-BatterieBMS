@@ -607,6 +607,14 @@ function bm_abruf_pylontech(array $g, array $pr)
 function bm_steuern(array $g, array $pr, $aktion, $watt)
 {
     $cfg = bm_config();
+    /* 0.9.43 (BM-1): Huawei ist bis zu einer Messung am Geraet gesperrt. Neue Zwaenge werden abgewiesen. Die Ruecknahme meldet
+     * Erfolg OHNE Schreibbefehl, sonst haengt ein offener Zwang aus einer alten Fassung fuer immer an Totmann und Anhalten
+     * (geloescht wird nur nach Erfolg). Was die alte Fassung am Geraet hinterliess, nennt die Meldung. */
+    if (!empty($pr['steuerung_gesperrt'])) {
+        return $aktion === 'automatik'
+            ? array(1, bm_t('DIENST.STEUERUNG_GESPERRT_ZURUECK'))
+            : array(0, sprintf(bm_t('DIENST.STEUERUNG_GESPERRT'), $pr['name']));
+    }
     /* C3 (Durchgang 29.09.2026): die beiden Freigaben sperren nur das SETZEN
      * eines Zwangs, nie die Ruecknahme in die Automatik. Bis 0.9.29 standen
      * beide Pruefungen vor jeder Aktion - wer bei laufendem Zwang die
@@ -2764,7 +2772,10 @@ function bm_selbsttest()
                           . 'Geraet geprueft. Die Werte im Reiter Test gegen die Anzeige des '
                           . 'Herstellers halten, bevor Loxone darauf regelt.';
             }
-            if ($g['schreiben'] && $pr !== null
+            if ($pr !== null && !empty($pr['steuerung_gesperrt'])) {
+                // 0.9.43 (BM-1)
+                $zeilen[] = '[WARN]      ' . sprintf(bm_t('DIENST.STEUERUNG_GESPERRT'), $pr['name']);
+            } elseif ($g['schreiben'] && $pr !== null
                 && isset($pr['steuerung_stand']) && $pr['steuerung_stand'] !== 'dokumentiert') {
                 $zeilen[] = '[WARN]      Die Schreibbefehle dieses Profils sind ungeprueft. '
                           . 'Erst mit kleinen Werten und unter Aufsicht ausloesen.';

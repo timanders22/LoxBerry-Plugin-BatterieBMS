@@ -1460,6 +1460,9 @@ foreach ($bm_hinweise as $bm_h) {
 
 <h2><?= bm_e(bm_t('EINST.H_STEUERUNG')) ?></h2>
 <div class="sm-warnung"><?= bm_t('EINST.STEUERUNG_ERKLAERUNG') ?></div>
+<?php /* 0.9.43 (BM-1) */ if (bm_geraete_steuern_gesperrt()) { ?>
+<div class="sm-warnung"><?= bm_e(sprintf(bm_t('EINST.STEUERUNG_GESPERRT'), implode(', ', bm_geraete_steuern_gesperrt()))) ?></div>
+<?php } ?>
 <div class="sm-feld">
   <label style="display:inline-flex;align-items:center;gap:8px;">
     <input data-role="none" type="checkbox" name="steuerung_ein" value="1" <?= bm_eingabe('speichern', 'steuerung_ein', !empty($bm_cfg['steuerung_ein']) ? '1' : '0') === '1' ? 'checked' : '' ?><?= bm_markierung('speichern', 'steuerung_ein') ?>>
@@ -2422,6 +2425,9 @@ if (is_file($bm_mdatei)) {
 <div class="sm-warnung"><?= bm_t('TEST.SCHALTEN_WARNUNG') ?></div>
 <?php if (empty($bm_cfg['steuerung_ein'])) { ?>
 <div class="sm-hinweis"><?= bm_t('TEST.SCHALTEN_GESPERRT') ?></div>
+<?php } ?>
+<?php /* 0.9.43 (BM-1) */ if (bm_geraete_steuern_gesperrt()) { ?>
+<div class="sm-warnung"><?= bm_e(sprintf(bm_t('EINST.STEUERUNG_GESPERRT'), implode(', ', bm_geraete_steuern_gesperrt()))) ?></div>
 <?php } ?>
 <form action="index.php" method="post">
   <?php echo bm_fmt(); ?>

@@ -10,6 +10,13 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.43
+
+- **Huawei: Steuern gesperrt, bis es am Gerät gemessen ist.** Die bisherigen Register setzten nur die höchste Lade- und Entladeleistung (47075, 47077) und den Arbeitsmodus (47086), das erzwingt nichts, und „Automatik“ stellte die Leistungen nicht zurück: nach einer Sperre konnte der Speicher nicht mehr entladen, obwohl das Plugin „Automatik“ meldete. Gelesen wird weiter; Laden, Entladen und Sperren werden abgewiesen, die Reiter *Einstellungen* und *Test* sagen es. **Wer mit einer früheren Fassung gesteuert hat, prüft in der Hersteller-App die höchste Lade- und Entladeleistung und den Arbeitsmodus.** Gemessen ist das nicht: gegengelesen an der Bibliothek huawei-solar-lib. Andere Hersteller sind nicht betroffen.
+- **Update:** Scheitert die Sicherung oder die Marke, bricht das Update ab und die bisherige Fassung bleibt.
+- **Sprechtoken:** Ein von Hand eingetragenes Alexa- oder Google-Token wird nicht mehr vom Token des Nachbar-Plugins überschrieben.
+- **Formular:** Ein beanstandeter Tafel- oder HomePod-Name bleibt zur Korrektur im Feld stehen.
+
 ## Neu in 0.9.42
 
 - Vor einem Download wird jeder offene Ausgabepuffer geleert: PHP-Warnungen oder Reste landen nicht mehr in der heruntergeladenen Datei.
@@ -603,7 +610,7 @@ alle vier bestanden.
 | Profil | Weg | Stand |
 |---|---|---|
 | **BYD Battery-Box Premium** HVS, HVM, LVS, LVL | Modbus RTU im TCP-Strom, `192.168.16.254:8080` | dokumentiert |
-| **Huawei LUNA2000** (Grunddaten über SUN2000) | Modbus TCP, Port 502 | dokumentiert |
+| **Huawei LUNA2000** (Grunddaten über SUN2000) | Modbus TCP, Port 502 | dokumentiert; **Steuern gesperrt** bis zur Messung am Gerät |
 | **Huawei LUNA2000** (Batteriepakete) | Modbus TCP, Port 502 | **ungeprüft** |
 | **Pylontech** US2000, US3000, US5000, Force | RS485-Konsole, 115200 Baud | dokumentiert |
 | **Sungrow SBR** (über SH-Hybridwechselrichter) | Modbus TCP, Port 502 | **ungeprüft am Gerät** |

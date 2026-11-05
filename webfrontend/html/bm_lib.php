@@ -401,6 +401,7 @@ function bm_profile_eingebaut()
             'quelle'    => 'Solar Inverter Modbus Interface Definitions (Huawei); '
                          . 'gegengelesen an github.com/wlcrs/huawei-solar-lib',
             'hinweis'   => 'BM_PROFIL.H_HUAWEI',
+            // 0.9.43 (BM-1): die Zeile H_HUAWEI nennt auch die Sperre des Steuerns.
             'bloecke'   => array(
                 array('fc' => 3, 'start' => 37760, 'anzahl' => 30),
             ),
@@ -412,42 +413,19 @@ function bm_profile_eingebaut()
             ),
             'rechnung' => array(),
             'zellen'   => array(),
-            /* Schreibbefehle als Schrittfolge.
+            /* 0.9.43 (BM-1, Entscheidung Hausherr 05.11.2026): STEUERN GESPERRT, bis es am Geraet gemessen ist.
              *
-             * Jeder Schritt ist ein Registerschreibvorgang. 'wert' ist
-             * entweder eine feste Zahl oder der Platzhalter '@watt' fuer den
-             * uebergebenen Sollwert.
-             *
-             * STAND: unbestaetigt. Die Registeradressen der Speichersteuerung
-             * sind im Umlauf, aber in diesem Plugin nie an einem Geraet
-             * ausgeloest worden. Wer sie benutzt, prueft zuerst mit dem
-             * Rohregister-Leser im Reiter Test, welcher Wert dort steht,
-             * bevor er schreibt. Die Schrittfolge laesst sich in einem
-             * eigenen Profil ohne Aenderung am Quelltext ersetzen.
-             */
-            'steuerung_stand' => 'unbestaetigt',
-            'steuerung' => array(
-                'laden' => array(
-                    'text' => 'BM_STEUER.HW_LADEN',
-                    'schritte' => array(
-                        array('reg' => 47086, 'typ' => 'u16', 'wert' => 2),
-                        array('reg' => 47075, 'typ' => 'u32', 'wert' => '@watt'),
-                    ),
-                ),
-                'entladen' => array(
-                    'text' => 'BM_STEUER.HW_ENTLADEN',
-                    'schritte' => array(
-                        array('reg' => 47086, 'typ' => 'u16', 'wert' => 2),
-                        array('reg' => 47077, 'typ' => 'u32', 'wert' => '@watt'),
-                    ),
-                ),
-                'automatik' => array(
-                    'text' => 'BM_STEUER.HW_AUTOMATIK',
-                    'schritte' => array(
-                        array('reg' => 47086, 'typ' => 'u16', 'wert' => 0),
-                    ),
-                ),
-            ),
+             * Bis 0.9.42 standen hier 47086=2 mit 47075 (laden) bzw. 47077 (entladen) und 47086=0 (automatik). Gegengelesen
+             * an wlcrs/huawei-solar-lib ist 47075/47077 nur die HOECHSTLEISTUNG und 47086=2 Eigenverbrauch: kein Zwang,
+             * das Plugin meldete trotzdem OK. "sperren" schrieb 47077=0, und automatik (47086=0 = ADAPTIVE) stellte die
+             * Hoechstleistungen nicht zurueck: der Speicher entlud danach nicht mehr, obwohl "Automatik" gemeldet wurde.
+             * Moeglicher Neubau: Zwangsregister 47100/47247/47249; Modus und Hoechstleistungen duerfen dabei nicht
+             * veraendert zurueckbleiben. Wer gemessen hat, hinterlegt die Schritte in einem eigenen Profil (JSON).
+             * Lesen ist davon nicht betroffen. Ein offener Zwang aus einer alten Fassung: bm_steuern() nimmt ihn ohne
+             * Schreibbefehl zurueck und sagt, was von Hand zu pruefen ist. */
+            'steuerung_stand' => 'gesperrt',
+            'steuerung_gesperrt' => 1,
+            'steuerung' => array(),
         ),
 
         /* -----------------------------------------------------------------
@@ -804,6 +782,17 @@ function bm_profile()
         }
     }
     return $alle;
+}
+
+/** 0.9.43 (BM-1): Die Namen der eingerichteten Speicher, deren Profil das Steuern sperrt. */
+function bm_geraete_steuern_gesperrt()
+{
+    $namen = array();
+    foreach (bm_geraete() as $g) {
+        $pr = bm_profil($g['profil']);
+        if ($pr !== null && !empty($pr['steuerung_gesperrt'])) { $namen[] = (string) $g['name']; }
+    }
+    return $namen;
 }
 
 function bm_profil($schluessel)
@@ -5845,6 +5834,8 @@ function bm_ansage_post(array $post)
         return array(false, $t, array());
     }
     $cfg['tts'] = $neu;
+    // 0.9.43: ein eingetipptes oder geloeschtes Sprechtoken ist nicht mehr vom Nachbarn; bis 0.9.42 ueberschrieb es der naechste Abgleich.
+    $cfg['ansage_token_herkunft'] = ansage_token_herkunft_formular($post, isset($cfg['ansage_token_herkunft']) ? $cfg['ansage_token_herkunft'] : array());
     $cfg['ansage_regeln'] = $r;
     $cfg['ansage_haken'] = $hk;
     $t = array();
@@ -6331,6 +6322,11 @@ function bm_trockenlauf($nr, $aktion, $watt)
         $z[] = '  [HALT] ' . bm_t('DIENST.STEUERUNG_SERIELL');
     }
     $z[] = '';
+    /* 0.9.43 (BM-1): gesperrtes Profil - es gibt keine Schritte zu zeigen. */
+    if (!empty($pr['steuerung_gesperrt'])) {
+        $z[] = sprintf(bm_t('DIENST.STEUERUNG_GESPERRT'), $pr['name']);
+        return array(0, implode("\n", $z));
+    }
     $st = isset($pr['steuerung']) && is_array($pr['steuerung']) ? $pr['steuerung'] : array();
     $wirk = $null_automatik ? 'automatik' : $aktion;
     $wwatt = (int) $watt;
