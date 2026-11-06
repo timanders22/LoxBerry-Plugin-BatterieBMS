@@ -10,6 +10,10 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.44
+
+- Gemeinsames Sprachmodul 1.4.2: Wird eine Ansage bewusst nicht gesprochen (gerade eben schon gesagt, gesperrt oder Ruhezeit), steht das im Protokoll jetzt so – und nicht mehr als Fehler.
+
 ## Neu in 0.9.43
 
 - **Huawei: Steuern gesperrt, bis es am Gerät gemessen ist.** Die bisherigen Register setzten nur die höchste Lade- und Entladeleistung (47075, 47077) und den Arbeitsmodus (47086), das erzwingt nichts, und „Automatik“ stellte die Leistungen nicht zurück: nach einer Sperre konnte der Speicher nicht mehr entladen, obwohl das Plugin „Automatik“ meldete. Gelesen wird weiter; Laden, Entladen und Sperren werden abgewiesen, die Reiter *Einstellungen* und *Test* sagen es. **Wer mit einer früheren Fassung gesteuert hat, prüft in der Hersteller-App die höchste Lade- und Entladeleistung und den Arbeitsmodus.** Gemessen ist das nicht: gegengelesen an der Bibliothek huawei-solar-lib. Andere Hersteller sind nicht betroffen.
