@@ -267,10 +267,21 @@ function bm_zellen_byd(array $g, array $pr, $tmo, $bmsIndex = 1)
             . '(BE Connect Plus, Node-RED) gerade mit der Box spricht.');
     }
     $daten = array();
+    $hinweis = '';
     for ($b = 0; $b < (int) $z['bloecke']; $b++) {
         $teil = bm_register_lesen($s, $g, 3, (int) $z['daten'], (int) $z['blockgroesse']);
         if (isset($teil['_fehler'])) {
             bm_verbindung_verwerfen($g);
+            /* Issue #2 (08.11.2026, BYD HVM, 7 Module): die BCU liefert Block 1 bis 4 und lehnt Block 5 ab.
+             * Bis 0.9.44 verwarf dieser Fehler auch die vier gelesenen Bloecke - es kamen gar keine Zelldaten an.
+             * Ab dem zweiten Block wird jetzt ausgewertet, was angekommen ist (die Auswertung unten liest nur
+             * vollstaendige Module), und der Abbruch als Hinweis gemeldet statt verschwiegen. Scheitert schon
+             * der erste Block, bleibt es ein Fehler. */
+            if ($b > 0) {
+                $hinweis = 'Zelldatenblock ' . ($b + 1) . ' abgelehnt, ausgewertet wurden die Bloecke 1 bis '
+                    . $b . ': ' . $teil['_fehler'];
+                break;
+            }
             return array('_fehler' => 'Zelldatenblock ' . ($b + 1) . ': ' . $teil['_fehler']);
         }
         $folge = array_values($teil);
@@ -325,6 +336,12 @@ function bm_zellen_byd(array $g, array $pr, $tmo, $bmsIndex = 1)
             'tmax'   => $temps ? max($temps) : null,
             'tmin'   => $temps ? min($temps) : null,
         );
+    }
+    if ($hinweis !== '') {
+        if (!$module) {
+            return array('_fehler' => $hinweis . ' - darin stand kein vollstaendiges Modul.');
+        }
+        return array('module' => $module, '_hinweis' => $hinweis);
     }
     return array('module' => $module);
 }
@@ -1233,6 +1250,9 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
                         // aber NICHT so tun, als waeren sie frisch.
                         $eintrag['module'] = bm_module_vorher($nr);
                     } else {
+                        if (isset($zellen['_hinweis'])) {
+                            bm_log_gebremst('zellen' . $nr, $g['name'] . ' - Zelldaten: ' . $zellen['_hinweis']);
+                        }
                         $eintrag['module'] = $zellen['module'];
                         $eintrag['zell_ts'] = time();   // Gruppe 31: Zeitpunkt des Zelldatenabrufs
                     }
@@ -3133,7 +3153,7 @@ function bm_selbsttest()
     $probe = $p['datadir'] . '/selbsttest.json';
     $schreibOk = bm_json_schreiben($probe, array('a' => 1, 'b' => 'Grüße'));
     $gelesen = $schreibOk ? bm_json_lesen($probe) : array();
-    $kaputt = bm_json_schreiben($probe, array('x' => "\xFF\xFE roh"));
+    $kaputt = bm_json_schreiben($probe, array('x' => "\xFF\xFE roh"), null, false);   // absichtlich, ohne Protokollzeile
     $danach = bm_json_lesen($probe);
     $atomOk = $schreibOk && isset($gelesen['a']) && $gelesen['a'] === 1
               && $kaputt === false && isset($danach['a']) && $danach['a'] === 1;

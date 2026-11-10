@@ -350,8 +350,18 @@ function bm_profile_eingebaut()
                  * sieht. Entschieden wird das an EINER Ablesung: ist 0x0512
                  * ungleich 0, ist ZYKLEN Unsinn. Bis dahin bleibt das Feld
                  * unveraendert stehen - eine stille Umdeutung waere schlimmer
-                 * als der Vorbehalt. */
-                'ZYKLEN' => array('reg' => 0x0511, 'typ' => 'u16', 'faktor' => 1,    'nk' => 0),
+                 * als der Vorbehalt.
+                 *
+                 * ENTSCHIEDEN (0.9.45, Issue #3 vom 08.11.2026): an einer
+                 * HVM mit 3 Tuermen (57,96 kWh) stand 0x0511 an einem Tag
+                 * bei 52412 bis 52491 und stieg NUR waehrend des Ladens, um
+                 * 79 Einheiten - als 0,1 kWh gelesen 7,9 kWh, als Zyklen
+                 * unmoeglich. Das ist der Energiezaehler aus ioBroker.bydhvs,
+                 * nicht der Zyklenzaehler. ZYKLEN wird deshalb bei BYD nicht
+                 * mehr geliefert: bei kleinen Anlagen lag der Zaehlerstand
+                 * unter 20000 und ging als Zyklenzahl durch. Ob und wie die
+                 * geladene Energie ein eigenes Feld bekommt, entscheidet der
+                 * Hausherr (neues Feld, nicht umgedeutetes altes). */
                 'MODULE' => array('reg' => 0x0010, 'typ' => 'u16', 'faktor' => 1,    'nk' => 0,
                                   'maske' => 0x000F),
             ),
@@ -1376,7 +1386,7 @@ function bm_json_lesen($pfad)
  * mit Rueckgabe 0, also nicht false. Die Pruefung 'geschrieben === false'
  * greift dann nie, und der Verlust wird als Erfolg gemeldet.
  */
-function bm_json_schreiben($pfad, $daten, $rechte = null)
+function bm_json_schreiben($pfad, $daten, $rechte = null, $melden = true)
 {
     $ordner = dirname($pfad);
     if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) {
@@ -1384,6 +1394,10 @@ function bm_json_schreiben($pfad, $daten, $rechte = null)
     }
     $json = json_encode($daten, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     if ($json === false) {
+        /* 0.9.45: $melden = false nur fuer die absichtliche Probe des Selbsttests (bms_dienst.php, Pruefung 4).
+         * Bis 0.9.44 schrieb jeder Selbsttestlauf "selbsttest.json liess sich nicht als JSON schreiben" ins
+         * Protokoll - eine Fehlerzeile fuer etwas, das gerade gelingen sollte. */
+        if (!$melden) { return false; }
         // Nicht still scheitern. Ein einzelnes ungueltiges Byte - etwa aus
         // der Ausgabe von stty in einer Nicht-UTF-8-Umgebung - liesse sonst
         // das Abbild fuer Loxone auf ewig auf dem alten Stand stehen, ohne

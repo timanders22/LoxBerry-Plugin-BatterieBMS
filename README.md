@@ -10,6 +10,12 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.45
+
+- BYD: Lehnt die BCU einen späteren Zelldatenblock ab (gemeldet an einer HVM mit 7 Modulen je Turm, Block 5), werden die schon gelesenen Blöcke jetzt ausgewertet. Bis 0.9.44 kamen dann gar keine Zelldaten an. Der Abbruch steht weiter im Protokoll, als Hinweis statt als Fehler. Scheitert schon der erste Block, bleibt es ein Fehler (Issue #2).
+- BYD: `ZYKLEN` wird nicht mehr geliefert. Das Register `0x0511` ist laut einer Messreihe an einer HVM ein Energiezähler, der nur beim Laden steigt, keine Zyklenzahl. Bei kleinen Anlagen ging der Zählerstand bisher als Zyklenzahl durch. Das Feld bleibt bei BYD leer (Issue #3).
+- Selbsttest: Die absichtliche Probe mit ungültigem Text schreibt keine Fehlerzeile mehr ins Protokoll. Bisher stand nach jedem Selbsttest „selbsttest.json ließ sich nicht als JSON schreiben“ darin, obwohl die Prüfung bestanden war.
+
 ## Neu in 0.9.44
 
 - Gemeinsames Sprachmodul 1.4.2: Wird eine Ansage bewusst nicht gesprochen (gerade eben schon gesagt, gesperrt oder Ruhezeit), steht das im Protokoll jetzt so – und nicht mehr als Fehler.
@@ -1054,6 +1060,9 @@ Deutsch standen.
   Verwechseln ähnlich sieht. Entschieden wird das an einer einzigen Ablesung:
   ist `0x0512` ungleich 0, ist `ZYKLEN` Unsinn. Bis dahin bleibt das Feld
   unverändert; der Vorbehalt steht im Profil.
+  **Entschieden in 0.9.45:** Eine Messreihe an einer HVM (Issue #3) zeigt
+  `0x0511` zwischen 52412 und 52491, steigend nur beim Laden. Das ist ein
+  Energiezähler; `ZYKLEN` wird bei BYD nicht mehr geliefert.
 * Es ist weiterhin **kein Speicher angeschlossen**. Kein Profil, kein
   Übertragungsweg, keine Vorzeichenrichtung und kein Schreibbefehl ist an
   einem Gerät gemessen.
