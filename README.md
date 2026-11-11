@@ -10,6 +10,10 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.46
+
+- Gemeinsames Sprachmodul 1.4.3: Als LoxBerry-Wurzel aus `LBHOMEDIR` gilt für die Sprachausgabe nur noch ein Ordner mit `config/plugins`, `data/plugins` und `config/system/general.json`; bis 1.4.2 genügte `config/system`, und ein Prüfstand oder Rest mit diesem Ordner wurde wie ein LoxBerry gelesen. Auf einem LoxBerry ändert sich nichts.
+
 ## Neu in 0.9.45
 
 - BYD: Lehnt die BCU einen späteren Zelldatenblock ab (gemeldet an einer HVM mit 7 Modulen je Turm, Block 5), werden die schon gelesenen Blöcke jetzt ausgewertet. Bis 0.9.44 kamen dann gar keine Zelldaten an. Der Abbruch steht weiter im Protokoll, als Hinweis statt als Fehler. Scheitert schon der erste Block, bleibt es ein Fehler (Issue #2).
