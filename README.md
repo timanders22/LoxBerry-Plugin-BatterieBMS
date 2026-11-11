@@ -10,6 +10,11 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.47
+
+- **Konfiguration wird beim Dienststart vervollständigt:** Fehlen in `batteriebms.json` Einstellungen, die eine neuere Fassung mitbringt, trägt der Dienst sie beim Start einmal in die Datei ein, samt Zweitschrift; das Protokoll nennt die ergänzten Namen in einer Zeile, nie Werte. Bisher ergänzte das Plugin fehlende Einstellungen nur beim Lesen; in die Datei kamen sie erst beim nächsten Speichern im Formular.
+- Eingetragen wird, womit das Plugin bisher schon gearbeitet hat: die Vorgabe, bei `endpunkt_ein` und `mqtt_ein` die Lese-Regel für bestehende Anlagen (HTTP-Lesezweig bleibt an, MQTT bleibt aus). Alle übrigen Werte bleiben so in der Datei, wie sie dort stehen, auch Werte außerhalb der Grenzen und Schlüssel, die das Plugin nicht kennt. Leere Objekte (`{}`) bleiben dabei leere Objekte, oben wie verschachtelt, und werden nicht zu einer leeren Liste (`[]`). Eine fehlende oder beschädigte Datei und eine Datei ohne gültiges Aktionstoken werden nicht angefasst; das bleibt Sache der Selbstheilung. Gemessen in einem nachgebauten LoxBerry-Baum unter PHP 7.4 und 8.4; am Gerät noch nicht gemessen.
+
 ## Neu in 0.9.46
 
 - Gemeinsames Sprachmodul 1.4.3: Als LoxBerry-Wurzel aus `LBHOMEDIR` gilt für die Sprachausgabe nur noch ein Ordner mit `config/plugins`, `data/plugins` und `config/system/general.json`; bis 1.4.2 genügte `config/system`, und ein Prüfstand oder Rest mit diesem Ordner wurde wie ein LoxBerry gelesen. Auf einem LoxBerry ändert sich nichts.

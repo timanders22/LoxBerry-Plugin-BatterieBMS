@@ -1578,17 +1578,7 @@ function bm_config()
     }
     bm_konfig_lage($zustand === 'ok' ? 'ok' : $zustand);
 
-    $d = json_decode($roh, true);
-    /* Gruppe 31 (E-E13, E-E5): Lese-Regel fuer den Bestand - eine eingerichtete Datei ohne endpunkt_ein
-     * behaelt den HTTP-Lesezweig (1), ohne mqtt_ein bleibt MQTT aus (0, wie vor 0.9.38). Keine Datei oder
-     * "{}" (Neuinstallation): die Vorgaben. */
-    if (is_array($d) && $d) {
-        $bm_eingerichtet = bm_endpunkt_lese_regel(array_diff_key($d, array('endpunkt_ein' => 1)));
-        if (!array_key_exists('mqtt_ein', $d) && !empty($bm_eingerichtet['endpunkt_ein'])) {
-            $d['mqtt_ein'] = 0;
-        }
-        $d = bm_endpunkt_lese_regel($d);
-    }
+    $d = bm_bestand_lese_regel(json_decode($roh, true));
     $cfg = array_merge(bm_vorgaben(), is_array($d) ? $d : array());
     // Die EVCC-Felder werden hier begrenzt und nicht erst beim Benutzen: sie
     // koennen auch aus einer von Hand bearbeiteten Datei kommen.
@@ -1606,6 +1596,124 @@ function bm_config()
         $cfg[$bm_zk] = max($bm_gr[0], min($bm_gr[1], (int) $cfg[$bm_zk]));
     }
     return $cfg;
+}
+
+/**
+ * Gruppe 31 (E-E13, E-E5): Lese-Regel fuer den Bestand - eine eingerichtete Datei ohne endpunkt_ein
+ * behaelt den HTTP-Lesezweig (1), ohne mqtt_ein bleibt MQTT aus (0, wie vor 0.9.38). Keine Datei oder
+ * "{}" (Neuinstallation): die Vorgaben. Seit 0.9.47 eine eigene Funktion, weil bm_config() und
+ * bm_config_vervollstaendigen() sie beide brauchen - an EINER Stelle.
+ */
+function bm_bestand_lese_regel($d)
+{
+    if (is_array($d) && $d) {
+        $bm_eingerichtet = bm_endpunkt_lese_regel(array_diff_key($d, array('endpunkt_ein' => 1)));
+        if (!array_key_exists('mqtt_ein', $d) && !empty($bm_eingerichtet['endpunkt_ein'])) {
+            $d['mqtt_ein'] = 0;
+        }
+        $d = bm_endpunkt_lese_regel($d);
+    }
+    return $d;
+}
+
+/** Leere Objekte des Rohtextes ($o, json_decode ohne true) im Feld $a wieder als Objekt fuehren (11.11.2026),
+ *  damit json_encode() sie als {} und nicht als [] schreibt - oben wie verschachtelt, auch unter fremden
+ *  Schluesseln. Nur fuer bm_config_vervollstaendigen(); das Speichern im Formular bleibt, wie es ist.
+ *  Bauart Bewaesserung 0.9.56 (bw_json_leere_objekte()). */
+function bm_json_leere_objekte($a, $o)
+{
+    if (!is_array($a)) { return $a; }
+    if (is_object($o)) {
+        if (!get_object_vars($o) && $a === array()) { return new stdClass(); }
+        foreach ($a as $k => $v) {
+            $ks = (string) $k;
+            if (is_array($v) && property_exists($o, $ks)) { $a[$k] = bm_json_leere_objekte($v, $o->$ks); }
+        }
+    } elseif (is_array($o)) {
+        foreach ($a as $k => $v) {
+            if (is_array($v) && array_key_exists($k, $o)) { $a[$k] = bm_json_leere_objekte($v, $o[$k]); }
+        }
+    }
+    return $a;
+}
+
+/**
+ * Fehlende Schluessel EINMAL mit ihrer Vorgabe in die Datei schreiben (seit 0.9.47).
+ *
+ * Regeln/05 ("Die Konfiguration wird vervollstaendigt, nicht nur ergaenzt"),
+ * Bauform Docker NG 1.3.7. Bis 0.9.46 ergaenzte bm_config() fehlende
+ * Schluessel nur im Speicher; in die Datei kamen sie erst beim naechsten
+ * Speichern im Formular. Aufgerufen beim Dienststart (bin/bms_dienst.php),
+ * vor dem ersten Lesen der Konfiguration.
+ *
+ * - Nur an einer Datei, die bm_konfig_taugt() besteht (JSON-Objekt mit
+ *   tauglichem Aktionstoken). Eine fehlende, leere oder kaputte Datei ist
+ *   Sache der Selbstheilung in bm_config(); hier wird nichts angelegt.
+ * - Geschrieben werden die WERTE AUS DER DATEI, unveraendert, plus die
+ *   fehlenden Schluessel - nicht die von bm_config() begrenzten Werte.
+ *   Fehlende Schluessel bekommen den Wert, mit dem bm_config() sie liest:
+ *   die Vorgabe, bei endpunkt_ein und mqtt_ein die Lese-Regel fuer den
+ *   Bestand (bm_bestand_lese_regel) - sonst schaltete das Vervollstaendigen
+ *   den HTTP-Lesezweig einer bestehenden Anlage still ab.
+ * - Fremde Schluessel bleiben stehen; geschrieben wird nur, wenn etwas fehlt.
+ * - Geschrieben ueber bm_config_speichern() (0600, Zweitschrift wie beim
+ *   Speichern im Formular), unter der Sperre token.lock.
+ * - Im unangemeldeten Bereich (bm_nur_lesen) geschieht nichts.
+ *
+ * Rueckgabe: Liste der eingetragenen Schluessel (leer = nichts zu tun).
+ */
+function bm_config_vervollstaendigen()
+{
+    if (bm_nur_lesen()) {
+        return array();
+    }
+    $p = bm_paths();
+    clearstatcache(true, $p['config']);
+    if (!is_file($p['config']) || !bm_konfig_taugt((string) @file_get_contents($p['config']))) {
+        return array();
+    }
+    if (!is_dir($p['datadir'])) {
+        @mkdir($p['datadir'], 0775, true);
+    }
+    $fp = @fopen($p['datadir'] . '/token.lock', 'c+');
+    if ($fp === false || !@flock($fp, LOCK_EX)) {
+        if ($fp !== false) {
+            fclose($fp);
+        }
+        return array();
+    }
+    $fehlend = array();
+    $gescheitert = false;
+    // zweiter Blick unter der Sperre - die Oberflaeche kann eben gespeichert haben
+    clearstatcache(true, $p['config']);
+    $roh = is_file($p['config']) ? (string) @file_get_contents($p['config']) : '';
+    if (bm_konfig_taugt($roh)) {
+        $datei = json_decode(trim($roh), true);
+        // Ein leeres Objekt der Datei ({}) bliebe nach json_decode(..., true) ein leeres Feld und kaeme beim
+        // Schreiben als [] zurueck - der Rohwert wird erhalten, bevor ergaenzt wird (11.11.2026).
+        $datei = bm_json_leere_objekte($datei, json_decode(trim($roh)));
+        $gelesen = bm_bestand_lese_regel($datei);
+        foreach (bm_vorgaben() as $k => $w) {
+            if (!array_key_exists($k, $datei)) {
+                $datei[$k] = array_key_exists($k, $gelesen) ? $gelesen[$k] : $w;
+                $fehlend[] = $k;
+            }
+        }
+        if ($fehlend && !bm_config_speichern($datei)) {
+            $gescheitert = true;
+        }
+    }
+    @flock($fp, LOCK_UN);
+    fclose($fp);
+    if ($gescheitert) {
+        bm_log_gebremst('vervollstaendigen', 'Die Konfiguration liess sich nicht vervollstaendigen '
+            . '(Schreiben scheiterte). Es fehlen weiter: ' . implode(', ', $fehlend) . '.', 3600);
+        return array();
+    }
+    if ($fehlend) {
+        bm_log('Konfiguration vervollstaendigt, mit Vorgabe eingetragen: ' . implode(', ', $fehlend));
+    }
+    return $fehlend;
 }
 
 function bm_config_speichern($cfg)

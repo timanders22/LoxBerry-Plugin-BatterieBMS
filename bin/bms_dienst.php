@@ -3640,4 +3640,8 @@ if (function_exists('pcntl_signal')) {
     pcntl_signal(SIGTERM, 'bm_signal_behandeln');
     pcntl_signal(SIGINT, 'bm_signal_behandeln');
 }
+/* 0.9.47 (Regeln/05): fehlende Schluessel beim Dienststart einmal mit ihrer
+ * Vorgabe in die Datei schreiben - vor dem ersten bm_config() der Schleife.
+ * Bis 0.9.46 ergaenzte die Linie sie nur im Speicher. */
+bm_config_vervollstaendigen();
 exit(bm_dienst_schleife(in_array('--einmal', $bm_argv, true)));
