@@ -6429,12 +6429,67 @@ function bm_ansage_rueck(array $neu)
     return is_array($j) ? $j : $neu;
 }
 
+/**
+ * 0.9.49 (Entscheidung des Hausherrn, 12.11.2026): die Zelldrift, nach der Warnschwelle (bm_alarm_geraet(),
+ * bm_ansage_arten(), Reiter Test) und Ausgleichsladen (bm_ausgleich_lauf()) urteilen.
+ *
+ * Ein Turm (Vorgabe; Eintrag ohne 'tuerme_n' oder mit weniger als 2): UZDIFF, Wort fuer Wort wie bis 0.9.48,
+ * Turm 0. Ab zwei Tuermen die groesste Drift INNERHALB eines Turms (tuerme[T]['uzdiff']) und dieser Turm (bei
+ * Gleichstand der kleinere). UZDIFF zaehlt dann ueber alle Tuerme und mischt Zellen, die verschiedene BMU
+ * ausgleichen; es bleibt Wert und Anzeige und loest nichts mehr aus. Liegt noch kein Turmwert vor (etwa im ersten
+ * Durchlauf nach dem Umstellen auf mehrere Tuerme), ist 'mv' null: dann urteilt nichts ueber die Drift - auch
+ * UZDIFF nicht.
+ * Rueckgabe: 'mv' (Zahl oder null), 'turm' (0 bei einem Turm), 'ueber' (Turm => mV fuer jeden Turm STRENG
+ * ueber $schwelle, aufsteigend; bei einem Turm Schluessel 0), 'tuerme' (true ab zwei Tuermen).
+ */
+function bm_drift_lage(array $e, $schwelle = null)
+{
+    if (!isset($e['tuerme_n']) || (int) $e['tuerme_n'] < 2) {
+        $d = (isset($e['UZDIFF']) && is_numeric($e['UZDIFF'])) ? $e['UZDIFF'] : null;
+        return array('mv' => $d, 'turm' => 0, 'tuerme' => false,
+                     'ueber' => ($d !== null && $schwelle !== null && $d > $schwelle) ? array(0 => $d) : array());
+    }
+    $mv = null;
+    $turm = 0;
+    $ueber = array();
+    foreach ((array) (isset($e['tuerme']) ? $e['tuerme'] : array()) as $t => $td) {
+        $t = (int) $t;
+        if ($t < 1 || $t > (int) $e['tuerme_n'] || !is_array($td) || !isset($td['uzdiff'])
+            || !is_numeric($td['uzdiff'])) {
+            continue;
+        }
+        $d = $td['uzdiff'];
+        if ($mv === null || $d > $mv || ($d == $mv && $t < $turm)) {
+            $mv = $d;
+            $turm = $t;
+        }
+        if ($schwelle !== null && $d > $schwelle) {
+            $ueber[$t] = $d;
+        }
+    }
+    ksort($ueber);
+    return array('mv' => $mv, 'turm' => $turm, 'tuerme' => true, 'ueber' => $ueber);
+}
+
+/** 0.9.49: der Ansagesatz zu einem Grund. Bei der Drift mehrerer Tuerme nennt er den Turm mit der groessten Drift. */
+function bm_ansage_satz($art, $name, array $e, array $cfg)
+{
+    if ($art === 'drift') {
+        $dl = bm_drift_lage($e, max(1, (int) $cfg['drift_warnung']));
+        if ($dl['turm'] > 0) {
+            return sprintf(bm_t('ANSAGEPLUGIN.SATZ_DRIFT_TURM'), $name, (int) $dl['turm']);
+        }
+    }
+    return sprintf(bm_t('ANSAGEPLUGIN.SATZ_' . strtoupper($art)), $name);
+}
+
 /** Welche Gruende liegen an? Dieselben Bedingungen wie bm_alarm(): Name => dringend. */
 function bm_ansage_arten(array $e, array $cfg)
 {
     $a = array();
     if (empty($e['ok'])) { $a['stumm'] = false; }
-    if (isset($e['UZDIFF']) && is_numeric($e['UZDIFF']) && $e['UZDIFF'] > max(1, (int) $cfg['drift_warnung'])) { $a['drift'] = false; }
+    $dl = bm_drift_lage($e, max(1, (int) $cfg['drift_warnung']));     // 0.9.49: je Turm
+    if ($dl['ueber']) { $a['drift'] = false; }
     if (isset($e['FEHLER']) && is_numeric($e['FEHLER']) && (int) $e['FEHLER'] > 0) { $a['fehler'] = true; }
     if (isset($e['WARNUNG']) && is_numeric($e['WARNUNG']) && (int) $e['WARNUNG'] > 0) { $a['warnung'] = false; }
     if (isset($e['TMAX']) && is_numeric($e['TMAX']) && $e['TMAX'] > (int) $cfg['temp_max']) { $a['warm'] = true; }
@@ -6461,7 +6516,7 @@ function bm_ansage_alarm($nr, $name, array $e, array $cfg)
     if (!$erst && bm_ansage_anlass_an('alarm', $cfg)) {
         foreach ($jetzt as $art => $dringend) {
             if (empty($alt[$art])) {
-                $legen[] = array('schluessel' => 'alarm|' . $k . '|' . $art, 'text' => sprintf(bm_t('ANSAGEPLUGIN.SATZ_' . strtoupper($art)), $name), 'dringend' => $dringend);
+                $legen[] = array('schluessel' => 'alarm|' . $k . '|' . $art, 'text' => bm_ansage_satz($art, $name, $e, $cfg), 'dringend' => $dringend);
             }
         }
     }
@@ -6506,9 +6561,11 @@ function bm_alarm_geraet(array $e, $cfg = null)
         $cfg = bm_config();
     }
     $g = array();
-    if (isset($e['UZDIFF']) && is_numeric($e['UZDIFF'])
-        && $e['UZDIFF'] > max(1, (int) $cfg['drift_warnung'])) {
-        $g[] = sprintf(bm_t('ALARM.DRIFT'), (int) $e['UZDIFF'], (int) $cfg['drift_warnung']);
+    /* 0.9.49: ab zwei Tuermen je Turm (bm_drift_lage()), ein Grund je Turm ueber der Schwelle, mit Turmnummer.
+     * Bei einem Turm Wort fuer Wort wie bis 0.9.48 (UZDIFF, Text ALARM.DRIFT). */
+    foreach (bm_drift_lage($e, max(1, (int) $cfg['drift_warnung']))['ueber'] as $bm_dt => $bm_dmv) {
+        $g[] = $bm_dt > 0 ? sprintf(bm_t('ALARM.DRIFT_TURM'), (int) $bm_dt, (int) $bm_dmv, (int) $cfg['drift_warnung'])
+                          : sprintf(bm_t('ALARM.DRIFT'), (int) $bm_dmv, (int) $cfg['drift_warnung']);
     }
     if (isset($e['FEHLER']) && is_numeric($e['FEHLER']) && (int) $e['FEHLER'] > 0) {
         $g[] = sprintf(bm_t('ALARM.FEHLERBITS'), (int) $e['FEHLER']);

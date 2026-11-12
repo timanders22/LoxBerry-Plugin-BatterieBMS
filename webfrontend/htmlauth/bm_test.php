@@ -198,8 +198,17 @@ function bm_pruefungen()
         }
         // Zellspannungsdrift: das ist der Wert, wegen dessen man ein BMS
         // ueberhaupt ausliest.
+        /* 0.9.49: ab zwei Tuermen urteilt die Zeile ueber die groesste Drift INNERHALB eines Turms
+         * (bm_drift_lage()) und nennt UZDIFF ueber alle Tuerme nur noch; bei einem Turm wie bis 0.9.48. */
+        $bm_dl = bm_drift_lage(isset($werte[$nr]) && is_array($werte[$nr]) ? $werte[$nr] : array());
         $d = isset($werte[$nr]['UZDIFF']) ? $werte[$nr]['UZDIFF'] : null;
-        if ($d !== null) {
+        if ($bm_dl['tuerme'] && $bm_dl['mv'] !== null) {
+            $grenze = max(1, (int) $cfg['drift_warnung']);
+            $zeilen[] = bm_pruefzeile($bm_dl['mv'] <= $grenze ? 1 : 0,
+                sprintf(bm_t('TEST.F_DRIFT'), bm_e($g['name'])),
+                sprintf(bm_t('TEST.A_DRIFT_TURM'), bm_e($bm_dl['mv']), (int) $bm_dl['turm'], $grenze,
+                    $d === null ? '-' : bm_e($d)));
+        } elseif (!$bm_dl['tuerme'] && $d !== null) {
             $grenze = max(1, (int) $cfg['drift_warnung']);
             $zeilen[] = bm_pruefzeile($d <= $grenze ? 1 : 0,
                 sprintf(bm_t('TEST.F_DRIFT'), bm_e($g['name'])),

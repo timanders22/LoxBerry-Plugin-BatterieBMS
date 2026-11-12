@@ -2579,16 +2579,22 @@ function bm_ausgleich_lauf(array $cfg, &$letzteSchreibzeit, &$sofortAbruf)
                 $abbruch = 'Speicher antwortet nicht';
             }
         }
-        if ($abbruch === '' && bm_temp_frisch($e, $cfg) && isset($e['UZDIFF']) && is_numeric($e['UZDIFF'])
+        /* 0.9.49: ab zwei Tuermen zaehlt die groesste Drift INNERHALB eines Turms (bm_drift_lage()) - beendet
+         * wird also erst, wenn jeder Turm unter der Rueckkehrschwelle liegt. Bei einem Turm UZDIFF wie bisher. */
+        $dl = bm_drift_lage($e);
+        if ($abbruch === '' && bm_temp_frisch($e, $cfg) && $dl['mv'] !== null
             && isset($e['zell_ts']) && (int) $e['zell_ts'] !== (int) $a['zell_ts']) {
             $a['zell_ts'] = (int) $e['zell_ts'];
-            $a['unter'] = ((int) $e['UZDIFF'] < (int) $cfg['ausgleich_rueck_mv']) ? (int) $a['unter'] + 1 : 0;
+            $a['unter'] = ((int) $dl['mv'] < (int) $cfg['ausgleich_rueck_mv']) ? (int) $a['unter'] + 1 : 0;
         }
         if ($abbruch === '' && (int) $a['unter'] >= 2) {
             list($ok, $meld) = bm_befehl_ausfuehren(array('aktion' => 'automatik', 'geraet' => $nr,
                 'quelle' => BM_AUSGLEICH_QUELLE), $letzteSchreibzeit, $sofortAbruf);
-            $t = sprintf(bm_t('DIENST.AUSGLEICH_ENDE'), $nr, isset($e['UZDIFF']) ? (int) $e['UZDIFF'] : -1,
-                (int) round(($jetzt - (int) $a['start']) / 60));
+            $t = $dl['turm'] > 0
+                ? sprintf(bm_t('DIENST.AUSGLEICH_ENDE_TURM'), $nr, (int) $dl['mv'], (int) $dl['turm'],
+                    (int) round(($jetzt - (int) $a['start']) / 60))
+                : sprintf(bm_t('DIENST.AUSGLEICH_ENDE'), $nr, $dl['mv'] !== null ? (int) $dl['mv'] : -1,
+                    (int) round(($jetzt - (int) $a['start']) / 60));
             bm_log($t . ($ok ? '' : ' Ruecknahme FEHLGESCHLAGEN: ' . $meld));
             bm_benachrichtigen(6, $t);
             bm_ansage_ausgleich($nr, 'SATZ_AUSGLEICH_ENDE');     // 0.9.40
@@ -2638,14 +2644,18 @@ function bm_ausgleich_lauf(array $cfg, &$letzteSchreibzeit, &$sofortAbruf)
         $gesperrt = 'Abstand: frueheste Wiederholung ' . date('d.m. H:i', (int) $a['letzter'] + 86400 * (int) $cfg['ausgleich_abstand_tage']);
     }
     // Zwei aufeinander folgende Zelldatenabrufe ueber der Startschwelle (eine Spitze unter Last zaehlt nicht).
-    if ($ziel > 0 && bm_temp_frisch($e, $cfg) && isset($e['UZDIFF']) && is_numeric($e['UZDIFF'])
+    /* 0.9.49: ab zwei Tuermen die groesste Drift INNERHALB eines Turms (bm_drift_lage()): es reicht ein Turm ueber
+     * der Startschwelle; die Drift ueber alle Tuerme (UZDIFF) loest nichts mehr aus. Bei einem Turm UZDIFF. */
+    $dl = bm_drift_lage($e);
+    if ($ziel > 0 && bm_temp_frisch($e, $cfg) && $dl['mv'] !== null
         && isset($e['zell_ts']) && (int) $e['zell_ts'] !== (int) $a['zell_ts']) {
         $a['zell_ts'] = (int) $e['zell_ts'];
-        $a['ueber'] = ((int) $e['UZDIFF'] >= (int) $cfg['ausgleich_start_mv']) ? (int) $a['ueber'] + 1 : 0;
+        $a['ueber'] = ((int) $dl['mv'] >= (int) $cfg['ausgleich_start_mv']) ? (int) $a['ueber'] + 1 : 0;
     }
     $a['wert'] = (int) $a['abbruch'] === 1 ? 2 : 0;
     $a['grund'] = $gesperrt !== '' ? 'gesperrt: ' . $gesperrt
-        : 'bereit (Drift ' . (isset($e['UZDIFF']) && is_numeric($e['UZDIFF']) ? (int) $e['UZDIFF'] : '-') . ' mV)';
+        : 'bereit (Drift ' . ($dl['mv'] !== null ? (int) $dl['mv'] : '-') . ' mV'
+          . ($dl['turm'] > 0 ? ', Turm ' . (int) $dl['turm'] : '') . ')';
     if ($gesperrt === '' && (int) $a['ueber'] >= 2) {
         list($tc) = bm_temp_schutz('laden', $e, $cfg, true);
         if ($tc === '' && isset($e['SOC']) && is_numeric($e['SOC']) && (float) $e['SOC'] < 100) {
@@ -2653,7 +2663,10 @@ function bm_ausgleich_lauf(array $cfg, &$letzteSchreibzeit, &$sofortAbruf)
                 'watt' => (int) $cfg['ausgleich_watt'], 'quelle' => BM_AUSGLEICH_QUELLE), $letzteSchreibzeit,
                 $sofortAbruf);
             if ((int) $ok === 1) {
-                $t = sprintf(bm_t('DIENST.AUSGLEICH_START'), $ziel, (int) $e['UZDIFF'], (int) $cfg['ausgleich_watt']);
+                $t = $dl['turm'] > 0
+                    ? sprintf(bm_t('DIENST.AUSGLEICH_START_TURM'), $ziel, (int) $dl['mv'], (int) $dl['turm'],
+                        (int) $cfg['ausgleich_watt'])
+                    : sprintf(bm_t('DIENST.AUSGLEICH_START'), $ziel, (int) $dl['mv'], (int) $cfg['ausgleich_watt']);
                 bm_log($t);
                 bm_benachrichtigen(6, $t);
                 $a = array_merge($a, array('laeuft' => 1, 'geraet' => $ziel, 'start' => $jetzt, 'wert' => 1,
@@ -3536,6 +3549,31 @@ function bm_selbsttest()
               . 'gemessen ' . count($a1) . '/' . count($a2) . '/' . count($a3) . '/'
               . count($a4) . '/' . count($a5);
     if (!$alOk) {
+        $fehler++;
+    }
+
+    /* 0.9.49: Warnschwelle und Ausgleichsladen je Turm (bm_drift_lage()). Zwei Tuerme mit je 30 mV, ueber alle
+     * 70 mV: kein Drift-Grund; Turm 2 mit 60 mV: genau ein Grund, und er nennt Turm 2; ein Turm: UZDIFF wie bisher. */
+    $bm_dt2 = array('ok' => 1, 'UZDIFF' => 70, 'tuerme_n' => 2, 'tuerme' => array(
+        1 => array('uzdiff' => 30), 2 => array('uzdiff' => 30)));
+    $bm_dt3 = array('ok' => 1, 'UZDIFF' => 70, 'tuerme_n' => 2, 'tuerme' => array(
+        1 => array('uzdiff' => 18), 2 => array('uzdiff' => 60)));
+    $bm_da2 = bm_alarm($bm_dt2, $acfg);
+    $bm_da3 = bm_alarm($bm_dt3, $acfg);
+    $bm_dl2 = bm_drift_lage($bm_dt2);
+    $bm_dl3 = bm_drift_lage($bm_dt3);
+    $bm_dl1 = bm_drift_lage(array('ok' => 1, 'UZDIFF' => 70));
+    $bm_dok = count($bm_da2) === 0 && count($bm_da3) === 1
+        && $bm_da3[0] === sprintf(bm_t('ALARM.DRIFT_TURM'), 2, 60, 50)
+        && $bm_dl2['mv'] === 30 && $bm_dl3['mv'] === 60 && $bm_dl3['turm'] === 2
+        && $bm_dl1['mv'] === 70 && $bm_dl1['turm'] === 0
+        && !array_key_exists('drift', bm_ansage_arten($bm_dt2, $acfg))
+        && array_key_exists('drift', bm_ansage_arten($bm_dt3, $acfg));
+    $zeilen[] = ($bm_dok ? '[OK]   ' : '[FEHL] ') . 'Zelldrift je Turm: 2 x 30 mV (ueber alle 70) -> '
+              . count($bm_da2) . ' Gruende (0 erwartet), Turm 2 mit 60 mV -> ' . count($bm_da3) . ' ('
+              . ($bm_da3 ? $bm_da3[0] : '-') . '), massgeblich ' . var_export($bm_dl3['mv'], true) . ' mV Turm '
+              . (int) $bm_dl3['turm'] . '; ein Turm: ' . var_export($bm_dl1['mv'], true) . ' mV';
+    if (!$bm_dok) {
         $fehler++;
     }
 
