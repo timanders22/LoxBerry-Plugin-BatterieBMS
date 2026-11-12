@@ -94,10 +94,14 @@ Registerbeschreibung
             Wert ohne Vorzeichen (2147483647 = 0x7FFFFFFF). Das Feld bleibt dann
             leer statt einer Zahl, die aussieht wie ein Messwert.
   stand     seit 0.9.48: "dokumentiert" oder "unbestaetigt" fuer DIESES Feld,
-            wenn es vom Stand des ganzen Profils abweicht (Beispiel: BYD
+            wenn es vom Stand des ganzen Profils abweicht; seit 0.9.50 auch
+            "gemessen" (an einer Anlage abgelesen, Beispiel: BYD EGELADEN und
             EENTLADEN). Fehlt es, gilt der Stand des Profils. Die Oberflaeche
             und die Loxone-Vorlage zeigen ein unbestaetigtes Feld als
             "ungeprueft".
+  beleg     seit 0.9.50, zu "gemessen": woran gemessen wurde, 1 bis 80
+            Zeichen (Beispiel: "BYD HVM, 12.11.2026"). Die Reiter
+            Einstellungen und Einbindung in Loxone zeigen es an.
 
 Leseblock
 ---------

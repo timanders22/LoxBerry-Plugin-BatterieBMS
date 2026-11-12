@@ -354,10 +354,13 @@ function bm_zellen_byd(array $g, array $pr, $tmo, $bmsIndex = 1)
  * 0.9.48 (Issue #4): Ladezustand (int16 x Faktor, %) und Gesundheitszustand (int16, %) eines Turms aus den
  * Zelldaten - gezaehlt nach dem Verwerfen der Laengenworte, wie zellen_ab. Ein Wert ausserhalb 0..100 ist kein
  * Messwert und bleibt null. Ohne die Profilschluessel: beide null.
+ * 0.9.50 (Issue #5): dazu Energie geladen und entladen des Turms in kWh - u32 aus zwei Worten ab 'turm_egeladen'
+ * bzw. 'turm_eentladen', das UNTERE Wort zuerst, mal 'turm_energie_faktor'. Ausserhalb 0..10 000 000 kWh (die
+ * Grenzen von EGELADEN) kein Messwert. Ohne die Profilschluessel oder ohne beide Worte: null.
  */
 function bm_byd_turmwerte(array $daten, array $z)
 {
-    $aus = array('soc' => null, 'soh' => null);
+    $aus = array('soc' => null, 'soh' => null, 'egeladen' => null, 'eentladen' => null);
     foreach (array('soc' => 'turm_soc', 'soh' => 'turm_soh') as $k => $schluessel) {
         if (!isset($z[$schluessel]) || !isset($daten[(int) $z[$schluessel]])) {
             continue;
@@ -367,6 +370,21 @@ function bm_byd_turmwerte(array $daten, array $z)
         $f = ($k === 'soc' && isset($z['turm_soc_faktor'])) ? (float) $z['turm_soc_faktor'] : 1.0;
         $v = round($w * $f, $k === 'soc' ? 1 : 0);
         if ($v >= 0 && $v <= 100) {
+            $aus[$k] = $v;
+        }
+    }
+    foreach (array('egeladen' => 'turm_egeladen', 'eentladen' => 'turm_eentladen') as $k => $schluessel) {
+        if (!isset($z[$schluessel])) {
+            continue;
+        }
+        $i = (int) $z[$schluessel];
+        if (!isset($daten[$i], $daten[$i + 1])) {
+            continue;
+        }
+        $roh = ((int) $daten[$i] & 0xFFFF) + ((int) $daten[$i + 1] & 0xFFFF) * 65536;   // unteres Wort zuerst
+        $f = isset($z['turm_energie_faktor']) ? (float) $z['turm_energie_faktor'] : 1.0;
+        $v = round($roh * $f, 3);
+        if ($v >= 0 && $v <= 10000000) {
             $aus[$k] = $v;
         }
     }
@@ -437,6 +455,9 @@ function bm_zellen_byd_alle(array $g, array $pr, $tmo)
             'module' => count($alle) - $von + 1,
             'soc'    => isset($erg['turm']['soc']) ? $erg['turm']['soc'] : null,
             'soh'    => isset($erg['turm']['soh']) ? $erg['turm']['soh'] : null,
+            // 0.9.50 (Issue #5): Energie geladen und entladen des Turms in kWh
+            'egeladen'  => isset($erg['turm']['egeladen']) ? $erg['turm']['egeladen'] : null,
+            'eentladen' => isset($erg['turm']['eentladen']) ? $erg['turm']['eentladen'] : null,
             'uzdiff' => ($uzmax && $uzmin) ? max($uzmax) - min($uzmin) : null,
         );
     }
@@ -3160,12 +3181,16 @@ function bm_selbsttest()
     $bm_ezv = bm_modbus_auswerten(array(0x0511 => 53095, 0x0512 => 3), $bm_ezp);
     $bm_ezok = $gleich($bm_ez['werte']['EGELADEN'], 24970.3) && $gleich($bm_ez['werte']['EENTLADEN'], 22325.2)
         && $bm_ez['werte']['ZYKLEN'] === null && $bm_ezv['werte']['EGELADEN'] === null
-        && bm_feld_stand($bm_eing['byd_battery_box'], 'EENTLADEN') === 'unbestaetigt'
-        && bm_feld_stand($bm_eing['byd_battery_box'], 'EGELADEN') === 'dokumentiert';
+        /* 0.9.50 (Issue #3): beide an einer Anlage gemessen (BYD HVM, 12.11.2026) */
+        && bm_feld_stand($bm_eing['byd_battery_box'], 'EENTLADEN') === 'gemessen'
+        && bm_feld_stand($bm_eing['byd_battery_box'], 'EGELADEN') === 'gemessen'
+        && bm_feld_beleg($bm_eing['byd_battery_box'], 'EENTLADEN') === 'BYD HVM, 12.11.2026'
+        && bm_profil_pruefen($bm_eing['byd_battery_box']) === array();
     $zeilen[] = ($bm_ezok ? '[OK]   ' : '[FEHL] ') . 'BYD-Energiezaehler (Issue #3): EGELADEN '
               . var_export($bm_ez['werte']['EGELADEN'], true) . ' (24970.3), EENTLADEN '
               . var_export($bm_ez['werte']['EENTLADEN'], true) . ' (22325.2, Stand '
-              . bm_feld_stand($bm_eing['byd_battery_box'], 'EENTLADEN') . '), ZYKLEN '
+              . bm_feld_stand($bm_eing['byd_battery_box'], 'EENTLADEN') . '/'
+              . bm_feld_stand($bm_eing['byd_battery_box'], 'EGELADEN') . ', gemessen/gemessen), ZYKLEN '
               . var_export($bm_ez['werte']['ZYKLEN'], true) . ' (NULL), oberes Wort zuerst '
               . var_export($bm_ezv['werte']['EGELADEN'], true) . ' (NULL, unplausibel)';
     if (!$bm_ezok) {
@@ -3178,8 +3203,10 @@ function bm_selbsttest()
     $bm_tw1 = bm_byd_turmwerte(array(24 => 256, 25 => 91), $bm_zp);
     $bm_tw2 = bm_byd_turmwerte(array(24 => 0xFFFF, 25 => 0xFFFF), $bm_zp);
     $bm_tw3 = bm_byd_turmwerte(array(24 => 1001, 25 => 97), $bm_zp);
-    $bm_twok = $bm_tw1 === array('soc' => 25.6, 'soh' => 91.0) && $bm_tw2 === array('soc' => null, 'soh' => null)
-        && $bm_tw3 === array('soc' => null, 'soh' => 97.0);
+    // 0.9.50: bm_byd_turmwerte() liefert dazu egeladen/eentladen - ohne Data[14..17] beide null
+    $bm_twok = $bm_tw1 === array('soc' => 25.6, 'soh' => 91.0, 'egeladen' => null, 'eentladen' => null)
+        && $bm_tw2 === array('soc' => null, 'soh' => null, 'egeladen' => null, 'eentladen' => null)
+        && $bm_tw3 === array('soc' => null, 'soh' => 97.0, 'egeladen' => null, 'eentladen' => null);
     $zeilen[] = ($bm_twok ? '[OK]   ' : '[FEHL] ') . 'BYD-Turmwerte (Issue #4): Data[24]=256/Data[25]=91 ergibt '
               . var_export($bm_tw1['soc'], true) . ' %/' . var_export($bm_tw1['soh'], true)
               . ' % (25.6/91.0); 0xFFFF ergibt ' . var_export($bm_tw2['soc'], true) . ' (NULL); 1001 ergibt '
@@ -3188,13 +3215,30 @@ function bm_selbsttest()
         $fehler++;
     }
 
+    /* 0.9.50 (Issue #5): Energie je Turm - Data[14]/Data[15] und Data[16]/Data[17], unteres Wort zuerst, 1 Wh je
+     * Einheit. Erfundene Werte: 1 234 567 Wh (0x0012D687) und 1 111 111 Wh (0x0010F447). Oberes Wort zuerst ergaebe
+     * 3 599 171,602 kWh statt 1 234,567 - der Wert haengt also an der Wortfolge; eine Zaehlung mit Laengenwort
+     * (Data[15]/Data[16]) ergaebe 3 999,762 kWh. Ohne die Profilschluessel bleibt alles leer. */
+    $bm_te = bm_byd_turmwerte(array(14 => 0xD687, 15 => 0x0012, 16 => 0xF447, 17 => 0x0010), $bm_zp);
+    $bm_te0 = bm_byd_turmwerte(array(14 => 0xD687, 15 => 0x0012, 16 => 0xF447, 17 => 0x0010), array());
+    $bm_teok = $gleich($bm_te['egeladen'], 1234.567) && $gleich($bm_te['eentladen'], 1111.111)
+        && $bm_te0['egeladen'] === null && $bm_te0['eentladen'] === null
+        && bm_turm_feld_stand($bm_eing['byd_battery_box'], 'egeladen') === 'unbestaetigt';
+    $zeilen[] = ($bm_teok ? '[OK]   ' : '[FEHL] ') . 'BYD-Energie je Turm (Issue #5): Data[14..17] = 0xD687 0x0012 0xF447 '
+              . '0x0010 ergibt ' . var_export($bm_te['egeladen'], true) . '/' . var_export($bm_te['eentladen'], true)
+              . ' kWh (1234.567/1111.111), ohne Profilschluessel ' . var_export($bm_te0['egeladen'], true)
+              . ' (NULL), Stand ' . bm_turm_feld_stand($bm_eing['byd_battery_box'], 'egeladen') . ' (unbestaetigt)';
+    if (!$bm_teok) {
+        $fehler++;
+    }
+
     /* 0.9.48: jeder Suchtext der Vorlage (bm_check(), mit Semikolon) steht in der Statuszeile genau einmal -
      * gezaehlt an der erzeugten Zeile eines Speichers mit drei Tuermen (Regeln/07: Feldliste aus der Vorlage,
      * nicht aus der Antwort), und die Zeile bis SOLLART ist ohne Tuerme dieselbe wie mit. */
     $bm_sz = array('ok' => 1, 'sollwert' => '', 'sollwert_alter' => -1, 'tuerme_n' => 3, 'tuerme' => array(
-        1 => array('soc' => 25.6, 'soh' => 91, 'module' => 7, 'uzdiff' => 18),
-        2 => array('soc' => 35.7, 'soh' => 97, 'module' => 7, 'uzdiff' => 7),
-        3 => array('soc' => 22.4, 'soh' => 97, 'module' => 7, 'uzdiff' => 10)));
+        1 => array('soc' => 25.6, 'soh' => 91, 'module' => 7, 'uzdiff' => 18, 'egeladen' => 1234.567, 'eentladen' => 1111.111),
+        2 => array('soc' => 35.7, 'soh' => 97, 'module' => 7, 'uzdiff' => 7, 'egeladen' => 2000.5, 'eentladen' => 1800.25),
+        3 => array('soc' => 22.4, 'soh' => 97, 'module' => 7, 'uzdiff' => 10, 'egeladen' => 3000, 'eentladen' => 2700)));
     foreach (bm_status_felder() as $bm_f => $bm_u) {
         $bm_sz[$bm_f] = 1;
     }
@@ -3211,12 +3255,15 @@ function bm_selbsttest()
             $bm_mehr[] = $bm_f . 'x' . substr_count($bm_zeile3, $bm_s);
         }
     }
-    $bm_suok = !$bm_mehr && count($bm_such) === count(bm_status_felder()) + 2 + 12
+    /* 0.9.50 (Issue #5): je Turm zwei Felder mehr (18 statt 12), die Energie GANZ HINTEN nach TURM3UZDIFF. */
+    $bm_suok = !$bm_mehr && count($bm_such) === count(bm_status_felder()) + 2 + 18
         && strpos($bm_zeile3, $bm_zeile1 . ';TURM1SOC=25.6;TURM1SOH=91;TURM1MODULE=7;TURM1UZDIFF=18;') === 0
-        && substr($bm_zeile3, -15) === ';TURM3UZDIFF=10';
+        && strpos($bm_zeile3, ';TURM3UZDIFF=10;TURM1EGELADEN=1234.567;TURM1EENTLADEN=1111.111;'
+            . 'TURM2EGELADEN=2000.5;TURM2EENTLADEN=1800.25;TURM3EGELADEN=3000;TURM3EENTLADEN=2700') !== false
+        && substr($bm_zeile3, -20) === ';TURM3EENTLADEN=2700';
     $zeilen[] = ($bm_suok ? '[OK]   ' : '[FEHL] ') . 'Statuszeile mit 3 Tuermen: ' . count($bm_such)
               . ' Suchtexte je genau einmal' . ($bm_mehr ? ' - NICHT: ' . implode(', ', $bm_mehr) : '')
-              . ', Turmfelder hinter SOLLART, ohne Tuerme dieselbe Zeile bis SOLLART';
+              . ', Turmfelder hinter SOLLART, Energie je Turm ganz hinten, ohne Tuerme dieselbe Zeile bis SOLLART';
     if (!$bm_suok) {
         $fehler++;
     }

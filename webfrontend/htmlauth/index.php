@@ -1701,7 +1701,8 @@ if ($bm_x3) { ?>
 <td class="<?= $bm_pr['stand'] === 'dokumentiert' ? 'sm-an' : 'sm-aus' ?>">
     <?= bm_e(bm_t('EINST.STAND_' . strtoupper($bm_pr['stand']))) ?><br>
     <span class="sm-hilfe"><?= bm_e($bm_pr['herkunft']) ?></span>
-    <?php if (bm_felder_unbestaetigt($bm_pr)) { ?><div class="sm-hilfe"><?= bm_e(sprintf(bm_t('EINST.FELDER_UNBESTAETIGT'), implode(', ', bm_felder_unbestaetigt($bm_pr)))) ?></div><?php } ?></td>
+    <?php if (bm_felder_unbestaetigt($bm_pr)) { ?><div class="sm-hilfe"><?= bm_e(sprintf(bm_t('EINST.FELDER_UNBESTAETIGT'), implode(', ', bm_felder_unbestaetigt($bm_pr)))) ?></div><?php } ?>
+    <?php if (bm_felder_an_anlage_gemessen($bm_pr)) { /* 0.9.50 */ ?><div class="sm-hilfe"><?= bm_e(sprintf(bm_t('EINST.FELDER_GEMESSEN'), implode(', ', bm_felder_an_anlage_gemessen($bm_pr)))) ?></div><?php } ?></td>
 <td class="sm-hilfe"><?= bm_e($bm_pr['quelle']) ?></td>
 <td><form action="index.php" method="post">
   <?php echo bm_fmt(); ?>
@@ -1992,7 +1993,7 @@ foreach (bm_felder_geliefert(1) as $bm_feld => $bm_info) { ?>
     <td><span class="sm-mono"><?= bm_e(bm_check($bm_feld)) ?></span></td>
     <td><?= bm_e($bm_info[0]) ?></td>
     <td><span class="sm-mono"><?= (int) $bm_info[2] ?> &hellip; <?= (int) $bm_info[3] ?></span></td>
-    <td><?= bm_t($bm_info[1]) ?><?php if ($bm_lpr !== null && isset($bm_lpr['felder'][$bm_feld]) && bm_feld_stand($bm_lpr, $bm_feld) !== 'dokumentiert') { ?> <span class="sm-aus">(<?= bm_e(bm_t('EINST.STAND_UNBESTAETIGT')) ?>)</span><?php } ?></td></tr>
+    <td><?= bm_t($bm_info[1]) ?><?php if ($bm_lpr !== null && isset($bm_lpr['felder'][$bm_feld]) && bm_feld_stand($bm_lpr, $bm_feld) === 'unbestaetigt') { ?> <span class="sm-aus">(<?= bm_e(bm_t('EINST.STAND_UNBESTAETIGT')) ?>)</span><?php } elseif ($bm_lpr !== null && isset($bm_lpr['felder'][$bm_feld]) && bm_feld_stand($bm_lpr, $bm_feld) === 'gemessen') { /* 0.9.50 */ ?> <span class="sm-hilfe">(<?= bm_e(bm_t('EINST.STAND_GEMESSEN') . (bm_feld_beleg($bm_lpr, $bm_feld) !== '' ? ': ' . bm_feld_beleg($bm_lpr, $bm_feld) : '')) ?>)</span><?php } ?></td></tr>
 <?php } ?>
 <tr><td><span class="sm-mono">BMS_1_SOLLART</span></td>
     <td><span class="sm-mono"><?= bm_e(bm_check('SOLLART')) ?></span></td>
@@ -2008,7 +2009,7 @@ foreach (bm_turm_felder_geraet(1) as $bm_feld => $bm_info) { ?>
     <td><span class="sm-mono"><?= bm_e(bm_check($bm_feld)) ?></span></td>
     <td><?= bm_e($bm_info[0]) ?></td>
     <td><span class="sm-mono"><?= (int) $bm_info[2] ?> &hellip; <?= (int) $bm_info[3] ?></span></td>
-    <td><?= bm_e(sprintf(bm_t($bm_info[1]), (int) $bm_info[4])) ?></td></tr>
+    <td><?= bm_e(sprintf(bm_t($bm_info[1]), (int) $bm_info[4])) ?><?php if (bm_turm_feld_stand($bm_lpr, $bm_info[5]) === 'unbestaetigt') { /* 0.9.50 */ ?> <span class="sm-aus">(<?= bm_e(bm_t('EINST.STAND_UNBESTAETIGT')) ?>)</span><?php } ?></td></tr>
 <?php } ?>
 </table>
 <div class="sm-warnung"><?= bm_t('LOX.S3_STRICH') ?></div>
@@ -2327,13 +2328,16 @@ if (!empty($bm_w['tuerme']) && is_array($bm_w['tuerme'])) { ?>
 <table class="sm-tbl">
 <tr><th><?= bm_e(bm_t('TEST.T_TURM')) ?></th><th><?= bm_e(bm_t('TEST.T_TURM_MODULE')) ?></th>
     <th><?= bm_e(bm_t('TEST.T_TURM_SOC')) ?></th><th><?= bm_e(bm_t('TEST.T_TURM_SOH')) ?></th>
-    <th><?= bm_e(bm_t('TEST.T_UZDIFF')) ?></th></tr>
+    <th><?= bm_e(bm_t('TEST.T_UZDIFF')) ?></th>
+    <th><?= bm_e(bm_t('TEST.T_TURM_EGELADEN')) ?></th><th><?= bm_e(bm_t('TEST.T_TURM_EENTLADEN')) ?></th></tr>
 <?php foreach ($bm_w['tuerme'] as $bm_tn => $bm_td) { ?>
 <tr><td><?= (int) $bm_tn ?></td>
     <td><?= isset($bm_td['von'], $bm_td['bis']) && (int) $bm_td['bis'] >= (int) $bm_td['von'] ? (int) $bm_td['von'] . '&ndash;' . (int) $bm_td['bis'] : '&ndash;' ?></td>
     <td><?= isset($bm_td['soc']) && $bm_td['soc'] !== null ? bm_e($bm_td['soc']) . ' %' : '&ndash;' ?></td>
     <td><?= isset($bm_td['soh']) && $bm_td['soh'] !== null ? bm_e($bm_td['soh']) . ' %' : '&ndash;' ?></td>
-    <td><?= isset($bm_td['uzdiff']) && $bm_td['uzdiff'] !== null ? bm_e($bm_td['uzdiff']) . ' mV' : '&ndash;' ?></td></tr>
+    <td><?= isset($bm_td['uzdiff']) && $bm_td['uzdiff'] !== null ? bm_e($bm_td['uzdiff']) . ' mV' : '&ndash;' ?></td>
+    <td><?= isset($bm_td['egeladen']) && $bm_td['egeladen'] !== null ? bm_e($bm_td['egeladen']) . ' kWh' : '&ndash;' ?></td>
+    <td><?= isset($bm_td['eentladen']) && $bm_td['eentladen'] !== null ? bm_e($bm_td['eentladen']) . ' kWh' : '&ndash;' ?></td></tr>
 <?php } ?>
 </table>
 <?php } ?>

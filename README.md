@@ -10,6 +10,16 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.50
+
+- **Energie geladen und entladen je Turm (Issue #5):** Ab zwei Türmen (Spalte *Türme*) neue Werte `TURM1EGELADEN`, `TURM1EENTLADEN`, `TURM2EGELADEN` … in kWh wie `EGELADEN`/`EENTLADEN`, **ganz hinten** in der Statuszeile nach `TURMnUZDIFF` des letzten Turms; die Zeile bis dorthin ist dieselbe wie in 0.9.49. Unter MQTT `geraetN/turm/T/egeladen` und `geraetN/turm/T/eentladen`, Messwerte, nicht retained. Die Importvorlage (Virtueller HTTP-Eingang) und die Liste im Reiter *Einbindung in Loxone* führen die Felder je Turm, die MQTT-Namenstabelle die beiden Themen; der Reiter *Test* zeigt sie in der Turmtabelle und stellt in einer grauen Zeile die Summe der Türme neben `EGELADEN` und `EENTLADEN`. Bei einem Turm entsteht kein neues Feld und kein neues Thema. Die neuen Werte lösen nichts aus.
+- Gelesen wird nichts zusätzlich: die Werte stehen im ersten Zelldatenblock jedes Turms, den der Dienst ohnehin liest – Wort 14/15 (geladen) und 16/17 (entladen) nach dem Verwerfen der Längenworte, unteres Wort zuerst, 1 Wh je Einheit. Quellen: redpomodoro/byd_battery_box (`bydboxclient.py`, `update_bms_status_data`) und ioBroker.bydhvs (`docs/byd-hexstructure.md`, „Tower basic information“, und `main.js`). Beide sind Rückbau aus mitgeschnittener Kommunikation, kein Herstellerdokument. **Am Gerät nicht gemessen**; Stand im Profil: aus Quelltext zweier Projekte, an einer Anlage nicht gemessen (im Reiter *Einbindung in Loxone* und im Kommentar der Importvorlage als *ungeprüft*).
+- **Stand von `EGELADEN` und `EENTLADEN` (Issue #3):** An einer BYD HVM stimmten beide Werte mit den Rohregistern überein; Wortfolge und Faktor sind damit an einer Anlage gemessen. Beide Felder stehen im Profil jetzt als *an einer Anlage gemessen (BYD HVM, 12.11.2026)*, `EENTLADEN` bisher als *ungeprüft*. Gegen Fronius Solar.web liegt die geladene Energie bei 98,9 % der dort gespeicherten, die entladene bei 93,6 % der dort bezogenen; woher der Unterschied beim Entladen kommt, ist nicht geklärt. Im Kommentar von `BMS_n_EENTLADEN` in der Importvorlage entfällt damit der Vermerk *(ungeprüft)*; wer die Vorlage schon importiert hat, muss nichts ändern.
+- Ein eigenes Profil kann für ein Feld jetzt auch `"stand": "gemessen"` und dazu `"beleg"` (1 bis 80 Zeichen) tragen; beschrieben in `data/profile/BEISPIEL_eigenes_profil.txt`. Ein Profil als Ganzes kennt weiter nur *dokumentiert* und *unbestaetigt*.
+- **Hilfe:** BE Connect Plus 2.0.14 zeigt nach dem Umschalten auf ein anderes BMS zunächst noch die Daten des vorher gelesenen – erst vergleichen, wenn die Seriennummer im Kopf gewechselt hat; meist genügt die Zeile *Kommen alle Türme an?* im Reiter *Test* (Issue #1). Zum Gesundheitszustand je Turm steht die Beobachtung eines Anwenders in der Hilfe, als seine Deutung gekennzeichnet (Issue #5).
+- **Reiter *Einbindung in Loxone*:** Der Text sagte, das MQTT-Gateway erzeuge die Namen der virtuellen Eingänge selbst. Er sagt jetzt: den Virtuellen Eingang in Loxone Config mit genau dem Titel anlegen, den das Gateway vergibt.
+- Gemessen an einer nachgebauten BCU mit vorgegebenen Energieworten je Turm unter PHP 7.4 und 8.4 auf dem Arbeitsrechner und gegen 0.9.49 gehalten, die Wortfolge in beide Richtungen; der Selbsttest des Dienstes hat einen Rechenfall dazu.
+
 ## Neu in 0.9.49
 
 - **Verhalten geändert, nur bei Anlagen mit mehreren Türmen:** Warnschwelle *Zelldrift* und Ausgleichsladen richten sich nach der Drift innerhalb jedes Turms (`TURMnUZDIFF`), nicht mehr nach `UZDIFF` über alle Türme. Es reicht ein Turm über der Schwelle, und die Meldung nennt ihn: Sammelmerker `ALARM` mit `alarmtext`, Gerätealarm `bmsalarm` mit `bmsalarmtext`, Ansage, Reiter *Test* und die Meldungen zu Beginn und Ende des Ausgleichsladens. Das Ausgleichsladen endet erst, wenn jeder Turm unter der Rückkehrschwelle liegt. `UZDIFF` bleibt, was es war – der Abstand über alle gelesenen Module –, steht weiter in Statuszeile, MQTT und Oberfläche und löst nichts mehr aus. Beispiel: zwei Türme mit je 30 mV Drift, die über alle Türme 70 mV auseinanderliegen, lösten in 0.9.48 bei einer Warnschwelle von 50 mV Warnung und Ausgleichsladen aus, in 0.9.49 nicht. Entscheidung des Hausherrn vom 12.11.2026; die Begründung ist ein Schluss, nicht gemessen: jeder Turm gleicht seine Zellen mit der eigenen BMU aus, die Drift über alle Türme mischt Zellen, die nichts miteinander zu tun haben.
@@ -1088,8 +1098,9 @@ Deutsch standen.
   `0x0511` zwischen 52412 und 52491, steigend nur beim Laden. Das ist ein
   Energiezähler; `ZYKLEN` wird bei BYD nicht mehr geliefert.
   **Seit 0.9.48** steht der Zähler als eigenes Feld `EGELADEN` (u32, unteres
-  Wort zuerst, 0,1 kWh), daneben `EENTLADEN` aus `0x0513/0x0514`, Stand
-  *ungeprüft* (siehe „Neu in 0.9.48").
+  Wort zuerst, 0,1 kWh), daneben `EENTLADEN` aus `0x0513/0x0514`, bis 0.9.49
+  mit Stand *ungeprüft*; seit 0.9.50 sind beide an einer Anlage gemessen
+  (siehe „Neu in 0.9.50").
 * Es ist weiterhin **kein Speicher angeschlossen**. Kein Profil, kein
   Übertragungsweg, keine Vorzeichenrichtung und kein Schreibbefehl ist an
   einem Gerät gemessen.

@@ -328,6 +328,13 @@ function bm_turm_felder($n)
         $aus['TURM' . $t . 'MODULE'] = array('',   'BM_FELD.TURM_MODULE', 0, 64,   $t, 'module');
         $aus['TURM' . $t . 'UZDIFF'] = array('mV', 'BM_FELD.TURM_UZDIFF', 0, 2000, $t, 'uzdiff');
     }
+    /* 0.9.50 (Issue #5): Energie geladen und entladen je Turm, in kWh wie EGELADEN/EENTLADEN (dieselben Grenzen).
+     * GANZ HINTEN nach allen Turmfeldern von 0.9.48 - die Statuszeile bleibt bis TURMnUZDIFF wortgleich mit 0.9.49.
+     * Kein Name enthaelt einen bestehenden als Anfangsstueck vor dem "=" (der Suchtext traegt das Semikolon). */
+    for ($t = 1; $t <= min($n, BM_TUERME_HOECHSTENS); $t++) {
+        $aus['TURM' . $t . 'EGELADEN']  = array('kWh', 'BM_FELD.TURM_EGELADEN',  0, 10000000, $t, 'egeladen');
+        $aus['TURM' . $t . 'EENTLADEN'] = array('kWh', 'BM_FELD.TURM_EENTLADEN', 0, 10000000, $t, 'eentladen');
+    }
     return $aus;
 }
 
@@ -387,15 +394,34 @@ function bm_turm_felder_geraet($nummer)
 }
 
 /**
+ * 0.9.50: der Stand eines Turmfeldes. Nur die Energie je Turm hat einen eigenen (Profil, zellen ->
+ * turm_energie_stand; fehlt er, gilt 'unbestaetigt'); fuer alle anderen Turmfelder ''.
+ */
+function bm_turm_feld_stand($pr, $schluessel)
+{
+    if (!in_array($schluessel, array('egeladen', 'eentladen'), true)) {
+        return '';
+    }
+    if (is_array($pr) && isset($pr['zellen']['turm_energie_stand'])
+        && in_array($pr['zellen']['turm_energie_stand'], array('dokumentiert', 'unbestaetigt', 'gemessen'), true)) {
+        return $pr['zellen']['turm_energie_stand'];
+    }
+    return 'unbestaetigt';
+}
+
+/**
  * Der Stand eines einzelnen Feldes: ein Feld darf im Profil einen eigenen
- * 'stand' tragen (dokumentiert | unbestaetigt), sonst gilt der des Profils.
- * Anlass 0.9.48: EENTLADEN bei BYD - Adresse und Wortfolge stehen in zwei
- * Quellen, die Ablesung des Melders hat aber keinen Vergleichswert dafuer.
+ * 'stand' tragen (dokumentiert | unbestaetigt | gemessen), sonst gilt der des
+ * Profils. Anlass 0.9.48: EENTLADEN bei BYD - Adresse und Wortfolge stehen in
+ * zwei Quellen, die Ablesung des Melders hatte keinen Vergleichswert dafuer.
+ * Seit 0.9.50 'gemessen': an einer Anlage abgelesen, dazu wahlweise 'beleg'
+ * (woran, bm_feld_beleg()). Ein Profil als Ganzes kennt weiter nur die zwei
+ * Staende dokumentiert und unbestaetigt.
  */
 function bm_feld_stand($pr, $feld)
 {
     if (is_array($pr) && isset($pr['felder'][$feld]['stand'])
-        && in_array($pr['felder'][$feld]['stand'], array('dokumentiert', 'unbestaetigt'), true)) {
+        && in_array($pr['felder'][$feld]['stand'], array('dokumentiert', 'unbestaetigt', 'gemessen'), true)) {
         return $pr['felder'][$feld]['stand'];
     }
     return (is_array($pr) && isset($pr['stand'])) ? (string) $pr['stand'] : 'unbestaetigt';
@@ -412,6 +438,32 @@ function bm_felder_unbestaetigt($pr)
         if (is_array($fd) && isset($fd['stand']) && $fd['stand'] === 'unbestaetigt'
             && isset($pr['stand']) && $pr['stand'] === 'dokumentiert') {
             $aus[] = (string) $feld;
+        }
+    }
+    return $aus;
+}
+
+/** 0.9.50: woran ein Feld mit Stand 'gemessen' gemessen wurde (Profil, 'beleg'), sonst ''. */
+function bm_feld_beleg($pr, $feld)
+{
+    if (bm_feld_stand($pr, $feld) === 'gemessen' && isset($pr['felder'][$feld]['beleg'])
+        && is_string($pr['felder'][$feld]['beleg'])) {
+        return $pr['felder'][$feld]['beleg'];
+    }
+    return '';
+}
+
+/** 0.9.50: die Felder eines Profils mit eigenem Stand 'gemessen', je "FELD (Beleg)". */
+function bm_felder_an_anlage_gemessen($pr)
+{
+    $aus = array();
+    if (!is_array($pr) || !isset($pr['felder']) || !is_array($pr['felder'])) {
+        return $aus;
+    }
+    foreach ($pr['felder'] as $feld => $fd) {
+        if (is_array($fd) && isset($fd['stand']) && $fd['stand'] === 'gemessen') {
+            $bm_b = bm_feld_beleg($pr, $feld);
+            $aus[] = (string) $feld . ($bm_b !== '' ? ' (' . $bm_b . ')' : '');
         }
     }
     return $aus;
@@ -550,11 +602,21 @@ function bm_profile_eingebaut()
                  * EENTLADEN (0x0513/0x0514, 22325,2 kWh) steht in denselben Quellen,
                  * hat aber KEINEN Vergleichswert - deshalb mit eigenem Stand
                  * 'unbestaetigt' (bm_feld_stand()). Plausibel ist er (89,4 % des
-                 * geladenen), gemessen gegen eine zweite Anzeige nicht. */
+                 * geladenen), gemessen gegen eine zweite Anzeige nicht.
+                 *
+                 * 0.9.50 (Issue #3, Rueckmeldung vom 12.11.2026): an einer BYD HVM
+                 * stimmten EGELADEN und EENTLADEN mit den Rohregistern ueberein -
+                 * Wortfolge und Faktor sind damit an einer Anlage gemessen, beide
+                 * Felder tragen den Stand 'gemessen' mit Beleg. Gegen Fronius
+                 * Solar.web lag die geladene Energie bei 98,9 %, die entladene bei
+                 * 93,6 % der dort bezogenen; woher der Unterschied beim Entladen
+                 * kommt, ist nicht geklaert. */
                 'EGELADEN'  => array('reg' => 0x0511, 'typ' => 'u32', 'wort' => 'nieder',
-                                     'faktor' => 0.1, 'nk' => 1),
+                                     'faktor' => 0.1, 'nk' => 1, 'stand' => 'gemessen',
+                                     'beleg' => 'BYD HVM, 12.11.2026'),
                 'EENTLADEN' => array('reg' => 0x0513, 'typ' => 'u32', 'wort' => 'nieder',
-                                     'faktor' => 0.1, 'nk' => 1, 'stand' => 'unbestaetigt'),
+                                     'faktor' => 0.1, 'nk' => 1, 'stand' => 'gemessen',
+                                     'beleg' => 'BYD HVM, 12.11.2026'),
             ),
             // Leistung ist kein eigenes Register: Strom mal Ausgangsspannung.
             // 0x0510 ist die Ausgangsspannung in 0.01 V.
@@ -587,6 +649,23 @@ function bm_profile_eingebaut()
                 'turm_soc'        => 24,
                 'turm_soc_faktor' => 0.1,
                 'turm_soh'        => 25,
+                /* NEU 0.9.50 (Issue #5): Energie geladen und entladen des Turms,
+                 * ebenfalls im ersten Block - Data[14] (unteres Wort) mit Data[15]
+                 * (oberes Wort) und Data[16] mit Data[17], u32, 1 Wh je Einheit,
+                 * gezaehlt NACH dem Verwerfen der Laengenworte wie zellen_ab.
+                 * Quellen, am 12.11.2026 im Quelltext gelesen: redpomodoro/
+                 * byd_battery_box, bydboxclient.py, update_bms_status_data
+                 * (regs[15:17] und regs[17:19] samt Laengenwort, UINT32 mit
+                 * word_order 'little' - extmodbusclient.py dreht dafuer die
+                 * Registerfolge um -, mal 0,001 kWh); ioBroker.bydhvs, docs/
+                 * byd-hexstructure.md "Tower basic information" (Byte 33 und 37,
+                 * int32 unsigned, SF 1000) und main.js decodePacket5 (buf2int32US,
+                 * lib/methods.js: das zweite Wort ist das obere). An einer Anlage
+                 * NICHT gemessen - deshalb turm_energie_stand 'unbestaetigt'. */
+                'turm_egeladen'       => 14,
+                'turm_eentladen'      => 16,
+                'turm_energie_faktor' => 0.001,
+                'turm_energie_stand'  => 'unbestaetigt',
             ),
             // Die BCU nimmt keine Lade- oder Entladebefehle entgegen. Das ist
             // keine Luecke dieses Plugins: die Regie hat der Wechselrichter.
@@ -1374,11 +1453,17 @@ function bm_profil_pruefen($pr)
     if (isset($pr['stand']) && !in_array($pr['stand'], array('dokumentiert', 'unbestaetigt'), true)) {
         $bean[] = bm_t('EINST.FEHLER_PROFIL_STAND');
     }
-    /* 0.9.48: ein Feld darf einen eigenen Stand tragen (bm_feld_stand()) - dieselben zwei Werte. */
+    /* 0.9.48: ein Feld darf einen eigenen Stand tragen (bm_feld_stand()) - dokumentiert oder unbestaetigt, seit
+     * 0.9.50 auch gemessen; dazu wahlweise 'beleg', woran gemessen wurde (Text, 1 bis 80 Zeichen). */
     foreach ((array) (isset($pr['felder']) ? $pr['felder'] : array()) as $fn => $fd) {
         if (is_array($fd) && array_key_exists('stand', $fd)
-            && !in_array($fd['stand'], array('dokumentiert', 'unbestaetigt'), true)) {
+            && !in_array($fd['stand'], array('dokumentiert', 'unbestaetigt', 'gemessen'), true)) {
             $bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL_FELD_STAND'), bm_e((string) $fn));
+        }
+        if (is_array($fd) && array_key_exists('beleg', $fd)
+            && (!is_string($fd['beleg']) || trim($fd['beleg']) === ''
+                || (function_exists('mb_strlen') ? mb_strlen($fd['beleg'], 'UTF-8') : strlen($fd['beleg'])) > 80)) {
+            $bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL_FELD_BELEG'), bm_e((string) $fn));
         }
     }
     $typen = array('u16', 's16', 'u32', 's32', 'f32', 'u16hi', 'u16lo');
@@ -5673,7 +5758,9 @@ function bm_mqtt_paare(array $abbild, $melden = true, $cfg = null)
          * ohne -1 (wechselnde Menge); ein Turm ohne Wert schickt null wie ein Modul ohne Wert. */
         foreach ((array) (isset($e['tuerme']) ? $e['tuerme'] : array()) as $t => $td) {
             $tv = $vor . '/turm/' . (int) $t;
-            foreach (array('soc', 'soh', 'module', 'uzdiff') as $bm_tk) {
+            /* 0.9.50 (Issue #5): dazu Energie geladen und entladen des Turms - Messwerte, nicht retained
+             * (bm_mqtt_retained() entscheidet am letzten Namensteil, und der ist kein Zustand). */
+            foreach (array('soc', 'soh', 'module', 'uzdiff', 'egeladen', 'eentladen') as $bm_tk) {
                 $paare[$tv . '/' . $bm_tk] = (is_array($td) && isset($td[$bm_tk])) ? $td[$bm_tk] : null;
             }
         }
@@ -5823,6 +5910,8 @@ function bm_mqtt_themen()
         'geraetN/turm/T/soh'       => 'BM_MQTT.T_SOH',
         'geraetN/turm/T/module'    => 'BM_MQTT.T_MODULE',
         'geraetN/turm/T/uzdiff'    => 'BM_MQTT.T_UZDIFF',
+        'geraetN/turm/T/egeladen'  => 'BM_MQTT.T_EGELADEN',    // 0.9.50, Stand: aus Quelltext, nicht gemessen
+        'geraetN/turm/T/eentladen' => 'BM_MQTT.T_EENTLADEN',   // 0.9.50, Stand: aus Quelltext, nicht gemessen
         // Nur wenn EVCC eingeschaltet ist. Eigener Zweig, weil EVCC genau
         // diese Groessen liest und das Vorzeichen ANDERS zaehlt - siehe
         // bm_evcc_leistung().
@@ -7140,9 +7229,11 @@ function bm_vorlage_eingaenge($nummer = 1)
         // aufloesen - sonst stuende in Loxone Config wortwoertlich 'l&auml;dt'.
         // O11: hoechstens 40 Zeichen, die Einheit steht in Unit.
         $bedeutung = trim(strip_tags(html_entity_decode(bm_t($info[1]), ENT_QUOTES, 'UTF-8')));
-        /* 0.9.48: ein Feld mit eigenem Stand "unbestaetigt" (bei BYD EENTLADEN) traegt den Vermerk auch im
-         * Kommentar des Eingangs - innerhalb der 40 Zeichen, der Vermerk wird nicht abgeschnitten. */
-        if ($bm_vpr !== null && isset($bm_vpr['felder'][$feld]) && bm_feld_stand($bm_vpr, $feld) !== 'dokumentiert') {
+        /* 0.9.48: ein Feld mit eigenem Stand "unbestaetigt" traegt den Vermerk auch im Kommentar des Eingangs -
+         * innerhalb der 40 Zeichen, der Vermerk wird nicht abgeschnitten. Seit 0.9.50 gibt es auch 'gemessen'
+         * (bei BYD EGELADEN und EENTLADEN); der Vermerk haengt deshalb an 'unbestaetigt', nicht an "nicht
+         * dokumentiert" - fuer die Staende bis 0.9.49 ist das dasselbe. */
+        if ($bm_vpr !== null && isset($bm_vpr['felder'][$feld]) && bm_feld_stand($bm_vpr, $feld) === 'unbestaetigt') {
             $bm_vm = '(' . bm_t('EINST.STAND_UNBESTAETIGT') . ')';
             $bm_vl = function_exists('mb_strlen') ? mb_strlen($bm_vm, 'UTF-8') : strlen($bm_vm);
             $bedeutung = bm_vorlage_kommentar($bedeutung, 39 - $bm_vl) . ' ' . $bm_vm;
@@ -7199,14 +7290,22 @@ function bm_vorlage_eingaenge($nummer = 1)
      * wie hinten in der Statuszeile. Aus den Einstellungen, nicht aus der Messung: die Felder stehen in der
      * Zeile, sobald "Anzahl Tuerme" gespeichert ist (ein Strich, solange kein Wert da ist). */
     foreach (bm_turm_felder_geraet($nummer) as $feld => $info) {
+        $bm_tb = sprintf(trim(strip_tags(html_entity_decode(bm_t($info[1]), ENT_QUOTES, 'UTF-8'))), (int) $info[4]);
+        /* 0.9.50 (Issue #5): die Energie je Turm traegt den Stand "ungeprueft" im Kommentar wie ein unbestaetigtes
+         * Feld oben; die Turmfelder von 0.9.48 haben keinen eigenen Stand und bleiben, wie sie waren. */
+        if (bm_turm_feld_stand($bm_vpr, $info[5]) === 'unbestaetigt') {
+            $bm_vm = '(' . bm_t('EINST.STAND_UNBESTAETIGT') . ')';
+            $bm_vl = function_exists('mb_strlen') ? mb_strlen($bm_vm, 'UTF-8') : strlen($bm_vm);
+            $bm_tb = bm_vorlage_kommentar($bm_tb, 39 - $bm_vl) . ' ' . $bm_vm;
+        }
         $cmds[] = array(
             'title'   => bm_vorlage_eingang_titel($nummer, $feld),
-            'comment' => bm_vorlage_kommentar(sprintf(trim(strip_tags(html_entity_decode(bm_t($info[1]),
-                              ENT_QUOTES, 'UTF-8'))), (int) $info[4])),
+            'comment' => bm_vorlage_kommentar($bm_tb),
             'check'   => bm_check($feld),
             'min'     => (string) $info[2],
             'max'     => (string) $info[3],
-            'unit'    => ($feld === 'TURM' . (int) $info[4] . 'SOC') ? '<v.1>' . ' ' . $info[0]
+            // SOC wie 0.9.48 mit einer Nachkommastelle; die Energie je Turm wie EGELADEN/EENTLADEN (0.9.50)
+            'unit'    => in_array($info[5], array('soc', 'egeladen', 'eentladen'), true) ? '<v.1>' . ' ' . $info[0]
                          : ('<v>' . ($info[0] !== '' ? ' ' . $info[0] : '')),
         );
     }

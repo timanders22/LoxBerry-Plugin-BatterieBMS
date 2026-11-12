@@ -195,6 +195,34 @@ function bm_pruefungen()
                     . ($bm_tleer ? ' ' . sprintf(bm_t('TEST.A_TUERME_LEER'), implode(', ', $bm_tleer)) : '')
                     . ($bm_tgleich ? ' ' . sprintf(bm_t('TEST.A_TUERME_GLEICH'), implode(', ', $bm_tgleich)) : ''));
             }
+            /* 0.9.50 (Issue #5): Energie je Turm - grau, eine Auskunft: die Summe der Tuerme neben EGELADEN und
+             * EENTLADEN des Speichers. Die Turmwerte stehen im Quelltext zweier Projekte und sind an keiner Anlage
+             * gemessen; ob die Summe den Speicherwert treffen muss, ist nicht belegt - deshalb kein Haken, kein Kreuz. */
+            $bm_ef = sprintf(bm_t('TEST.F_TURM_ENERGIE'), bm_e($g['name']));
+            $bm_eg = 0.0;
+            $bm_ee = 0.0;
+            $bm_en = 0;
+            foreach ($bm_tw as $bm_td) {
+                if (is_array($bm_td) && isset($bm_td['egeladen'], $bm_td['eentladen'])
+                    && is_numeric($bm_td['egeladen']) && is_numeric($bm_td['eentladen'])) {
+                    $bm_eg += (float) $bm_td['egeladen'];
+                    $bm_ee += (float) $bm_td['eentladen'];
+                    $bm_en++;
+                }
+            }
+            $bm_ew = function ($v) {
+                return ($v === null || !is_numeric($v)) ? '&ndash;' : bm_e((string) (0 + $v));
+            };
+            if (!$bm_tw || $bm_en === 0) {
+                $zeilen[] = bm_pruefzeile(-1, $bm_ef, bm_t('TEST.A_TURM_ENERGIE_NOCH_NICHT'));
+            } elseif ($bm_en < count($bm_tw)) {
+                $zeilen[] = bm_pruefzeile(-1, $bm_ef, sprintf(bm_t('TEST.A_TURM_ENERGIE_TEIL'), $bm_en, count($bm_tw)));
+            } else {
+                $zeilen[] = bm_pruefzeile(-1, $bm_ef, sprintf(bm_t('TEST.A_TURM_ENERGIE'),
+                    $bm_ew(round($bm_eg, 3)), $bm_ew(round($bm_ee, 3)),
+                    $bm_ew(isset($werte[$nr]['EGELADEN']) ? $werte[$nr]['EGELADEN'] : null),
+                    $bm_ew(isset($werte[$nr]['EENTLADEN']) ? $werte[$nr]['EENTLADEN'] : null)));
+            }
         }
         // Zellspannungsdrift: das ist der Wert, wegen dessen man ein BMS
         // ueberhaupt ausliest.
@@ -777,7 +805,8 @@ function bm_themen_gesendet(array $cfg)
                'module' => array(1 => array('uzmax' => 1, 'uzmin' => 1, 'uzdiff' => 1, 'tmax' => 1,
                                             'zellen' => array(1 => 3300))),
                // 0.9.48: ein Turm, damit die Turmthemen mitgezaehlt werden
-               'tuerme' => array(1 => array('soc' => 1, 'soh' => 1, 'module' => 1, 'uzdiff' => 1)));
+               'tuerme' => array(1 => array('soc' => 1, 'soh' => 1, 'module' => 1, 'uzdiff' => 1,
+                                            'egeladen' => 1, 'eentladen' => 1)));   // 0.9.50
     foreach (array('SOC', 'SOH', 'UBAT', 'IBAT', 'PBAT', 'TMAX', 'TMIN', 'UZMAX', 'UZMIN',
                    'UZDIFF', 'ZYKLEN', 'KAPAZ', 'MODULE', 'ZELLEN', 'FEHLER', 'WARNUNG', 'MODUS',
                    'UZMINMOD', 'UZMINZELLE', 'RESTKWH', 'RESTZEIT', 'ALARM', 'TBAT',
