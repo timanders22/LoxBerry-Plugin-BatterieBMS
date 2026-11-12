@@ -64,8 +64,9 @@ erfinden - nur diese werden uebernommen:
 
   SOC SOH UBAT IBAT PBAT TMAX TMIN TBAT UZMAX UZMIN UZDIFF ZYKLEN
   KAPAZ MODULE ZELLEN FEHLER WARNUNG LADENMAX ENTLMAX MODUS
+  EGELADEN EENTLADEN   (seit 0.9.48: Energie geladen/entladen gesamt, kWh)
 
-Diese zwanzig lassen sich aus Registern fuellen. Daneben gibt es sechs
+Diese zweiundzwanzig lassen sich aus Registern fuellen. Daneben gibt es sieben
 GERECHNETE Groessen, die das Plugin selbst bildet - sie gehoeren NICHT in ein
 Profil, auch wenn die Pruefung sie bisher durchgelassen hat:
 
@@ -92,6 +93,11 @@ Registerbeschreibung
             ein nicht verfuegbares Register so meldet; bei 32 Bit der ganze
             Wert ohne Vorzeichen (2147483647 = 0x7FFFFFFF). Das Feld bleibt dann
             leer statt einer Zahl, die aussieht wie ein Messwert.
+  stand     seit 0.9.48: "dokumentiert" oder "unbestaetigt" fuer DIESES Feld,
+            wenn es vom Stand des ganzen Profils abweicht (Beispiel: BYD
+            EENTLADEN). Fehlt es, gilt der Stand des Profils. Die Oberflaeche
+            und die Loxone-Vorlage zeigen ein unbestaetigtes Feld als
+            "ungeprueft".
 
 Leseblock
 ---------

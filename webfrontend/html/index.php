@@ -233,10 +233,7 @@ if (isset($_GET['von'])) {
 /** Ein Strich statt einer erfundenen 0. Loxone behaelt dann den letzten Wert. */
 function bm_w($v)
 {
-    if ($v === null || $v === '' || !is_numeric($v)) {
-        return '-';
-    }
-    return (string) (0 + $v);
+    return bm_wert_zeile($v);     // 0.9.48: dieselbe Regel wie in der Statuszeile (bm_lib.php)
 }
 
 $bm_lox = bm_loxone();
@@ -471,29 +468,17 @@ if ($bm_aktion === 'zellen') {
  * suchen lassen (\i;FELD=\i\v).
  */
 if ($bm_aktion === 'status') {
-    $teile = array('BMS');
-    foreach (bm_status_felder() as $feld => $unbenutzt) {
-        if ($feld === 'ALTER') {
-            $teile[] = 'ALTER=' . $bm_alter_aus;
-            continue;
-        }
-        if ($feld === 'OK') {
-            $teile[] = 'OK=' . bm_ok_aus($bm_g['ok']);
-            continue;
-        }
-        $teile[] = $feld . '=' . bm_w($bm_g[$feld]);
-    }
     // Der Sollwert gehoert dazu: sonst weiss Loxone nicht, ob ein Zwang laeuft.
     //
     // SOLL ist Text und taugt nicht als Analogwert; SOLLART sagt dasselbe als
     // Zahl (0 kein Zwang, 1 laden, 2 entladen, 3 gesperrt, 4 unvollstaendig
     // - O3) und laesst sich
-    // deshalb an einen virtuellen Eingang haengen. SOLLART steht ganz hinten,
-    // weil neue Felder nach der Regel oben immer hinten angehaengt werden.
-    $teile[] = 'SOLL=' . ($bm_g['sollwert'] !== '' ? str_replace(';', '_', $bm_g['sollwert']) : 'automatik');
-    $teile[] = 'SOLLALTER=' . (int) $bm_g['sollwert_alter'];
-    $teile[] = 'SOLLART=' . bm_sollart($bm_g['sollwert']);
-    echo implode(';', $teile) . "\n";
+    // deshalb an einen virtuellen Eingang haengen. Neue Felder werden nach der
+    // Regel oben immer hinten angehaengt: EGELADEN/EENTLADEN (0.9.48) hinter
+    // TBAT, die Turmfelder (0.9.48, nur ab zwei Tuermen) hinter SOLLART.
+    // Gebaut wird die Zeile seit 0.9.48 in bm_statuszeile() (bm_lib.php), bis
+    // SOLLART wortgleich mit 0.9.47.
+    echo bm_statuszeile($bm_g, $bm_alter_aus, bm_ok_aus($bm_g['ok'])) . "\n";
     exit;
 }
 

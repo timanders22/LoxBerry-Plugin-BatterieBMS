@@ -244,7 +244,177 @@ function bm_status_felder()
          * enthaelt keinen bestehenden als Anfangsstueck, und der Suchtext
          * traegt ohnehin das fuehrende Semikolon. */
         'TBAT'       => array('°C', 'BM_FELD.TBAT',       -40, 100),
+        /* Neu in 0.9.48 (Issue #3), wieder hinten angehaengt: die seit
+         * Inbetriebnahme geladene und entladene Energie, wie das BMS sie
+         * zaehlt. Obergrenze 10 000 000 kWh = groesste KAPAZ (500 kWh) mal
+         * groesste ZYKLEN (20000); ein vertauschtes Wortpaar (bei BYD 348 GWh)
+         * faellt damit als unplausibel heraus. Keiner der Namen enthaelt
+         * einen bestehenden als Anfangs- oder Endstueck vor dem "=". */
+        'EGELADEN'   => array('kWh', 'BM_FELD.EGELADEN',    0, 10000000),
+        'EENTLADEN'  => array('kWh', 'BM_FELD.EENTLADEN',   0, 10000000),
     );
+}
+
+/* ==================================================================
+ * Mehrere Tuerme an einer BCU (Issue #1/#4, 0.9.48)
+ *
+ * Eine BYD-BCU fuehrt bis zu mehrere parallele Tuerme; die Zelldaten jedes
+ * Turms holt eine eigene Anforderung mit dem BMS-Index 1..n (bm_zellen_byd()
+ * in bin/bms_dienst.php). Wie viele Tuerme es sind, steht beim Speicher im
+ * Feld "Anzahl Tuerme" (Schluessel "tuerme" der Geraetezeile). Leer oder 1
+ * heisst: wie bis 0.9.47 nur Index 1, keine Turmwerte - bestehende Anlagen
+ * merken nichts. Erst ab 2 werden die Tuerme nacheinander gelesen, die Module
+ * fortlaufend nummeriert (Turm 1: 1-7, Turm 2: 8-14 ...) und je Turm
+ * Ladezustand, Gesundheitszustand, Modulzahl und Zelldrift ausgegeben -
+ * unter neuen Namen (TURMnSOC ..., geraetN/turm/T/soc ...), die bestehenden
+ * behalten ihre Bedeutung.
+ *
+ * Hoechstens 8: so weit reicht MODULE (0..64) bei 8 Modulen je Turm. Wie
+ * viele Tuerme eine BCU tatsaechlich fuehren kann, ist hier nicht gemessen.
+ * ================================================================== */
+define('BM_TUERME_HOECHSTENS', 8);
+
+/** Kennt das Profil die BYD-Zellabfrage (und damit Tuerme)? */
+function bm_profil_kennt_tuerme($pr)
+{
+    return is_array($pr) && isset($pr['zellen']['verfahren']) && $pr['zellen']['verfahren'] === 'byd_bms';
+}
+
+/**
+ * Den Wert "Anzahl Tuerme" einer Geraetezeile beurteilen. Rueckgabe: '' in
+ * Ordnung (auch: Schluessel fehlt oder leer = Vorgabe 1), sonst der Grund.
+ * $pr ist das Profil der Zeile oder null (dann wird nur die Zahl geprueft).
+ * Ein Wert ueber 1 bei einem Profil ohne Turmabfrage wird abgewiesen, nicht
+ * still uebergangen.
+ */
+function bm_tuerme_grund($w, $pr = null)
+{
+    if ($w === null || $w === '') {
+        return '';
+    }
+    if (is_array($w) || is_bool($w) || is_float($w)
+        || preg_match('/^[0-9]{1,2}\z/', (string) $w) !== 1
+        || (int) $w < 1 || (int) $w > BM_TUERME_HOECHSTENS) {
+        return 'zahl';
+    }
+    if ((int) $w > 1 && $pr !== null && !bm_profil_kennt_tuerme($pr)) {
+        return 'profil';
+    }
+    return '';
+}
+
+/** Die Zahl der Tuerme, die der Dienst liest: 1 (Vorgabe, auch bei einem unzulaessigen Wert) bis 8. */
+function bm_tuerme_zahl(array $g)
+{
+    $w = isset($g['tuerme']) ? $g['tuerme'] : '';
+    return ($w !== '' && bm_tuerme_grund($w) === '') ? (int) $w : 1;
+}
+
+/**
+ * Die Felder je Turm fuer die Statuszeile, die Vorlage und den Reiter
+ * "Einbindung in Loxone" - fuer n >= 2 Tuerme, sonst leer. Aufbau wie
+ * bm_status_felder(), dazu [4] Turmnummer und [5] Schluessel im Abbild.
+ */
+function bm_turm_felder($n)
+{
+    $aus = array();
+    $n = (int) $n;
+    if ($n < 2) {
+        return $aus;
+    }
+    for ($t = 1; $t <= min($n, BM_TUERME_HOECHSTENS); $t++) {
+        $aus['TURM' . $t . 'SOC']    = array('%',  'BM_FELD.TURM_SOC',    0, 100,  $t, 'soc');
+        $aus['TURM' . $t . 'SOH']    = array('%',  'BM_FELD.TURM_SOH',    0, 100,  $t, 'soh');
+        $aus['TURM' . $t . 'MODULE'] = array('',   'BM_FELD.TURM_MODULE', 0, 64,   $t, 'module');
+        $aus['TURM' . $t . 'UZDIFF'] = array('mV', 'BM_FELD.TURM_UZDIFF', 0, 2000, $t, 'uzdiff');
+    }
+    return $aus;
+}
+
+/** Ein Wert fuer eine Antwortzeile: Zahl, oder ein Strich statt einer erfundenen 0 (Loxone behaelt dann den letzten Wert). */
+function bm_wert_zeile($v)
+{
+    if ($v === null || $v === '' || !is_numeric($v)) {
+        return '-';
+    }
+    return (string) (0 + $v);
+}
+
+/**
+ * Die Statuszeile eines Speichers (aktion=status) - seit 0.9.48 hier statt in
+ * webfrontend/html/index.php, damit der Selbsttest sie bauen und die
+ * Suchtexte der Vorlage an ihr zaehlen kann. Bis TBAT/SOLLART wortgleich mit
+ * 0.9.47; neu sind EGELADEN/EENTLADEN (aus bm_status_felder()) und, nur bei
+ * zwei und mehr Tuermen, die Turmfelder GANZ HINTEN nach SOLLART.
+ * $alter: ALTER der Antwort (schon gekappt), $ok: OK der Zeile (0/1).
+ */
+function bm_statuszeile(array $g, $alter, $ok)
+{
+    $teile = array('BMS');
+    foreach (bm_status_felder() as $feld => $unbenutzt) {
+        if ($feld === 'ALTER') {
+            $teile[] = 'ALTER=' . $alter;
+            continue;
+        }
+        if ($feld === 'OK') {
+            $teile[] = 'OK=' . (int) $ok;
+            continue;
+        }
+        $teile[] = $feld . '=' . bm_wert_zeile(isset($g[$feld]) ? $g[$feld] : null);
+    }
+    /* Wie bis 0.9.47 im Endpunkt: ein Eintrag ohne 'sollwert' (Ausfallpause) ergibt "SOLL=" und
+     * "SOLLALTER=0" - nicht schoen, aber an dieser Zeile haengen bestehende Anlagen. */
+    $soll = isset($g['sollwert']) ? $g['sollwert'] : null;
+    $teile[] = 'SOLL=' . ($soll !== '' ? str_replace(';', '_', (string) $soll) : 'automatik');
+    $teile[] = 'SOLLALTER=' . (int) (isset($g['sollwert_alter']) ? $g['sollwert_alter'] : 0);
+    $teile[] = 'SOLLART=' . bm_sollart($soll);
+    $tz = isset($g['tuerme_n']) ? (int) $g['tuerme_n'] : 0;
+    foreach (bm_turm_felder($tz) as $feld => $info) {
+        $td = isset($g['tuerme'][$info[4]]) && is_array($g['tuerme'][$info[4]]) ? $g['tuerme'][$info[4]] : array();
+        $teile[] = $feld . '=' . bm_wert_zeile(isset($td[$info[5]]) ? $td[$info[5]] : null);
+    }
+    return implode(';', $teile);
+}
+
+/** Die Turmfelder eines eingerichteten Speichers (leer ohne Turmabfrage oder bei einem Turm). */
+function bm_turm_felder_geraet($nummer)
+{
+    $g = bm_geraet($nummer);
+    if ($g === null || !bm_profil_kennt_tuerme(bm_profil($g['profil']))) {
+        return array();
+    }
+    return bm_turm_felder((int) $g['tuerme']);
+}
+
+/**
+ * Der Stand eines einzelnen Feldes: ein Feld darf im Profil einen eigenen
+ * 'stand' tragen (dokumentiert | unbestaetigt), sonst gilt der des Profils.
+ * Anlass 0.9.48: EENTLADEN bei BYD - Adresse und Wortfolge stehen in zwei
+ * Quellen, die Ablesung des Melders hat aber keinen Vergleichswert dafuer.
+ */
+function bm_feld_stand($pr, $feld)
+{
+    if (is_array($pr) && isset($pr['felder'][$feld]['stand'])
+        && in_array($pr['felder'][$feld]['stand'], array('dokumentiert', 'unbestaetigt'), true)) {
+        return $pr['felder'][$feld]['stand'];
+    }
+    return (is_array($pr) && isset($pr['stand'])) ? (string) $pr['stand'] : 'unbestaetigt';
+}
+
+/** Die Felder eines Profils, deren Stand 'unbestaetigt' ist, obwohl das Profil 'dokumentiert' ist. */
+function bm_felder_unbestaetigt($pr)
+{
+    $aus = array();
+    if (!is_array($pr) || !isset($pr['felder']) || !is_array($pr['felder'])) {
+        return $aus;
+    }
+    foreach ($pr['felder'] as $feld => $fd) {
+        if (is_array($fd) && isset($fd['stand']) && $fd['stand'] === 'unbestaetigt'
+            && isset($pr['stand']) && $pr['stand'] === 'dokumentiert') {
+            $aus[] = (string) $feld;
+        }
+    }
+    return $aus;
 }
 
 /* ==================================================================
@@ -364,6 +534,27 @@ function bm_profile_eingebaut()
                  * Hausherr (neues Feld, nicht umgedeutetes altes). */
                 'MODULE' => array('reg' => 0x0010, 'typ' => 'u16', 'faktor' => 1,    'nk' => 0,
                                   'maske' => 0x000F),
+                /* NEU 0.9.48 (Issue #3): die Energiezaehler als eigene Felder.
+                 * u32 aus zwei Registern, das UNTERE Wort zuerst (0x0511 nieder,
+                 * 0x0512 hoch), Faktor 0,1 kWh - so lesen ioBroker.bydhvs
+                 * (main.js: buf2int32US(byteArray, 37) / 10, lib/methods.js setzt
+                 * das zweite Wort als oberes) und redpomodoro/byd_battery_box
+                 * (bydboxclient.py: regs[17:19] UINT32 word_order little * 0,1).
+                 * Ablesung des Melders (HVM, 3 Tuerme, 11.11.2026 23:25): 0x0511 =
+                 * 53095, 0x0512 = 3 ergibt 24970,3 kWh gegen 25,25 MWh "Energie in
+                 * Batterie gespeichert" in Fronius Solar.web seit Inbetriebnahme
+                 * (98,9 %). Oberes Wort zuerst ergaebe 347 963 392,3 kWh, Faktor 1
+                 * 249,7 MWh (989 %), Faktor 0,01 2,5 MWh (9,9 %) - nur EINE Deutung
+                 * liegt in der Naehe. Der Vergleichswert ist auf der Seite des
+                 * Wechselrichters gezaehlt, nicht im BMS, und es ist EIN Geraet.
+                 * EENTLADEN (0x0513/0x0514, 22325,2 kWh) steht in denselben Quellen,
+                 * hat aber KEINEN Vergleichswert - deshalb mit eigenem Stand
+                 * 'unbestaetigt' (bm_feld_stand()). Plausibel ist er (89,4 % des
+                 * geladenen), gemessen gegen eine zweite Anzeige nicht. */
+                'EGELADEN'  => array('reg' => 0x0511, 'typ' => 'u32', 'wort' => 'nieder',
+                                     'faktor' => 0.1, 'nk' => 1),
+                'EENTLADEN' => array('reg' => 0x0513, 'typ' => 'u32', 'wort' => 'nieder',
+                                     'faktor' => 0.1, 'nk' => 1, 'stand' => 'unbestaetigt'),
             ),
             // Leistung ist kein eigenes Register: Strom mal Ausgangsspannung.
             // 0x0510 ist die Ausgangsspannung in 0.01 V.
@@ -382,6 +573,20 @@ function bm_profile_eingebaut()
                 'zellen_je_modul' => 16,
                 'temp_ab'     => 177,      // Data[177 + Modul*4 + i], zwei Werte je Wort
                 'temp_je_modul' => 4,
+                /* NEU 0.9.48 (Issue #4): Ladezustand und Gesundheitszustand des
+                 * Turms stehen im ersten Block, der ohnehin gelesen wird - Data[24]
+                 * int16 x 0,1 % und Data[25] int16 ganze %, gezaehlt NACH dem
+                 * Verwerfen der Laengenworte, also auf derselben Zaehlung wie
+                 * zellen_ab. Quellen: redpomodoro/byd_battery_box, bydboxclient.py,
+                 * update_bms_status_data (regs[25] und regs[26] samt Laengenwort);
+                 * ioBroker.bydhvs, docs/byd-hexstructure.md "Tower basic information"
+                 * (Byte 53 und 55; Byte 101 = Zelle 1 = Data[48], dieselbe Zaehlung).
+                 * Gegengerechnet an der Ablesung des Melders: 25,6/35,7/22,4 % und
+                 * 91/97/97 % - die Mittel 27,9 % und 95 % treffen 0x0500 = 28 % und
+                 * 0x0503 = 95 % derselben Ablesung (drei gleich grosse Tuerme). */
+                'turm_soc'        => 24,
+                'turm_soc_faktor' => 0.1,
+                'turm_soh'        => 25,
             ),
             // Die BCU nimmt keine Lade- oder Entladebefehle entgegen. Das ist
             // keine Luecke dieses Plugins: die Regie hat der Wechselrichter.
@@ -1169,6 +1374,13 @@ function bm_profil_pruefen($pr)
     if (isset($pr['stand']) && !in_array($pr['stand'], array('dokumentiert', 'unbestaetigt'), true)) {
         $bean[] = bm_t('EINST.FEHLER_PROFIL_STAND');
     }
+    /* 0.9.48: ein Feld darf einen eigenen Stand tragen (bm_feld_stand()) - dieselben zwei Werte. */
+    foreach ((array) (isset($pr['felder']) ? $pr['felder'] : array()) as $fn => $fd) {
+        if (is_array($fd) && array_key_exists('stand', $fd)
+            && !in_array($fd['stand'], array('dokumentiert', 'unbestaetigt'), true)) {
+            $bean[] = sprintf(bm_t('EINST.FEHLER_PROFIL_FELD_STAND'), bm_e((string) $fn));
+        }
+    }
     $typen = array('u16', 's16', 'u32', 's32', 'f32', 'u16hi', 'u16lo');
     foreach (array('felder', 'rechnung') as $ab) {
         foreach ((array) (isset($pr[$ab]) ? $pr[$ab] : array()) as $fn => $fd) {
@@ -1275,7 +1487,7 @@ function bm_eingabe_felder($form)
                               'wache_sperren_ein', 'spotladen_ein', 'ausgleich_ein'),
             'zeilen' => array('g_name', 'g_profil', 'g_ip', 'g_port', 'g_unit', 'g_dev', 'g_baud',
                               'g_nennkapaz', 'g_max_laden', 'g_max_entladen', 'g_vorzeichen',
-                              'g_schreiben')),
+                              'g_schreiben', 'g_tuerme')),
         'mqtt'      => array('skalar' => array('mqtt_topic'), 'haken' => array('mqtt_ein', 'befehle_mqtt_ein'),
                              'zeilen' => array()),
         'trocken'   => array('skalar' => array('test_geraet', 'test_watt'), 'haken' => array(),
@@ -1800,6 +2012,17 @@ function bm_geraetezeilen_pruefen($liste, array $zusatzprofile = array())
                 || preg_match('/^[0-9]{1,4}([.,][0-9]{1,2})?\z/', (string) $g['nennkapaz']) !== 1)) {
             $bean[] = sprintf(bm_t('EINST.FEHLER_KAPAZ'), $nr);
         }
+        /* 0.9.48 (Issue #1/#4): Anzahl Tuerme - leer, 1 bis 8, ueber 1 nur bei einem Profil mit Turmabfrage.
+         * Dieselbe Beurteilung wie im Formular (bm_tuerme_grund()). */
+        if (array_key_exists('tuerme', $g)) {
+            $bm_tg = bm_tuerme_grund($g['tuerme'], isset($profile[$pk]) ? $profile[$pk]
+                : (isset($zusatzprofile[$pk]) ? $zusatzprofile[$pk] : null));
+            if ($bm_tg === 'zahl') {
+                $bean[] = sprintf(bm_t('EINST.FEHLER_TUERME'), $nr, BM_TUERME_HOECHSTENS);
+            } elseif ($bm_tg === 'profil') {
+                $bean[] = sprintf(bm_t('EINST.FEHLER_TUERME_PROFIL'), $nr);
+            }
+        }
         foreach (array('ip', 'geraetedatei', 'profil') as $bm_tf) {
             if (isset($g[$bm_tf]) && !is_string($g[$bm_tf])) {
                 $bean[] = sprintf(bm_t('EINST.FEHLER_ZEILE_TEXT'), $nr, $bm_tf);
@@ -2022,6 +2245,13 @@ function bm_geraete()
             continue;
         }
         $pr = $profile[$pk];
+        /* 0.9.48: ein unzulaessiger Wert "Anzahl Tuerme" (nur aus einer von Hand bearbeiteten Datei moeglich -
+         * Formular und Zurueckspielen weisen ihn ab) wird gemeldet; gelesen wird dann wie bisher nur Turm 1. */
+        if (isset($g['tuerme']) && $g['tuerme'] !== '' && bm_tuerme_grund($g['tuerme'], $pr) !== '') {
+            bm_log_gebremst('tuerme_' . $n, 'Speicher ' . $n . ': "Anzahl Tuerme" ist keine zulaessige Angabe '
+                . '(1 bis ' . BM_TUERME_HOECHSTENS . ', ueber 1 nur bei einem Profil mit Turmabfrage) - es wird '
+                . 'nur Turm 1 gelesen. Bitte im Reiter Einstellungen berichtigen.', 3600);
+        }
         $seriell = ($pr['transport'] === 'pylontech_rs485');
         $ip = (isset($g['ip']) && is_string($g['ip'])) ? trim($g['ip']) : '';
         $dev = (isset($g['geraetedatei']) && is_string($g['geraetedatei'])) ? trim($g['geraetedatei']) : '';
@@ -2086,6 +2316,10 @@ function bm_geraete()
                               ? max(0, min(30000, (int) $g['max_laden'])) : 0,
             'max_entladen' => isset($g['max_entladen']) && $g['max_entladen'] !== ''
                               ? max(0, min(30000, (int) $g['max_entladen'])) : 0,
+            /* 0.9.48: Anzahl Tuerme. Leer, fehlend (jede Konfiguration bis 0.9.47) oder unzulaessig: 1 - der
+             * Dienst liest wie bisher nur BMS-Index 1. Ueber 1 nur bei einem Profil mit Turmabfrage. */
+            'tuerme'       => (bm_profil_kennt_tuerme($pr) && bm_tuerme_grund(isset($g['tuerme']) ? $g['tuerme'] : '', $pr) === '')
+                              ? bm_tuerme_zahl($g) : 1,
         );
     }
     return $out;
@@ -5358,7 +5592,9 @@ function bm_mqtt_paare(array $abbild, $melden = true, $cfg = null)
                        'ZELLEN' => 'zellen', 'FEHLER' => 'fehler', 'WARNUNG' => 'warnung',
                        'MODUS' => 'modus', 'UZMINMOD' => 'uzminmod',
                        'UZMINZELLE' => 'uzminzelle', 'RESTKWH' => 'restkwh',
-                       'RESTZEIT' => 'restzeit', 'ALARM' => 'alarm', 'TBAT' => 'tbat') as $feld => $thema) {
+                       'RESTZEIT' => 'restzeit', 'ALARM' => 'alarm', 'TBAT' => 'tbat',
+                       // 0.9.48 (Issue #3): Energiezaehler, wieder hinten angehaengt
+                       'EGELADEN' => 'egeladen', 'EENTLADEN' => 'eentladen') as $feld => $thema) {
             if (!$geraetOk && isset($nurBeiAntwort[$thema])) {
                 continue;
             }
@@ -5430,6 +5666,15 @@ function bm_mqtt_paare(array $abbild, $melden = true, $cfg = null)
                     $liste[] = (isset($zl[$z]) && is_numeric($zl[$z])) ? (string) (0 + $zl[$z]) : '-';
                 }
                 $paare[$mv . '/zellen'] = implode(';', $liste);
+            }
+        }
+        /* 0.9.48 (Issue #1/#4): je Turm Ladezustand, Gesundheitszustand, Modulzahl und Zelldrift - nur bei
+         * zwei und mehr Tuermen (der Dienst legt 'tuerme' sonst nicht an). Wie die Modulthemen fluechtig und
+         * ohne -1 (wechselnde Menge); ein Turm ohne Wert schickt null wie ein Modul ohne Wert. */
+        foreach ((array) (isset($e['tuerme']) ? $e['tuerme'] : array()) as $t => $td) {
+            $tv = $vor . '/turm/' . (int) $t;
+            foreach (array('soc', 'soh', 'module', 'uzdiff') as $bm_tk) {
+                $paare[$tv . '/' . $bm_tk] = (is_array($td) && isset($td[$bm_tk])) ? $td[$bm_tk] : null;
             }
         }
     }
@@ -5536,6 +5781,8 @@ function bm_mqtt_themen()
         'geraetN/tmax'             => 'BM_MQTT.TMAX',
         'geraetN/tmin'             => 'BM_MQTT.TMIN',
         'geraetN/tbat'             => 'BM_MQTT.TBAT',
+        'geraetN/egeladen'         => 'BM_MQTT.EGELADEN',      // 0.9.48
+        'geraetN/eentladen'        => 'BM_MQTT.EENTLADEN',     // 0.9.48, Stand bei BYD unbestaetigt
         'geraetN/uzmax'            => 'BM_MQTT.UZMAX',
         'geraetN/uzmin'            => 'BM_MQTT.UZMIN',
         'geraetN/uzdiff'           => 'BM_MQTT.UZDIFF',
@@ -5571,6 +5818,11 @@ function bm_mqtt_themen()
         'geraetN/modul/M/tmax'     => 'BM_MQTT.M_TMAX',
         'geraetN/modul/M/zelle/Z'  => 'BM_MQTT.M_ZELLE',
         'geraetN/modul/M/zellen'   => 'BM_MQTT.M_ZELLEN',
+        // 0.9.48: je Turm, nur bei zwei und mehr Tuermen (Einstellung "Anzahl Tuerme")
+        'geraetN/turm/T/soc'       => 'BM_MQTT.T_SOC',
+        'geraetN/turm/T/soh'       => 'BM_MQTT.T_SOH',
+        'geraetN/turm/T/module'    => 'BM_MQTT.T_MODULE',
+        'geraetN/turm/T/uzdiff'    => 'BM_MQTT.T_UZDIFF',
         // Nur wenn EVCC eingeschaltet ist. Eigener Zweig, weil EVCC genau
         // diese Groessen liest und das Vorzeichen ANDERS zaehlt - siehe
         // bm_evcc_leistung().
@@ -6823,12 +7075,21 @@ function bm_vorlage_eingaenge($nummer = 1)
     $host = bm_hostname();
     $token = bm_token();
     $cmds = array();
+    $bm_vg = bm_geraet($nummer);
+    $bm_vpr = ($bm_vg !== null) ? bm_profil($bm_vg['profil']) : null;
     foreach (bm_felder_geliefert($nummer) as $feld => $info) {
         // Der Text laeuft gleich durch bm_x() und wuerde dort ein zweites Mal
         // maskiert. Deshalb erst Auszeichnung entfernen und Entitaeten
         // aufloesen - sonst stuende in Loxone Config wortwoertlich 'l&auml;dt'.
         // O11: hoechstens 40 Zeichen, die Einheit steht in Unit.
         $bedeutung = trim(strip_tags(html_entity_decode(bm_t($info[1]), ENT_QUOTES, 'UTF-8')));
+        /* 0.9.48: ein Feld mit eigenem Stand "unbestaetigt" (bei BYD EENTLADEN) traegt den Vermerk auch im
+         * Kommentar des Eingangs - innerhalb der 40 Zeichen, der Vermerk wird nicht abgeschnitten. */
+        if ($bm_vpr !== null && isset($bm_vpr['felder'][$feld]) && bm_feld_stand($bm_vpr, $feld) !== 'dokumentiert') {
+            $bm_vm = '(' . bm_t('EINST.STAND_UNBESTAETIGT') . ')';
+            $bm_vl = function_exists('mb_strlen') ? mb_strlen($bm_vm, 'UTF-8') : strlen($bm_vm);
+            $bedeutung = bm_vorlage_kommentar($bedeutung, 39 - $bm_vl) . ' ' . $bm_vm;
+        }
         $cmds[] = array(
             'title'   => bm_vorlage_eingang_titel($nummer, $feld),
             'comment' => bm_vorlage_kommentar($bedeutung),
@@ -6877,6 +7138,21 @@ function bm_vorlage_eingaenge($nummer = 1)
         'max'     => '86400',
         'unit'    => '<v> s',
     );
+    /* 0.9.48 (Issue #1/#4): je Turm vier Eingaenge, nur bei zwei und mehr Tuermen - in derselben Reihenfolge
+     * wie hinten in der Statuszeile. Aus den Einstellungen, nicht aus der Messung: die Felder stehen in der
+     * Zeile, sobald "Anzahl Tuerme" gespeichert ist (ein Strich, solange kein Wert da ist). */
+    foreach (bm_turm_felder_geraet($nummer) as $feld => $info) {
+        $cmds[] = array(
+            'title'   => bm_vorlage_eingang_titel($nummer, $feld),
+            'comment' => bm_vorlage_kommentar(sprintf(trim(strip_tags(html_entity_decode(bm_t($info[1]),
+                              ENT_QUOTES, 'UTF-8'))), (int) $info[4])),
+            'check'   => bm_check($feld),
+            'min'     => (string) $info[2],
+            'max'     => (string) $info[3],
+            'unit'    => ($feld === 'TURM' . (int) $info[4] . 'SOC') ? '<v.1>' . ' ' . $info[0]
+                         : ('<v>' . ($info[0] !== '' ? ' ' . $info[0] : '')),
+        );
+    }
     $adresse = 'http://' . $host . '/plugins/' . $p['plugin']
              . '/index.php?token=' . $token . '&aktion=status&geraet=' . (int) $nummer;
     return array(
@@ -7424,7 +7700,7 @@ function bm_mqtt_namenstabelle($cfg)
     $aus = array();
     foreach (bm_mqtt_themen() as $stamm => $bez) {
         $konkret = array();
-        $muster = (strpos($stamm, '/modul/M/') !== false);
+        $muster = (strpos($stamm, '/modul/M/') !== false || strpos($stamm, '/turm/T/') !== false);
         if (strpos($stamm, 'geraetN/') === 0) {
             foreach ($nummern as $n) {
                 $konkret[] = array('geraet' . (int) $n . '/' . substr($stamm, 8), (int) $n === 1);

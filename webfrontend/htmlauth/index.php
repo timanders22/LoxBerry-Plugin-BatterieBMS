@@ -498,7 +498,7 @@ if ($bm_post && isset($_POST['speichern'])) {
         // Nr. 19, N1: jedes Feld der Zeile mit unzulaessigem Inhalt beanstanden.
         $bm_unzul = array();
         foreach (array('g_profil', 'g_ip', 'g_port', 'g_unit', 'g_dev', 'g_baud', 'g_nennkapaz',
-                       'g_max_laden', 'g_max_entladen', 'g_vorzeichen', 'g_schreiben') as $bm_zf) {
+                       'g_max_laden', 'g_max_entladen', 'g_vorzeichen', 'g_schreiben', 'g_tuerme') as $bm_zf) {
             if ($hol($bm_zf) === "\x00") {
                 $bm_unzul[] = $bm_zf;
                 $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_ZEICHEN_ZEILE'), $bm_i + 1,
@@ -518,7 +518,7 @@ if ($bm_post && isset($_POST['speichern'])) {
              * still verworfen - und "Gespeichert" gemeldet. */
             $bm_rest = array();
             foreach (array('g_port', 'g_unit', 'g_baud', 'g_nennkapaz', 'g_max_laden',
-                           'g_max_entladen') as $bm_zf) {
+                           'g_max_entladen', 'g_tuerme') as $bm_zf) {
                 if ($hol($bm_zf) !== '') {
                     $bm_rest[] = $bm_zf;
                 }
@@ -625,6 +625,22 @@ if ($bm_post && isset($_POST['speichern'])) {
                 $bm_mark[] = 'g_nennkapaz.' . $bm_i;
             } else {
                 $zeile['nennkapaz'] = (float) str_replace(',', '.', $w);
+            }
+        }
+        /* 0.9.48 (Issue #1/#4): Anzahl Tuerme. Leer heisst Vorgabe 1 und wird nicht gespeichert - eine Zeile
+         * ohne den Schluessel liest wie bis 0.9.47 nur Turm 1. 1 bis 8; ueber 1 nur bei einem Profil mit
+         * Turmabfrage (BYD), sonst abgewiesen statt still uebergangen (bm_tuerme_grund()). */
+        $w = $hol('g_tuerme');
+        if ($w !== '') {
+            $bm_tgr = bm_tuerme_grund($w, $pr);
+            if ($bm_tgr === 'zahl') {
+                $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_TUERME'), $bm_i + 1, BM_TUERME_HOECHSTENS);
+                $bm_mark[] = 'g_tuerme.' . $bm_i;
+            } elseif ($bm_tgr === 'profil') {
+                $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_TUERME_PROFIL'), $bm_i + 1);
+                $bm_mark[] = 'g_tuerme.' . $bm_i;
+            } else {
+                $zeile['tuerme'] = (int) $w;
             }
         }
         $bm_neu[] = $zeile;
@@ -1334,6 +1350,7 @@ $bm_vtag = (isset($_GET['vtag']) && preg_match('/^[0-9]{8}$/', (string) $_GET['v
     <th><?= bm_e(bm_t('EINST.T_DEV')) ?></th>
     <th style="width:72px;"><?= bm_e(bm_t('EINST.T_BAUD')) ?></th>
     <th style="width:78px;"><?= bm_e(bm_t('EINST.T_NENNKAPAZ')) ?></th>
+    <th style="width:56px;"><?= bm_e(bm_t('EINST.T_TUERME')) ?></th>
     <th style="width:78px;"><?= bm_e(bm_t('EINST.T_MAX_LADEN')) ?></th>
     <th style="width:78px;"><?= bm_e(bm_t('EINST.T_MAX_ENTLADEN')) ?></th>
     <th style="width:92px;"><?= bm_e(bm_t('EINST.T_VORZEICHEN')) ?></th>
@@ -1366,6 +1383,7 @@ for ($bm_i = 0; $bm_i < 6; $bm_i++) {
 <td><input data-role="none" type="text" name="g_dev[]" value="<?= bm_e($bm_v('geraetedatei')) ?>"<?= bm_markierung('speichern', 'g_dev', $bm_i) ?> size="11" list="bm_serielle"></td>
 <td><input data-role="none" type="text" name="g_baud[]" value="<?= bm_e($bm_v('baud')) ?>"<?= bm_markierung('speichern', 'g_baud', $bm_i) ?> size="5"></td>
 <td><input data-role="none" type="text" name="g_nennkapaz[]" value="<?= bm_e($bm_v('nennkapaz')) ?>"<?= bm_markierung('speichern', 'g_nennkapaz', $bm_i) ?> size="4"></td>
+<td><input data-role="none" type="text" name="g_tuerme[]" value="<?= bm_e($bm_v('tuerme')) ?>"<?= bm_markierung('speichern', 'g_tuerme', $bm_i) ?> size="2" placeholder="1"></td>
 <td><input data-role="none" type="text" name="g_max_laden[]" value="<?= bm_e($bm_v('max_laden')) ?>"<?= bm_markierung('speichern', 'g_max_laden', $bm_i) ?> size="4"></td>
 <td><input data-role="none" type="text" name="g_max_entladen[]" value="<?= bm_e($bm_v('max_entladen')) ?>"<?= bm_markierung('speichern', 'g_max_entladen', $bm_i) ?> size="4"></td>
 <td><select data-role="none" name="g_vorzeichen[]"<?= bm_markierung('speichern', 'g_vorzeichen', $bm_i) ?>>
@@ -1682,7 +1700,8 @@ if ($bm_x3) { ?>
 <td><span class="sm-mono"><?= bm_e($bm_pr['transport']) ?></span></td>
 <td class="<?= $bm_pr['stand'] === 'dokumentiert' ? 'sm-an' : 'sm-aus' ?>">
     <?= bm_e(bm_t('EINST.STAND_' . strtoupper($bm_pr['stand']))) ?><br>
-    <span class="sm-hilfe"><?= bm_e($bm_pr['herkunft']) ?></span></td>
+    <span class="sm-hilfe"><?= bm_e($bm_pr['herkunft']) ?></span>
+    <?php if (bm_felder_unbestaetigt($bm_pr)) { ?><div class="sm-hilfe"><?= bm_e(sprintf(bm_t('EINST.FELDER_UNBESTAETIGT'), implode(', ', bm_felder_unbestaetigt($bm_pr)))) ?></div><?php } ?></td>
 <td class="sm-hilfe"><?= bm_e($bm_pr['quelle']) ?></td>
 <td><form action="index.php" method="post">
   <?php echo bm_fmt(); ?>
@@ -1965,12 +1984,15 @@ if (!bm_felder_gemessen(1)) { ?>
 <tr><th><?= bm_e(bm_t('LOX.T_TITEL')) ?></th><th><?= bm_e(bm_t('LOX.T_BEFEHL')) ?></th>
     <th><?= bm_e(bm_t('LOX.T_EINHEIT')) ?></th><th><?= bm_e(bm_t('LOX.T_GRENZEN')) ?></th>
     <th><?= bm_e(bm_t('LOX.T_BEDEUTUNG')) ?></th></tr>
-<?php foreach (bm_felder_geliefert(1) as $bm_feld => $bm_info) { ?>
+<?php
+$bm_lg = bm_geraet(1);
+$bm_lpr = ($bm_lg !== null) ? bm_profil($bm_lg['profil']) : null;
+foreach (bm_felder_geliefert(1) as $bm_feld => $bm_info) { ?>
 <tr><td><span class="sm-mono">BMS_1_<?= bm_e($bm_feld) ?></span></td>
     <td><span class="sm-mono"><?= bm_e(bm_check($bm_feld)) ?></span></td>
     <td><?= bm_e($bm_info[0]) ?></td>
     <td><span class="sm-mono"><?= (int) $bm_info[2] ?> &hellip; <?= (int) $bm_info[3] ?></span></td>
-    <td><?= bm_t($bm_info[1]) ?></td></tr>
+    <td><?= bm_t($bm_info[1]) ?><?php if ($bm_lpr !== null && isset($bm_lpr['felder'][$bm_feld]) && bm_feld_stand($bm_lpr, $bm_feld) !== 'dokumentiert') { ?> <span class="sm-aus">(<?= bm_e(bm_t('EINST.STAND_UNBESTAETIGT')) ?>)</span><?php } ?></td></tr>
 <?php } ?>
 <tr><td><span class="sm-mono">BMS_1_SOLLART</span></td>
     <td><span class="sm-mono"><?= bm_e(bm_check('SOLLART')) ?></span></td>
@@ -1980,6 +2002,14 @@ if (!bm_felder_gemessen(1)) { ?>
     <td><span class="sm-mono"><?= bm_e(bm_check('SOLLALTER')) ?></span></td>
     <td>s</td><td><span class="sm-mono">-1 &hellip; 86400</span></td>
     <td><?= bm_t('BM_FELD.SOLLALTER') ?></td></tr>
+<?php /* 0.9.48: je Turm vier Felder, nur bei zwei und mehr Tuermen (Einstellung "Anzahl Tuerme"). */
+foreach (bm_turm_felder_geraet(1) as $bm_feld => $bm_info) { ?>
+<tr><td><span class="sm-mono">BMS_1_<?= bm_e($bm_feld) ?></span></td>
+    <td><span class="sm-mono"><?= bm_e(bm_check($bm_feld)) ?></span></td>
+    <td><?= bm_e($bm_info[0]) ?></td>
+    <td><span class="sm-mono"><?= (int) $bm_info[2] ?> &hellip; <?= (int) $bm_info[3] ?></span></td>
+    <td><?= bm_e(sprintf(bm_t($bm_info[1]), (int) $bm_info[4])) ?></td></tr>
+<?php } ?>
 </table>
 <div class="sm-warnung"><?= bm_t('LOX.S3_STRICH') ?></div>
 <?php if (count($bm_werte) > 1) { ?>
@@ -2292,6 +2322,21 @@ $bm_wue = bm_wache_uebersicht(); ?>
 <?php foreach ($bm_werte as $bm_nr => $bm_w) {
     if (empty($bm_w['module'])) { continue; } ?>
 <h3><?= bm_e(bm_t('TEST.H_ZELLEN')) ?>: <?= bm_e($bm_w['name']) ?></h3>
+<?php /* 0.9.48 (Issue #1/#4): je Turm Module von-bis, Ladezustand, Gesundheitszustand und Zelldrift. */
+if (!empty($bm_w['tuerme']) && is_array($bm_w['tuerme'])) { ?>
+<table class="sm-tbl">
+<tr><th><?= bm_e(bm_t('TEST.T_TURM')) ?></th><th><?= bm_e(bm_t('TEST.T_TURM_MODULE')) ?></th>
+    <th><?= bm_e(bm_t('TEST.T_TURM_SOC')) ?></th><th><?= bm_e(bm_t('TEST.T_TURM_SOH')) ?></th>
+    <th><?= bm_e(bm_t('TEST.T_UZDIFF')) ?></th></tr>
+<?php foreach ($bm_w['tuerme'] as $bm_tn => $bm_td) { ?>
+<tr><td><?= (int) $bm_tn ?></td>
+    <td><?= isset($bm_td['von'], $bm_td['bis']) && (int) $bm_td['bis'] >= (int) $bm_td['von'] ? (int) $bm_td['von'] . '&ndash;' . (int) $bm_td['bis'] : '&ndash;' ?></td>
+    <td><?= isset($bm_td['soc']) && $bm_td['soc'] !== null ? bm_e($bm_td['soc']) . ' %' : '&ndash;' ?></td>
+    <td><?= isset($bm_td['soh']) && $bm_td['soh'] !== null ? bm_e($bm_td['soh']) . ' %' : '&ndash;' ?></td>
+    <td><?= isset($bm_td['uzdiff']) && $bm_td['uzdiff'] !== null ? bm_e($bm_td['uzdiff']) . ' mV' : '&ndash;' ?></td></tr>
+<?php } ?>
+</table>
+<?php } ?>
 <table class="sm-tbl">
 <tr><th><?= bm_e(bm_t('TEST.T_MODUL')) ?></th><th><?= bm_e(bm_t('TEST.T_UZMAX')) ?></th>
     <th><?= bm_e(bm_t('TEST.T_UZMIN')) ?></th><th><?= bm_e(bm_t('TEST.T_UZDIFF')) ?></th>

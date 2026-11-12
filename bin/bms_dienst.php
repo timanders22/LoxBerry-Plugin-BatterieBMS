@@ -337,13 +337,114 @@ function bm_zellen_byd(array $g, array $pr, $tmo, $bmsIndex = 1)
             'tmin'   => $temps ? min($temps) : null,
         );
     }
+    /* 0.9.48 (Issue #4): Ladezustand und Gesundheitszustand des Turms aus dem ersten Block (Profil 'turm_soc',
+     * 'turm_soh'). Gelesen wird nichts zusaetzlich; ausgegeben werden die Werte nur bei zwei und mehr Tuermen
+     * (bm_zellen_byd_alle()). */
+    $turm = bm_byd_turmwerte($daten, $z);
     if ($hinweis !== '') {
         if (!$module) {
             return array('_fehler' => $hinweis . ' - darin stand kein vollstaendiges Modul.');
         }
-        return array('module' => $module, '_hinweis' => $hinweis);
+        return array('module' => $module, 'turm' => $turm, '_hinweis' => $hinweis);
     }
-    return array('module' => $module);
+    return array('module' => $module, 'turm' => $turm);
+}
+
+/**
+ * 0.9.48 (Issue #4): Ladezustand (int16 x Faktor, %) und Gesundheitszustand (int16, %) eines Turms aus den
+ * Zelldaten - gezaehlt nach dem Verwerfen der Laengenworte, wie zellen_ab. Ein Wert ausserhalb 0..100 ist kein
+ * Messwert und bleibt null. Ohne die Profilschluessel: beide null.
+ */
+function bm_byd_turmwerte(array $daten, array $z)
+{
+    $aus = array('soc' => null, 'soh' => null);
+    foreach (array('soc' => 'turm_soc', 'soh' => 'turm_soh') as $k => $schluessel) {
+        if (!isset($z[$schluessel]) || !isset($daten[(int) $z[$schluessel]])) {
+            continue;
+        }
+        $w = (int) $daten[(int) $z[$schluessel]] & 0xFFFF;
+        $w = ($w >= 0x8000) ? $w - 0x10000 : $w;
+        $f = ($k === 'soc' && isset($z['turm_soc_faktor'])) ? (float) $z['turm_soc_faktor'] : 1.0;
+        $v = round($w * $f, $k === 'soc' ? 1 : 0);
+        if ($v >= 0 && $v <= 100) {
+            $aus[$k] = $v;
+        }
+    }
+    return $aus;
+}
+
+/**
+ * 0.9.48 (Issue #1/#4): die Zelldaten ALLER Tuerme eines Speichers.
+ *
+ * Bis 0.9.47 rief der Dienst bm_zellen_byd() ohne BMS-Index auf - gelesen wurde nur Turm 1, bei einer HVM mit
+ * drei Tuermen fehlten die Module 8 bis 21. Bei "Anzahl Tuerme" 1 (Vorgabe, auch leer oder fehlend) bleibt es
+ * dabei, Wort fuer Wort: ein Aufruf mit Index 1, keine Turmwerte. Ab 2 werden die Tuerme NACHEINANDER ueber
+ * dieselbe Verbindung gelesen (Index 1 bis n), die Module fortlaufend nummeriert und je Turm Modulnummern von/bis,
+ * Ladezustand, Gesundheitszustand, Modulzahl und Zelldrift unter 'tuerme' abgelegt. Am Geraet des Melders
+ * (HVM, 3 x 7 Module) lieferten die Indizes 2 und 3 eigene Daten, gegengehalten mit BE Connect Plus.
+ *
+ * Scheitert ein Turm, ist der ganze Zellabruf gescheitert (Text nennt den Turm): eine Luecke wuerde die
+ * Nummern der folgenden Module verschieben. Der Dienst behaelt dann die vorigen Zelldaten.
+ * Liefert ein Turm dieselben Zellspannungen wie Turm 1, steht das als Hinweis im Protokoll - dann antwortet
+ * die BCU vermutlich nicht auf diesen Index.
+ */
+function bm_zellen_byd_alle(array $g, array $pr, $tmo)
+{
+    $n = isset($g['tuerme']) ? max(1, min(BM_TUERME_HOECHSTENS, (int) $g['tuerme'])) : 1;
+    if ($n < 2) {
+        $erg = bm_zellen_byd($g, $pr, $tmo);
+        unset($erg['turm']);
+        return $erg;
+    }
+    $alle = array();
+    $tuerme = array();
+    $hinweise = array();
+    $erste = null;
+    for ($t = 1; $t <= $n; $t++) {
+        if (isset($GLOBALS['bm_laeuft']) && !$GLOBALS['bm_laeuft']) {
+            return array('_fehler' => 'Der Dienst haelt an - Zellabruf nach Turm ' . ($t - 1) . ' von ' . $n
+                . ' abgebrochen.');
+        }
+        $erg = bm_zellen_byd($g, $pr, $tmo, $t);
+        if (isset($erg['_fehler'])) {
+            return array('_fehler' => 'Turm ' . $t . ' von ' . $n . ': ' . $erg['_fehler']);
+        }
+        if (isset($erg['_hinweis'])) {
+            $hinweise[] = 'Turm ' . $t . ': ' . $erg['_hinweis'];
+        }
+        $zellen = array();
+        $von = count($alle) + 1;
+        $uzmax = array();
+        $uzmin = array();
+        foreach ((array) $erg['module'] as $md) {
+            $alle[count($alle) + 1] = $md;
+            $zellen[] = isset($md['zellen']) ? $md['zellen'] : array();
+            if (isset($md['uzmax'], $md['uzmin'])) {
+                $uzmax[] = (int) $md['uzmax'];
+                $uzmin[] = (int) $md['uzmin'];
+            }
+        }
+        if ($t === 1) {
+            $erste = $zellen;
+        } elseif ($zellen && $zellen === $erste) {
+            $hinweise[] = 'Turm ' . $t . ' liefert dieselben Zellspannungen wie Turm 1 - antwortet die BCU auf '
+                . 'den BMS-Index ' . $t . '? "Anzahl Tuerme" pruefen.';
+        }
+        $tuerme[$t] = array(
+            'index'  => $t,
+            'von'    => $von,
+            'bis'    => count($alle),
+            'module' => count($alle) - $von + 1,
+            'soc'    => isset($erg['turm']['soc']) ? $erg['turm']['soc'] : null,
+            'soh'    => isset($erg['turm']['soh']) ? $erg['turm']['soh'] : null,
+            'uzdiff' => ($uzmax && $uzmin) ? max($uzmax) - min($uzmin) : null,
+        );
+    }
+    $aus = array('module' => $alle, 'tuerme' => $tuerme);
+    if ($hinweise) {
+        $aus['_hinweis'] = implode(' | ', $hinweise);
+    }
+    return $aus;
 }
 
 /** Gruppe 31 (B11): ein Byte als int8 (0xFB -> -5). */
@@ -1181,6 +1282,12 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
         foreach (bm_status_felder() as $feld => $unbenutzt) {
             $eintrag[$feld] = null;
         }
+        /* 0.9.48: ab zwei Tuermen steht die eingestellte Zahl in jedem Eintrag - auch in der Ausfallpause und
+         * bei einem gescheiterten Abruf -, damit die Statuszeile ihre Turmfelder immer traegt (Strich ohne Wert). */
+        if (bm_profil_kennt_tuerme($pr) && isset($g['tuerme']) && (int) $g['tuerme'] >= 2) {
+            $eintrag['tuerme_n'] = (int) $g['tuerme'];
+            $eintrag['tuerme'] = array();
+        }
 
         // Ein Geraet in der Ausfallpause wird uebersprungen. Es behaelt
         // seinen Fehlertext und gilt weiter als gestoert - es wird nur nicht
@@ -1240,8 +1347,12 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
                 $kannZellen = isset($pr['zellen']['verfahren'])
                               && $pr['zellen']['verfahren'] === 'byd_bms';
                 $faellig = !isset($letzteZellen[$nr]) || (time() - $letzteZellen[$nr]) >= $zt;
+                /* 0.9.48: ab zwei Tuermen (Einstellung "Anzahl Tuerme") liest bm_zellen_byd_alle() jeden Turm,
+                 * und der Eintrag traegt 'tuerme' (je Turm) und 'tuerme_n' (eingestellte Zahl). Bei einem Turm
+                 * fehlen beide Schluessel - das Abbild sieht aus wie bis 0.9.47. */
+                $bm_tz = (isset($g['tuerme']) && (int) $g['tuerme'] >= 2) ? (int) $g['tuerme'] : 0;
                 if ($kannZellen && $faellig) {
-                    $zellen = bm_zellen_byd($g, $pr, $tmo);
+                    $zellen = bm_zellen_byd_alle($g, $pr, $tmo);
                     $letzteZellen[$nr] = time();
                     if (isset($zellen['_fehler'])) {
                         bm_log_gebremst('zellen' . $nr, $g['name'] . ' - Zelldaten: '
@@ -1249,17 +1360,26 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
                         // Abruf misslungen: die vorigen Zelldaten behalten,
                         // aber NICHT so tun, als waeren sie frisch.
                         $eintrag['module'] = bm_module_vorher($nr);
+                        if ($bm_tz > 0) {
+                            $eintrag['tuerme'] = bm_tuerme_vorher($nr, $bm_tz);
+                        }
                     } else {
                         if (isset($zellen['_hinweis'])) {
                             bm_log_gebremst('zellen' . $nr, $g['name'] . ' - Zelldaten: ' . $zellen['_hinweis']);
                         }
                         $eintrag['module'] = $zellen['module'];
+                        if ($bm_tz > 0 && isset($zellen['tuerme'])) {
+                            $eintrag['tuerme'] = $zellen['tuerme'];
+                        }
                         $eintrag['zell_ts'] = time();   // Gruppe 31: Zeitpunkt des Zelldatenabrufs
                     }
                 } elseif ($kannZellen) {
                     // Zwischen zwei Zelldatenabrufen die vorigen behalten,
                     // statt sie auf leer zu setzen.
                     $eintrag['module'] = bm_module_vorher($nr);
+                    if ($bm_tz > 0) {
+                        $eintrag['tuerme'] = bm_tuerme_vorher($nr, $bm_tz);
+                    }
                 }
             }
         }
@@ -1555,6 +1675,21 @@ function bm_module_vorher($nr)
     $alt = bm_werte();
     return (isset($alt[$nr]['module']) && is_array($alt[$nr]['module']))
         ? $alt[$nr]['module'] : array();
+}
+
+/** 0.9.48: die vorigen Turmwerte - nur die Tuerme 1..$n, damit nach dem Verkleinern keine alten stehen bleiben. */
+function bm_tuerme_vorher($nr, $n)
+{
+    $alt = bm_werte();
+    $aus = array();
+    if (isset($alt[$nr]['tuerme']) && is_array($alt[$nr]['tuerme'])) {
+        foreach ($alt[$nr]['tuerme'] as $t => $td) {
+            if ((int) $t >= 1 && (int) $t <= (int) $n && is_array($td)) {
+                $aus[(int) $t] = $td;
+            }
+        }
+    }
+    return $aus;
 }
 
 /** Einen Messpunkt in die Tagesdatei schreiben, hoechstens alle vier Minuten. */
@@ -2758,6 +2893,10 @@ function bm_selbsttest()
         $zeilen[] = sprintf('[%s] %-26s %-16s %-13s %s',
             $pr['stand'] === 'dokumentiert' ? 'OK  ' : 'WARN',
             $k, $pr['transport'], $pr['stand'], $pr['herkunft']);
+        // 0.9.48: Felder mit eigenem Stand "unbestaetigt" in einem dokumentierten Profil (BYD: EENTLADEN).
+        if (bm_felder_unbestaetigt($pr)) {
+            $zeilen[] = '[INFO]        davon unbestaetigt: ' . implode(', ', bm_felder_unbestaetigt($pr));
+        }
     }
 
     if (!$geraete) {
@@ -2772,7 +2911,8 @@ function bm_selbsttest()
             $zeilen[] = '[INFO]   ' . $nr . ') ' . $g['name'] . ' - ' . $g['profil']
                       . ', ' . $ziel
                       . ', Schreiben ' . ($g['schreiben'] ? 'zugelassen' : 'gesperrt')
-                      . ', Vorzeichen ' . ($g['vorzeichen'] > 0 ? 'positiv = laden' : 'umgekehrt');
+                      . ', Vorzeichen ' . ($g['vorzeichen'] > 0 ? 'positiv = laden' : 'umgekehrt')
+                      . ((int) $g['tuerme'] >= 2 ? ', ' . (int) $g['tuerme'] . ' Tuerme' : '');
             if ($g['transport'] === 'pylontech_rs485') {
                 if (!file_exists($g['geraetedatei'])) {
                     $fehler++;
@@ -2994,6 +3134,77 @@ function bm_selbsttest()
               . var_export($byd['werte']['SOC'], true) . ' (77), PBAT aus Rechnung '
               . var_export($byd['werte']['PBAT'], true) . ' (500)';
     if (!$auOk) {
+        $fehler++;
+    }
+
+    /* 0.9.48 (Issue #3): die Energiezaehler an der Ablesung des Melders (HVM, 11.11.2026 23:25): 0x0511 = 53095,
+     * 0x0512 = 3, 0x0513 = 26644, 0x0514 = 3. Unteres Wort zuerst, x 0,1 kWh: 24970,3 und 22325,2 kWh. Die
+     * vertauschte Wortfolge (347 963 392,3 kWh) muss als unplausibel leer bleiben. */
+    $bm_ez = bm_modbus_auswerten(array(0x0500 => 28, 0x0503 => 95, 0x0511 => 53095, 0x0512 => 3,
+        0x0513 => 26644, 0x0514 => 3), $bm_eing['byd_battery_box']);
+    $bm_ezp = $bm_eing['byd_battery_box'];
+    $bm_ezp['felder']['EGELADEN']['wort'] = 'hoch';
+    $bm_ezv = bm_modbus_auswerten(array(0x0511 => 53095, 0x0512 => 3), $bm_ezp);
+    $bm_ezok = $gleich($bm_ez['werte']['EGELADEN'], 24970.3) && $gleich($bm_ez['werte']['EENTLADEN'], 22325.2)
+        && $bm_ez['werte']['ZYKLEN'] === null && $bm_ezv['werte']['EGELADEN'] === null
+        && bm_feld_stand($bm_eing['byd_battery_box'], 'EENTLADEN') === 'unbestaetigt'
+        && bm_feld_stand($bm_eing['byd_battery_box'], 'EGELADEN') === 'dokumentiert';
+    $zeilen[] = ($bm_ezok ? '[OK]   ' : '[FEHL] ') . 'BYD-Energiezaehler (Issue #3): EGELADEN '
+              . var_export($bm_ez['werte']['EGELADEN'], true) . ' (24970.3), EENTLADEN '
+              . var_export($bm_ez['werte']['EENTLADEN'], true) . ' (22325.2, Stand '
+              . bm_feld_stand($bm_eing['byd_battery_box'], 'EENTLADEN') . '), ZYKLEN '
+              . var_export($bm_ez['werte']['ZYKLEN'], true) . ' (NULL), oberes Wort zuerst '
+              . var_export($bm_ezv['werte']['EGELADEN'], true) . ' (NULL, unplausibel)';
+    if (!$bm_ezok) {
+        $fehler++;
+    }
+
+    /* 0.9.48 (Issue #4): Turmwerte aus den Zelldaten - Data[24] = 256 (int16 x 0,1 = 25,6 %), Data[25] = 91;
+     * ein Wort 0xFFFF (-1) und 1001 (100,1 %) sind kein Messwert. */
+    $bm_zp = $bm_eing['byd_battery_box']['zellen'];
+    $bm_tw1 = bm_byd_turmwerte(array(24 => 256, 25 => 91), $bm_zp);
+    $bm_tw2 = bm_byd_turmwerte(array(24 => 0xFFFF, 25 => 0xFFFF), $bm_zp);
+    $bm_tw3 = bm_byd_turmwerte(array(24 => 1001, 25 => 97), $bm_zp);
+    $bm_twok = $bm_tw1 === array('soc' => 25.6, 'soh' => 91.0) && $bm_tw2 === array('soc' => null, 'soh' => null)
+        && $bm_tw3 === array('soc' => null, 'soh' => 97.0);
+    $zeilen[] = ($bm_twok ? '[OK]   ' : '[FEHL] ') . 'BYD-Turmwerte (Issue #4): Data[24]=256/Data[25]=91 ergibt '
+              . var_export($bm_tw1['soc'], true) . ' %/' . var_export($bm_tw1['soh'], true)
+              . ' % (25.6/91.0); 0xFFFF ergibt ' . var_export($bm_tw2['soc'], true) . ' (NULL); 1001 ergibt '
+              . var_export($bm_tw3['soc'], true) . ' (NULL)';
+    if (!$bm_twok) {
+        $fehler++;
+    }
+
+    /* 0.9.48: jeder Suchtext der Vorlage (bm_check(), mit Semikolon) steht in der Statuszeile genau einmal -
+     * gezaehlt an der erzeugten Zeile eines Speichers mit drei Tuermen (Regeln/07: Feldliste aus der Vorlage,
+     * nicht aus der Antwort), und die Zeile bis SOLLART ist ohne Tuerme dieselbe wie mit. */
+    $bm_sz = array('ok' => 1, 'sollwert' => '', 'sollwert_alter' => -1, 'tuerme_n' => 3, 'tuerme' => array(
+        1 => array('soc' => 25.6, 'soh' => 91, 'module' => 7, 'uzdiff' => 18),
+        2 => array('soc' => 35.7, 'soh' => 97, 'module' => 7, 'uzdiff' => 7),
+        3 => array('soc' => 22.4, 'soh' => 97, 'module' => 7, 'uzdiff' => 10)));
+    foreach (bm_status_felder() as $bm_f => $bm_u) {
+        $bm_sz[$bm_f] = 1;
+    }
+    $bm_zeile3 = bm_statuszeile($bm_sz, 0, 1);
+    $bm_sz1 = $bm_sz;
+    unset($bm_sz1['tuerme_n'], $bm_sz1['tuerme']);
+    $bm_zeile1 = bm_statuszeile($bm_sz1, 0, 1);
+    $bm_such = array_merge(array_keys(bm_status_felder()), array('SOLLART', 'SOLLALTER'),
+        array_keys(bm_turm_felder(3)));
+    $bm_mehr = array();
+    foreach ($bm_such as $bm_f) {
+        $bm_s = substr(bm_check($bm_f), 2, -4);    // "\i;FELD=\i\v" -> ";FELD="
+        if (substr_count($bm_zeile3, $bm_s) !== 1) {
+            $bm_mehr[] = $bm_f . 'x' . substr_count($bm_zeile3, $bm_s);
+        }
+    }
+    $bm_suok = !$bm_mehr && count($bm_such) === count(bm_status_felder()) + 2 + 12
+        && strpos($bm_zeile3, $bm_zeile1 . ';TURM1SOC=25.6;TURM1SOH=91;TURM1MODULE=7;TURM1UZDIFF=18;') === 0
+        && substr($bm_zeile3, -15) === ';TURM3UZDIFF=10';
+    $zeilen[] = ($bm_suok ? '[OK]   ' : '[FEHL] ') . 'Statuszeile mit 3 Tuermen: ' . count($bm_such)
+              . ' Suchtexte je genau einmal' . ($bm_mehr ? ' - NICHT: ' . implode(', ', $bm_mehr) : '')
+              . ', Turmfelder hinter SOLLART, ohne Tuerme dieselbe Zeile bis SOLLART';
+    if (!$bm_suok) {
         $fehler++;
     }
 

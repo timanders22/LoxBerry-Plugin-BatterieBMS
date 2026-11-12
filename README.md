@@ -10,6 +10,13 @@ nur so weit, wie der Wechselrichter ihn durchreicht: Ladezustand und Leistung
 ja, die einzelne Zelle so gut wie nie. Wer wissen will, ob eine Zelle abfällt,
 muss das BMS selbst fragen.
 
+## Neu in 0.9.48
+
+- **BYD mit mehreren Türmen (Issue #1, #4):** Beim Speicher gibt es die Spalte *Türme*. Leer oder 1 bleibt wie bisher: gelesen wird nur Turm 1 (BMS-Index 1), Statuszeile, Zellantwort und MQTT-Themen sind dieselben wie in 0.9.47, nur um die beiden Energiezähler ergänzt. Ab 2 fragt der Dienst die BCU für jeden Turm mit dem BMS-Index 1 bis n nacheinander über dieselbe Verbindung ab und nummeriert die Module fortlaufend (Turm 1: Module 1–7, Turm 2: 8–14, Turm 3: 15–21 bei 7 Modulen je Turm). Je Turm kommen Ladezustand, Gesundheitszustand, Zahl der gelesenen Module und Zelldrift dazu: hinten in der Statuszeile als `TURM1SOC`, `TURM1SOH`, `TURM1MODULE`, `TURM1UZDIFF` … (nach `SOLLART`), unter MQTT als `geraetN/turm/T/soc`, `soh`, `module`, `uzdiff`, in der Importvorlage und im Reiter *Test*. Ladezustand und Gesundheitszustand stehen im ersten Zelldatenblock, der ohnehin gelesen wird; eine zusätzliche Anfrage gibt es nicht. Bestehende Namen behalten ihre Bedeutung: `MODULE` nennt bei BYD weiter das Register 0x0010, `ZELLEN` und `UZDIFF` zählen über alle gelesenen Module. Stehen die Türme bei verschiedenem Ladezustand, kann `UZDIFF` damit einen Abstand zeigen, der keine Zelldrift ist; Warnschwelle und Ausgleichsladen richten sich weiter nach `UZDIFF`, die Drift je Turm steht in `TURMnUZDIFF`. Erlaubt sind 1 bis 8 Türme, mehr als einer nur bei einem Profil mit BYD-Zellabfrage; anderes weisen Formular und Zurückspielen ab. Scheitert ein Turm, gilt der ganze Zellabruf als gescheitert, die vorigen Zelldaten bleiben, und das Protokoll nennt den Turm. Liefert ein Turm dieselben Zellspannungen wie Turm 1, steht das im Protokoll und als Kreuz im Reiter *Test*.
+- **Energie geladen und entladen gesamt (Issue #3):** Neue Felder `EGELADEN` und `EENTLADEN` in kWh (Statuszeile hinter `TBAT`, MQTT `geraetN/egeladen` und `geraetN/eentladen`). Bei BYD aus 0x0511/0x0512 und 0x0513/0x0514, unteres Wort zuerst, Faktor 0,1 kWh. Die Deutung ist an einer Ablesung an einer HVM hergeleitet: 0x0511 = 53095 und 0x0512 = 3 ergeben 24 970,3 kWh, Fronius Solar.web nennt seit Inbetriebnahme 25,25 MWh gespeicherte Energie (98,9 %); oberes Wort zuerst ergäbe 348 GWh, Faktor 1 oder 0,01 das Zehnfache oder ein Zehntel. Für die entladene Energie gibt es keinen Vergleichswert; das Feld steht deshalb im Profil als *ungeprüft* (Reiter *Einstellungen*, *Test* und der Kommentar in der Importvorlage sagen es). `ZYKLEN` bleibt bei BYD leer.
+- Ein eigenes Profil kann für ein einzelnes Feld einen eigenen Stand (`"stand": "unbestaetigt"`) tragen; die Beschreibung steht in `data/profile/BEISPIEL_eigenes_profil.txt`.
+- Gemessen an einer nachgebauten BCU mit den Werten aus den Issues unter PHP 8.3 (WSL auf dem Arbeitsrechner), der Selbsttest des Dienstes mit den neuen Rechenfällen zusätzlich unter PHP 7.4, 8.4 und 8.5; an einem Gerät ist diese Fassung noch nicht gelaufen.
+
 ## Neu in 0.9.47
 
 - **Konfiguration wird beim Dienststart vervollständigt:** Fehlen in `batteriebms.json` Einstellungen, die eine neuere Fassung mitbringt, trägt der Dienst sie beim Start einmal in die Datei ein, samt Zweitschrift; das Protokoll nennt die ergänzten Namen in einer Zeile, nie Werte. Bisher ergänzte das Plugin fehlende Einstellungen nur beim Lesen; in die Datei kamen sie erst beim nächsten Speichern im Formular.
@@ -1072,6 +1079,9 @@ Deutsch standen.
   **Entschieden in 0.9.45:** Eine Messreihe an einer HVM (Issue #3) zeigt
   `0x0511` zwischen 52412 und 52491, steigend nur beim Laden. Das ist ein
   Energiezähler; `ZYKLEN` wird bei BYD nicht mehr geliefert.
+  **Seit 0.9.48** steht der Zähler als eigenes Feld `EGELADEN` (u32, unteres
+  Wort zuerst, 0,1 kWh), daneben `EENTLADEN` aus `0x0513/0x0514`, Stand
+  *ungeprüft* (siehe „Neu in 0.9.48").
 * Es ist weiterhin **kein Speicher angeschlossen**. Kein Profil, kein
   Übertragungsweg, keine Vorzeichenrichtung und kein Schreibbefehl ist an
   einem Gerät gemessen.

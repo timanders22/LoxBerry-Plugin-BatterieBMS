@@ -153,6 +153,49 @@ function bm_pruefungen()
                     sprintf(bm_t('TEST.A_SERIELL_OK'), bm_e($dev), (int) $g['baud']));
             }
         }
+        /* 0.9.48 (Issue #3): Felder mit eigenem Stand "unbestaetigt" in einem dokumentierten Profil - grau,
+         * es ist eine Auskunft, kein Mangel der Einrichtung. */
+        if ($pr['stand'] === 'dokumentiert' && bm_felder_unbestaetigt($pr)) {
+            $zeilen[] = bm_pruefzeile(-1, sprintf(bm_t('TEST.F_FELDSTAND'), bm_e($g['name'])),
+                sprintf(bm_t('TEST.A_FELDSTAND'), bm_e(implode(', ', bm_felder_unbestaetigt($pr)))));
+        }
+        /* 0.9.48 (Issue #1/#4): ab zwei Tuermen - kamen alle Tuerme an, und liefert jeder eigene Daten?
+         * Gemessen am Abbild des Dienstes (Wirkung), nicht an der Einstellung. Ohne Zelldaten grau. */
+        if (bm_profil_kennt_tuerme($pr) && (int) $g['tuerme'] >= 2) {
+            $bm_tw = isset($werte[$nr]['tuerme']) && is_array($werte[$nr]['tuerme']) ? $werte[$nr]['tuerme'] : array();
+            $bm_tm = isset($werte[$nr]['module']) && is_array($werte[$nr]['module']) ? $werte[$nr]['module'] : array();
+            $bm_tf = sprintf(bm_t('TEST.F_TUERME'), bm_e($g['name']), (int) $g['tuerme']);
+            if (!$bm_tw) {
+                $zeilen[] = bm_pruefzeile(-1, $bm_tf, bm_t('TEST.A_TUERME_NOCH_NICHT'));
+            } else {
+                $bm_tl = array();
+                $bm_tleer = array();
+                $bm_tgleich = array();
+                $bm_tz1 = null;
+                foreach ($bm_tw as $bm_tn => $bm_td) {
+                    $bm_tz = array();
+                    for ($bm_m = (int) $bm_td['von']; $bm_m <= (int) $bm_td['bis']; $bm_m++) {
+                        $bm_tz[] = isset($bm_tm[$bm_m]['zellen']) ? $bm_tm[$bm_m]['zellen'] : array();
+                    }
+                    if ((int) $bm_td['module'] < 1) {
+                        $bm_tleer[] = (int) $bm_tn;
+                    } elseif ((int) $bm_tn === 1) {
+                        $bm_tz1 = $bm_tz;
+                    } elseif ($bm_tz === $bm_tz1) {
+                        $bm_tgleich[] = (int) $bm_tn;
+                    }
+                    $bm_tl[] = sprintf(bm_t('TEST.A_TURM_KURZ'), (int) $bm_tn, (int) $bm_td['module'],
+                        (int) $bm_td['von'], (int) $bm_td['bis'],
+                        $bm_td['soc'] === null ? '&ndash;' : bm_e($bm_td['soc']),
+                        $bm_td['soh'] === null ? '&ndash;' : bm_e($bm_td['soh']));
+                }
+                $bm_tgut = (count($bm_tw) === (int) $g['tuerme']) && !$bm_tleer && !$bm_tgleich;
+                $zeilen[] = bm_pruefzeile($bm_tgut ? 1 : 0, $bm_tf, implode('; ', $bm_tl)
+                    . (count($bm_tw) !== (int) $g['tuerme'] ? ' ' . sprintf(bm_t('TEST.A_TUERME_ZAHL'), count($bm_tw)) : '')
+                    . ($bm_tleer ? ' ' . sprintf(bm_t('TEST.A_TUERME_LEER'), implode(', ', $bm_tleer)) : '')
+                    . ($bm_tgleich ? ' ' . sprintf(bm_t('TEST.A_TUERME_GLEICH'), implode(', ', $bm_tgleich)) : ''));
+            }
+        }
         // Zellspannungsdrift: das ist der Wert, wegen dessen man ein BMS
         // ueberhaupt ausliest.
         $d = isset($werte[$nr]['UZDIFF']) ? $werte[$nr]['UZDIFF'] : null;
@@ -723,10 +766,13 @@ function bm_themen_gesendet(array $cfg)
     $e = array('ok' => 1, 'ok_ts' => 1, 'alarmtext' => 'x', 'sollwert_quelle' => 'x',
                'fehlertext' => 'x', 'sollwert' => 'laden:1', 'sollwert_alter' => 1,
                'module' => array(1 => array('uzmax' => 1, 'uzmin' => 1, 'uzdiff' => 1, 'tmax' => 1,
-                                            'zellen' => array(1 => 3300))));
+                                            'zellen' => array(1 => 3300))),
+               // 0.9.48: ein Turm, damit die Turmthemen mitgezaehlt werden
+               'tuerme' => array(1 => array('soc' => 1, 'soh' => 1, 'module' => 1, 'uzdiff' => 1)));
     foreach (array('SOC', 'SOH', 'UBAT', 'IBAT', 'PBAT', 'TMAX', 'TMIN', 'UZMAX', 'UZMIN',
                    'UZDIFF', 'ZYKLEN', 'KAPAZ', 'MODULE', 'ZELLEN', 'FEHLER', 'WARNUNG', 'MODUS',
-                   'UZMINMOD', 'UZMINZELLE', 'RESTKWH', 'RESTZEIT', 'ALARM', 'TBAT') as $f) {
+                   'UZMINMOD', 'UZMINZELLE', 'RESTKWH', 'RESTZEIT', 'ALARM', 'TBAT',
+                   'EGELADEN', 'EENTLADEN') as $f) {
         $e[$f] = 1;
     }
     $cfg['evcc_ein'] = 1;
@@ -738,6 +784,7 @@ function bm_themen_gesendet(array $cfg)
     foreach (array_keys($paare) as $k) {
         $k = preg_replace('#^geraet[0-9]+/#', 'geraetN/', (string) $k);
         $k = preg_replace('#/modul/[0-9]+/#', '/modul/M/', $k);
+        $k = preg_replace('#/turm/[0-9]+/#', '/turm/T/', $k);
         $k = preg_replace('#/zelle/[0-9]+$#', '/zelle/Z', $k);
         $aus[$k] = true;
     }
