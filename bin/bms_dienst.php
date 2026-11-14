@@ -3726,10 +3726,17 @@ function bm_selbsttest()
         bm_wert_pruefen('wache_erlaubt', array('loxone')) !== '', bm_wert_pruefen('fuehrung', 'evcc'),
         bm_wert_pruefen('fuehrung', 'EVCC') !== '', bm_wert_pruefen('fuehrung', array('evcc')) !== '')
         === array('', '', true, true, true, true, '', true, true, '', true, true);
-    $bm_rk = bm_rueckspiel_pruefen(array('geraete' => array(), 'wache_sperren_ein' => 1, 'wache_erlaubt' => '', 'fuehrung' => 'beide'));
-    $bm_rk2 = bm_rueckspiel_pruefen(array('geraete' => array(), 'wache_sperren_ein' => 1, 'wache_erlaubt' => '', 'fuehrung' => 'loxone'));
+    /* 0.9.51: ueber das gemeinsame Sicherungsmodul - eine eigene Sicherung (Kennzeichen, alle Vorgaben). */
+    $bm_sb = bm_sicherung_beschreibung();
+    $bm_sd = array('_plugin' => 'LoxBerry-Plugin-BatterieBMS') + array_merge(bm_vorgaben(), array('aktionstoken' => 'selbsttest1234',
+        'wache_sperren_ein' => 1, 'wache_erlaubt' => '', 'fuehrung' => 'beide'));
+    $bm_rk = sicherung_lesen($bm_sb, (string) json_encode($bm_sd), bm_vorgaben());
+    $bm_sd['fuehrung'] = 'loxone';
+    $bm_rk2 = sicherung_lesen($bm_sb, (string) json_encode($bm_sd), bm_vorgaben());
+    $bm_rkn = array();
+    foreach ($bm_rk['beanstandet'] as $bm_x) { $bm_rkn[] = $bm_x['name']; }
     $bm_wt['Zurueckspielen: Sperren ohne Fuehrung und Liste abgewiesen, mit Fuehrung angenommen'] = array(
-        in_array('wache_sperren_ein', $bm_rk['namen'], true), $bm_rk2['namen']) === array(true, array());
+        in_array('wache_sperren_ein', $bm_rkn, true), $bm_rk2['ok'], $bm_rk2['beanstandet']) === array(true, true, array());
     foreach ($bm_wt as $bm_wn => $bm_wok) {
         $zeilen[] = ($bm_wok === true ? '[OK]   ' : '[FEHL] ') . 'Schreiber-Wache: ' . $bm_wn;
         if ($bm_wok !== true) {

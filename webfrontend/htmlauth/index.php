@@ -198,171 +198,97 @@ if ($bm_post && isset($_POST['profil_export'])) {
     }
 }
 
-/* ---------------- Konfiguration als Sicherung herunterladen (B19) ----------------
+/* ---------------- Einstellungen sichern (B19) ----------------
  *
  * Die Datei traegt das Aktionstoken. Das ist Absicht: eine Sicherung ohne
  * Token waere nach dem Zurueckspielen wertlos, weil alle Adressen im
- * Miniserver ungueltig wuerden. Der Hinweis steht am Knopf. */
+ * Miniserver ungueltig wuerden. Der Hinweis steht am Knopf.
+ * 0.9.51: Kopf (_hinweis, _plugin, _fassung, _stand, bei Bedarf _warnung),
+ * Einstellungen und den Teil "profile" mit den eigenen Profilen baut das
+ * gemeinsame Sicherungsmodul (bm_sicherung_daten() -> sicherung_bauen()). Bis
+ * 0.9.50 standen die eigenen Profile im Kopfschluessel _profile. X-3: bestuende
+ * ein gespeicherter Wert das eigene Zurueckspielen nicht, sagt es _warnung -
+ * nur Namen, nie Werte; geliefert wird trotzdem, vollstaendig. */
 if ($bm_post && isset($_POST['konfig_export'])) {
-    /* X-3: der Aufbau steht seit dem Verbesserungsbau in bm_ausfuhr_feld() -
-     * dieselbe Ausfuhr beurteilt die Warnung am Knopf. */
-    $bm_ex = bm_ausfuhr_feld();
-    if (!is_array($bm_ex)) {
+    $bm_ex = bm_sicherung_daten();
+    $bm_js = is_array($bm_ex) ? sicherung_json($bm_ex) : '';
+    if ($bm_js === '') {
         $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_SICHERUNG_LESEN'), bm_e($bm_p['config']));
         $bm_tab = 'tab-settings';
     } else {
-        /* O10 (Durchgang 29.09.2026): Kopf mit "_" und die eigenen Profile.
-         * Bis 0.9.29 ging die Konfigurationsdatei roh hinaus. Eigene Profile
-         * liegen im Datenordner und ueberstehen kein Upgrade - eine Sicherung
-         * ohne sie liess sich auf einer frischen Anlage nicht zurueckspielen
-         * (die Zeilen verwiesen auf ein Profil, das es dort nicht gab).
-         * Schluessel mit "_" liest das Zurueckspielen nur als Kopf. */
-        /* X-3: bestuende ein gespeicherter Wert das eigene Zurueckspielen
-         * nicht, sagt es der Kopf _warnung - nur Namen, nie Werte. Die
-         * Sicherung wird trotzdem vollstaendig geliefert (wie EVCC,
-         * Entscheidung 13); das Zurueckspielen liest "_"-Schluessel nie. */
-        $bm_x3 = bm_rueckspiel_altwerte($bm_ex);
-        if ($bm_x3) {
-            $bm_ex = array('_hinweis' => $bm_ex['_hinweis'],
-                           '_warnung' => sprintf(bm_t('EINST.SICHERUNG_WARNUNG_KOPF'),
-                                                 implode(', ', $bm_x3))) + $bm_ex;
-        }
         while (ob_get_level() > 0) { @ob_end_clean(); }
         header('Content-Type: application/json; charset=utf-8');
         header('Content-Disposition: attachment; filename="batteriebms_'
              . date('Ymd_His') . '.json"');
-        echo json_encode($bm_ex, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        echo $bm_js;
         exit;
     }
 }
 
-/* ---------------- Konfiguration zurueckspielen (B19) ----------------
+/* ---------------- Einstellungen zurueckspielen (B19) ----------------
  *
- * Abgewiesen wird, was nicht passt - nie zurechtgebogen. Uebernommen wird die
- * Datei VOLLSTAENDIG, samt Token: nur dann stimmen die Adressen im Miniserver
- * hinterher wieder. */
+ * 0.9.51: den Eingang prueft das gemeinsame Sicherungsmodul (sicherung_eingang(),
+ * Entscheidung des Hausherrn 12.11.2026) - in jeder Linie gleich: zuerst der
+ * Haken zurueck_ok (ohne ihn wird nichts gelesen und nichts geaendert), dann
+ * is_uploaded_file() und die Groessengrenze des Moduls; erst danach wird die
+ * Datei gelesen. Lesen, pruefen und zurueckspielen macht das Modul
+ * (sicherung_zurueckspielen(), Beschreibung bm_sicherung_beschreibung()):
+ * Unbekanntes wird verworfen und mit Namen genannt, ein leerer Wert laesst den
+ * bisherigen stehen (auch das Aktionstoken, B05), eine Beanstandung aendert GAR
+ * NICHTS, und ein Schluessel, den eine fruehere Fassung nicht kannte, behaelt
+ * den geltenden Wert. Danach: zuerst die eigenen Profile in den Datenordner,
+ * dann die Konfiguration samt Zweitschrift (O10: eine Konfiguration, deren
+ * Profil fehlt, liesse ihre Zeile aus), dann MQTT und Befehlsbruecke wie beim
+ * Speichern, und die Meldung sagt, was mit dem Dienst geschah. */
 if ($bm_post && isset($_POST['konfig_import'])) {
     $bm_tab = 'tab-settings';
-    $bm_d = bm_datei_annehmen('konfig_datei', 262144);
-    if (isset($bm_d['fehler'])) {
-        $bm_fehler[] = $bm_d['fehler'];
+    list($bm_roh, $bm_ab) = sicherung_eingang(bm_sicherung_beschreibung(), $_POST, $_FILES, 'konfig_datei');
+    if ($bm_ab !== null) {
+        $bm_sm = sicherung_meldungen(bm_sicherung_beschreibung(), $bm_ab);
+        foreach ($bm_sm['fehler'] as $bm_x) { $bm_fehler[] = $bm_x; }
     } else {
-        $bm_neu = json_decode($bm_d['inhalt'], true);
-        if (!is_array($bm_neu) || !isset($bm_neu['geraete'])) {
-            $bm_fehler[] = bm_t('EINST.FEHLER_KONFIG_FORM');
-        } else {
-            /* X-3 (Verbesserungsbau 30.09.2026): die Beurteilung steht in
-             * bm_rueckspiel_pruefen() - EINE Quelle fuer das Zurueckspielen und
-             * die Warnung beim Sichern. Wortgleich aus diesem Handler gezogen:
-             * Kopf "_" abtrennen (O10), fremde Schluessel, jeder Wert (B01),
-             * eigene Profile (O10), Geraetezeilen und Ladezustandsfenster (C10).
-             * Eine halb gueltige Datei aendert weiter GAR NICHTS. */
-            $bm_rp = bm_rueckspiel_pruefen($bm_neu);
-            $bm_neu = $bm_rp['neu'];
-            $bm_zusammen = null;
-            $bm_mitprofile = $bm_rp['profile'];
-            if ($bm_rp['fremd']) {
-                $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_KONFIG_FREMD'),
-                    bm_e(implode(', ', array_slice($bm_rp['fremd'], 0, 8))));
-            } else {
-                $bm_bean = $bm_rp['bean'];
-                /* C4: die Liste darf keinen Speicher mit offenem Zwang von
-                 * seiner Nummer verdraengen. */
-                if (!$bm_bean) {
-                    $bm_versch = bm_zwang_verschoben($bm_neu['geraete'],
-                        array_merge(bm_profile(), $bm_mitprofile));
-                    if ($bm_versch !== '') {
-                        $bm_bean[] = sprintf(bm_t('EINST.FEHLER_ZWANG_OFFEN'), bm_e($bm_versch));
-                    }
+        $bm_b = bm_sicherung_beschreibung();
+        $bm_b['speichern'] = function ($neu, $jetzt, $r) use (&$bm_fehler, $bm_p) {
+            $prof = (isset($r['teile']['profile']) && is_array($r['teile']['profile'])) ? $r['teile']['profile'] : array();
+            if ($prof) {
+                $ordner = $bm_p['datadir'] . '/profile';
+                if (!is_dir($ordner)) {
+                    @mkdir($ordner, 0775, true);
                 }
-                if ($bm_bean) {
-                    /* Eine halb gueltige Datei aendert GAR NICHTS. */
-                    $bm_fehler[] = bm_t('EINST.FEHLER_KONFIG_WERTE');
-                    foreach ($bm_bean as $bm_b) {
-                        $bm_fehler[] = $bm_b;
-                    }
-                } else {
-                    /* Gruppe 31 (N12, E-E10): Schluessel, die eine Sicherung aus einer Vorfassung nicht kennt,
-                     * behalten den GELTENDEN Wert - sonst setzte eine Sicherung aus 0.9.37 endpunkt_ein auf 0
-                     * (Werkswert), und der Bestand verloere still seinen HTTP-Lesezweig. Stehen sie in der
-                     * Sicherung, gelten sie (auch die eingreifenden Haken - das Zurueckspielen stellt die
-                     * Anlage wieder her). */
-                    $bm_spaet = array_values(array_diff(bm_sicherung_spaete_schluessel(), array_keys($bm_neu)));
-                    if ($bm_spaet) {
-                        $bm_neu += array_intersect_key(bm_config(), array_flip($bm_spaet));
-                        $bm_meldungen[] = sprintf(bm_e(bm_t('EINST.SICH_SPAET_BEHALTEN')), bm_e(implode(', ', $bm_spaet)));
-                    }
-                    $bm_zusammen = array_merge(bm_vorgaben(), $bm_neu);
-                    /* Ein FEHLENDES Aktionstoken in der Sicherung heisst 'kein
-                     * Token gesichert' - es darf das bestehende nicht loeschen
-                     * (B05). Gemessen: bis 0.9.15 wurde es stumm durch ein
-                     * frisches ersetzt, und jede Adresse im Miniserver war
-                     * danach ungueltig, ohne eine Zeile im Protokoll. */
-                    if (!array_key_exists('aktionstoken', $bm_neu)
-                        || !is_string($bm_neu['aktionstoken'])
-                        || trim($bm_neu['aktionstoken']) === '') {
-                        /* Den BESTEHENDEN Stand hier eigens lesen: $bm_cfg wird
-                         * erst weiter unten zugewiesen (Ladeteil), und eine
-                         * nicht zugewiesene Variable wertet PHP lautlos als
-                         * leer aus - dann haette diese Wache gar nichts
-                         * getan. Beim ersten Anlauf ist mir genau das
-                         * passiert; gefunden hat es der Pruefstand. */
-                        $bm_bestand = bm_config();
-                        $bm_alt = bm_token_gueltig($bm_bestand['aktionstoken'])
-                            ? $bm_bestand['aktionstoken'] : '';
-                        $bm_zusammen['aktionstoken'] = $bm_alt;
-                        if ($bm_alt !== '') {
-                            $bm_meldungen[] = bm_t('EINST.KONFIG_TOKEN_BEHALTEN');
-                        }
+                foreach ($prof as $pk => $pr) {
+                    $pjs = json_encode($pr, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                    if (!is_string($pjs) || !bm_datei_schreiben($ordner . '/' . $pk . '.json', $pjs . "\n", 0644)) {
+                        $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_PROFIL_SCHREIBEN'), bm_e($ordner . '/' . $pk . '.json'));
+                        return false;
                     }
                 }
             }
-            /* O10: erst die Profile ablegen, dann die Konfiguration - eine
-             * Konfiguration, deren Profil fehlt, laesst ihre Zeile aus. */
-            if ($bm_zusammen !== null && $bm_mitprofile) {
-                $bm_pordner = $bm_p['datadir'] . '/profile';
-                if (!is_dir($bm_pordner)) {
-                    @mkdir($bm_pordner, 0775, true);
-                }
-                foreach ($bm_mitprofile as $bm_pk => $bm_pr) {
-                    $bm_pjs = json_encode($bm_pr, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-                    if (!is_string($bm_pjs)
-                        || !bm_datei_schreiben($bm_pordner . '/' . $bm_pk . '.json', $bm_pjs . "\n", 0644)) {
-                        $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_PROFIL_SCHREIBEN'),
-                            bm_e($bm_pordner . '/' . $bm_pk . '.json'));
-                        $bm_zusammen = null;
-                        break;
-                    }
-                }
-                if ($bm_zusammen !== null) {
-                    $bm_meldungen[] = sprintf(bm_t('EINST.KONFIG_PROFILE'), count($bm_mitprofile),
-                        bm_e(implode(', ', array_keys($bm_mitprofile))));
-                }
+            if (!bm_config_speichern($neu)) {
+                $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_SPEICHERN'), bm_e($bm_p['config']));
+                return false;
             }
-            if ($bm_zusammen === null) {
-                /* nichts tun - geaendert wird GAR NICHTS */
-            } else {
-                $bm_vorher = bm_config();
-                bm_mqtt_praefix_merken($bm_vorher, $bm_zusammen);
-                if (bm_config_speichern($bm_zusammen)) {
-                    $bm_meldungen[] = sprintf(bm_t('EINST.KONFIG_ZURUECK'),
-                        count((array) $bm_zusammen['geraete']));
-                    foreach (bm_mqtt_nachziehen($bm_vorher, $bm_zusammen) as $bm_mz) {
-                        $bm_meldungen[] = $bm_mz;
-                    }
-                    bm_mqtt_voll_senden();
-                    if (!empty($bm_zusammen['mqtt_ein'])) {
-                        bm_abo_datei((string) $bm_zusammen['mqtt_topic'], true);
-                    }
-                    // Gruppe 31: die Befehlsbruecke dem zurueckgespielten Stand nachfuehren.
-                    list($bm_bok, $bm_bfe) = bm_bruecke_meldungen(bm_bruecke_schalten($bm_zusammen));
-                    $bm_meldungen = array_merge($bm_meldungen, $bm_bok);
-                    $bm_fehler = array_merge($bm_fehler, $bm_bfe);
-                } else {
-                    $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_SPEICHERN'), $bm_p['config']);
-                }
+            return true;
+        };
+        $bm_b['zweitschrift'] = function () { $p = bm_paths(); return array($p['config'], $p['sicherung']); };
+        $bm_b['nachziehen'] = function ($neu, $jetzt, $r) use (&$bm_fehler) {
+            $h = array(sprintf(bm_e(bm_t('EINST.SICH_SPEICHER')), count((array) $neu['geraete'])));
+            foreach (bm_mqtt_nachziehen(is_array($jetzt) ? $jetzt : bm_vorgaben(), $neu) as $x) { $h[] = $x; }
+            bm_mqtt_voll_senden();
+            if (!empty($neu['mqtt_ein'])) {
+                bm_abo_datei((string) $neu['mqtt_topic'], true);
             }
-        }
+            // Gruppe 31: die Befehlsbruecke dem zurueckgespielten Stand nachfuehren.
+            list($bok, $bfe) = bm_bruecke_meldungen(bm_bruecke_schalten($neu));
+            foreach ($bok as $x) { $h[] = $x; }
+            foreach ($bfe as $x) { $bm_fehler[] = $x; }
+            foreach (bm_sicherung_dienst_saetze($r) as $x) { $h[] = $x; }
+            return $h;
+        };
+        $bm_b['log'] = function ($z) { bm_log($z); };
+        $bm_r = sicherung_zurueckspielen($bm_b, $bm_roh);
+        $bm_sm = sicherung_meldungen($bm_b, $bm_r);
+        foreach ($bm_sm['fehler'] as $bm_x) { $bm_fehler[] = $bm_x; }
+        foreach ($bm_sm['hinweise'] as $bm_x) { $bm_meldungen[] = $bm_x; }
     }
 }
 
@@ -1681,6 +1607,7 @@ if ($bm_x3) { ?>
   <label for="konfig_datei"><?= bm_e(bm_t('EINST.L_KONFIG_DATEI')) ?></label>
   <input data-role="none" type="file" id="konfig_datei" name="konfig_datei" accept=".json,application/json">
 </div>
+<?= sicherung_haken_zeile(bm_sicherung_beschreibung()) ?>
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="konfig_import" value="1"><?= bm_e(bm_t('EINST.K_KONFIG_IMPORT')) ?></button>
 </div>

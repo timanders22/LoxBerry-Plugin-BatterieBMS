@@ -1,5 +1,6 @@
 <?php
 require_once __DIR__ . '/sprachausgabe.php';     // Stamm, fuer die Vorgaben der Sprachansagen schon beim ersten Lesen der Konfiguration
+require_once __DIR__ . '/sicherung.php';         // gemeinsames Sicherungsmodul (seit 0.9.51)
 /**
  * Batterie-Heimspeicher (BMS) - gemeinsame Bibliothek
  *
@@ -2147,110 +2148,176 @@ function bm_geraetezeilen_pruefen($liste, array $zusatzprofile = array())
     return $bean;
 }
 
-/**
- * X-3 (Verbesserungsbau 30.09.2026): die Beurteilung einer zurueckgespielten
- * Sicherung - EINE Quelle fuer das Zurueckspielen (Handler konfig_import)
- * und die Warnung beim Sichern (bm_rueckspiel_altwerte()). Wortgleich aus
- * dem Handler herausgezogen: Kopf "_" abtrennen (O10), fremde Schluessel,
- * jeder Wert (B01), die mitgesicherten eigenen Profile (O10), die
- * Geraetezeilen (C10) und das Ladezustandsfenster (C10). Der offene Zwang
- * (C4) bleibt im Handler: er ist ein Zustand der Anlage, kein Wert der
- * Datei.
+/* ==================================================================
+ * Einstellungen sichern und zurueckspielen - gemeinsames Sicherungsmodul
+ * (seit 0.9.51, Modul webfrontend/html/sicherung.php, Werkzeuge/gemeinsam/
+ * sicherung.php im Arbeitsordner; Entscheidungen des Hausherrn 12.11.2026,
+ * fuer diese Linie 14.11.2026).
  *
- * Rueckgabe: neu (ohne Kopf), kopf, fremd (Schluessel), bean (Beanstandungen,
- * fuer HTML maskiert), namen (betroffene Schluessel, ohne Werte), profile
- * (die mitgesicherten eigenen Profile).
- */
-function bm_rueckspiel_pruefen(array $neu)
+ * Pruefen und Zurueckspielen macht das Modul. Bis 0.9.50 stand hier eine
+ * eigene Pruefung (bm_rueckspiel_pruefen()): ein unbekannter Schluessel oben
+ * oder in den Sprachansagen wies die ganze Datei ab, ein unbekanntes Feld einer
+ * Geraetezeile ging still in die Konfiguration, ein leerer Wert wies die Datei
+ * ab, eine Datei ohne Kennzeichen oder mit dem eines anderen Plugins wurde
+ * gelesen wie eine eigene, und ein fehlender Schluessel fiel still auf die
+ * Werkseinstellung (array_merge(bm_vorgaben(), ...)). Gemessen 14.11.2026 an
+ * 0.9.50 mit Werkzeuge/sicherung_pruefstand.py --profil ist.
+ *
+ * Seither: der Kopf traegt _plugin = 'LoxBerry-Plugin-BatterieBMS' (Name des
+ * Repositorys; bis 0.9.50 gab es kein Kennzeichen) und _fassung; eine Datei
+ * mit fremdem Kennzeichen wird abgewiesen, eine ohne nur dann gelesen, wenn
+ * sie eine aeltere eigene Sicherung ist (bm_sicherung_alt_erkennen(), ab
+ * 0.9.30). Unbekannte Schluessel oben, in den Sprachansagen und in den
+ * Geraetezeilen werden verworfen und mit Namen gemeldet; ein leerer Wert
+ * ueberschreibt keinen bestehenden; was eine fruehere Fassung nicht kannte
+ * (bm_sicherung_spaete_schluessel()), behaelt den geltenden Wert und wird
+ * genannt; die uebrigen Schluessel hat jede Fassung mit Kopf geschrieben -
+ * fehlen sie, wird die Datei mit ihren Namen abgewiesen.
+ *
+ * Die eigenen Profile (Datenordner, profile/<schluessel>.json) stehen seit
+ * 0.9.51 als Teil "profile" in der Datei (Entscheidung des Hausherrn
+ * 14.11.2026: aus dem Kopf heraus). 0.9.30 bis 0.9.50 schrieben sie in den
+ * Kopfschluessel _profile; das Modul benennt ihn vor allen Regeln um
+ * ('umbenennen'). Jedes Profil geht durch bm_profil_pruefen() wie beim
+ * Hochladen eines Profils.
+ *
+ * Wie bisher: jeder Wert geht durch bm_wert_pruefen() (dieselbe Beurteilung
+ * wie im Formular), jede Geraetezeile durch bm_geraetezeilen_pruefen() (die
+ * Profile der Datei zaehlen als vorhanden), das Ladezustandsfenster und die
+ * Kreuzpruefung der Schreiber-Wache; eine Datei mit Sprechtoken wird
+ * abgewiesen; eine halb gueltige Datei aendert nichts; ein Speicher mit
+ * offenem Zwang darf nicht von seiner Nummer verdraengt werden
+ * ('vorbedingung'). Die Vermerke ansage_token_herkunft und ansage_aus_datei
+ * kommen nie aus einer Datei.
+ * ================================================================== */
+
+/** Die Beschreibung der Sicherung fuer das gemeinsame Modul (sicherung_bauen(), sicherung_lesen()). */
+function bm_sicherung_beschreibung()
 {
-    $neu = bm_ansage_rueck($neu);     // 0.9.40: Token und Vermerk bleiben die geltenden
-    $kopf = array();
-    foreach (array_keys($neu) as $k) {
-        if (is_string($k) && strncmp($k, '_', 1) === 0) {
-            $kopf[$k] = $neu[$k];
-            unset($neu[$k]);
-        }
+    $p = bm_paths();
+    $tts = array_merge(array_keys(ansage_werk_block()), ansage_geheim());
+    $schluessel = array(
+        'tts' => sicherung_block($tts, array('ziele' => sicherung_liste(array('art', 'wo', 'laut', 'sprache', 'ein'))
+                                                        + array('fehlt' => 'behalten')))
+                 + array(
+                     'sichern' => 'ansage_sicherung_bereinigen',
+                     'pruefen' => function ($w, $k = '', $neu = null, $roh = null) {
+                         /* Eine Sicherung dieses Plugins traegt nie ein Sprechtoken (seit 0.9.40) - traegt die
+                          * Datei eines, wird sie abgewiesen. Gemessen am Block der DATEI, denn Regel 3 des Moduls
+                          * setzt ein leeres Feld vorher auf den geltenden Wert. */
+                         if (ansage_sicherung_mangel($roh) || bm_ansage_wert('tts', ansage_sicherung_bereinigen($w)) !== true) {
+                             return bm_e('tts: ' . bm_t('ANSAGEPLUGIN.M_FEHL'));
+                         }
+                         return '';
+                     },
+                     'wandeln' => function ($w) {
+                         $g = '';
+                         return ansage_wert_pruefen(ansage_sicherung_bereinigen($w), $g, bm_ansage_modi());
+                     }),
+        'ansage_regeln' => sicherung_block(array_keys(ansage_regeln_vorgaben())),
+        'ansage_haken' => sicherung_block(array('alarm', 'ausgleich')),
+        /* Die Felder einer Geraetezeile, wie das Formular sie schreibt (index.php, Handler "Einstellungen
+         * speichern"): gemessen 14.11.2026 an allen Fassungen 0.9.13 bis 0.9.51 - name, profil, ip, geraetedatei,
+         * schreiben, vorzeichen, die Zahlenfelder port, unit, baud, max_laden, max_entladen, nennkapaz; tuerme seit
+         * 0.9.48. Ohne Zuordnungsschluessel: die Nummer eines Speichers ist seine Stelle in der Liste, ein Eintrag
+         * der Datei hat am Ziel kein sicher bestimmbares Gegenstueck (Regeln/05, Regel 3). */
+        'geraete' => sicherung_liste(array('name', 'profil', 'ip', 'geraetedatei', 'schreiben', 'vorzeichen', 'port',
+                                           'unit', 'baud', 'max_laden', 'max_entladen', 'nennkapaz', 'tuerme')),
+    );
+    foreach (bm_sicherung_spaete_schluessel() as $s) {
+        if (!isset($schluessel[$s])) { $schluessel[$s] = array(); }
+        $schluessel[$s]['fehlt'] = 'behalten';
     }
-    $aus = array('neu' => $neu, 'kopf' => $kopf, 'fremd' => array(), 'bean' => array(),
-                 'namen' => array(), 'profile' => array());
-    /* Fremde Schluessel sind eine BEANSTANDUNG, kein stiller Zusatz. */
-    $fremd = array_values(array_diff(array_keys($neu), array_keys(bm_vorgaben())));
-    if ($fremd) {
-        $aus['fremd'] = $fremd;
-        foreach ($fremd as $k) {
-            $aus['namen'][] = (string) $k;
-        }
-        return $aus;
-    }
-    /* JEDER Wert wird beurteilt, nicht nur der Schluessel (B01) - dieselbe
-     * Beurteilung wie im Formular, aus derselben Funktion. */
-    foreach ($neu as $k => $v) {
-        $grund = bm_wert_pruefen((string) $k, $v);
-        if ($grund !== '') {
-            $aus['bean'][] = bm_e((string) $k) . ': ' . bm_e($grund);
-            $aus['namen'][] = (string) $k;
-        }
-    }
-    /* O10: die mitgesicherten eigenen Profile - dieselbe Beurteilung wie
-     * beim Hochladen eines Profils. */
-    if (isset($kopf['_profile'])) {
-        if (!is_array($kopf['_profile'])) {
-            $aus['bean'][] = bm_e('_profile: ' . bm_t('EINST.FEHLER_KONFIG_FORM'));
-            $aus['namen'][] = '_profile';
-        } else {
-            foreach ($kopf['_profile'] as $pk => $pr) {
-                $pk = (string) $pk;
-                if (!preg_match('/^[a-z0-9_]{1,60}$/', $pk)) {
-                    $aus['bean'][] = bm_e('_profile: ' . bm_t('EINST.FEHLER_PROFIL_NAME'));
-                    $aus['namen'][] = '_profile';
-                    continue;
-                }
-                foreach (bm_profil_pruefen($pr) as $pb) {
-                    $aus['bean'][] = bm_e('_profile/' . $pk) . ': ' . $pb;
-                    $aus['namen'][] = '_profile/' . $pk;
-                }
-                $aus['profile'][$pk] = $pr;
-            }
-        }
-    }
-    foreach (bm_geraetezeilen_pruefen(isset($neu['geraete']) ? $neu['geraete'] : array(),
-                                      $aus['profile']) as $grund) {
-        $aus['bean'][] = bm_e($grund);
-        $aus['namen'][] = 'geraete';
-    }
-    /* C10: das Ladezustandsfenster wie im Formular. */
-    $smin = array_key_exists('soc_min', $neu) ? $neu['soc_min'] : bm_vorgaben()['soc_min'];
-    $smax = array_key_exists('soc_max', $neu) ? $neu['soc_max'] : bm_vorgaben()['soc_max'];
-    if (is_numeric($smin) && is_numeric($smax) && (int) $smin >= (int) $smax) {
-        $aus['bean'][] = bm_e(bm_t('EINST.FEHLER_SOC_FENSTER'));
-        $aus['namen'][] = 'soc_min';
-        $aus['namen'][] = 'soc_max';
-    }
-    /* Energie-1 C1: "Fremde Schreiber abweisen" ohne Fuehrung und ohne einen
-     * erlaubten Schreiber - dieselbe Kreuzpruefung wie im Formular. */
-    if (bm_wache_kreuzmangel($neu)) {
-        $aus['bean'][] = bm_e(bm_t('EINST.FEHLER_WACHE_LEER'));
-        $aus['namen'][] = 'wache_sperren_ein';
-        $aus['namen'][] = 'wache_erlaubt';
-    }
-    $aus['namen'] = array_values(array_unique($aus['namen']));
-    return $aus;
+    return array(
+        'kennzeichen' => 'LoxBerry-Plugin-BatterieBMS',
+        /* Der Kopftext wie bis 0.9.50: bm_sicherung_alt_erkennen() erkennt aeltere Sicherungen an seinem Anfang. */
+        'hinweis' => bm_t('EINST.SICHERUNG_KOPF'),
+        /* _fassung aus der Plugin-Datenbank bzw. plugin.cfg - keine fuenfte Stelle neben den vier, die
+         * Werkzeuge/fassung_setzen.py pflegt. */
+        'home' => (string) $p['home'], 'ordner' => (string) $p['plugin'],
+        'plugin_cfg' => dirname(dirname(__DIR__)) . '/plugin.cfg',
+        'vorgaben' => bm_vorgaben(),
+        'schluessel' => $schluessel,
+        'umbenennen' => array('_profile' => 'profile'),
+        'nie_aus_datei' => array('ansage_token_herkunft', 'ansage_aus_datei'),
+        'teile' => array('profile' => 'bm_sicherung_profile_lesen'),
+        'pruefen' => function ($k, $w) {
+            $g = bm_wert_pruefen((string) $k, $w);
+            return $g === '' ? '' : bm_e((string) $k) . ': ' . bm_e($g);
+        },
+        'quer' => 'bm_sicherung_quer',
+        'uebersetzer' => 'bm_sicherung_alt_erkennen',
+        'vorbereiten' => 'bm_sicherung_vorbereiten',
+        'vorbedingung' => 'bm_sicherung_vorbedingung',
+        'jetzt' => 'bm_ansage_cfg',
+        't' => 'bm_t',
+        'e' => 'bm_e',
+    );
 }
 
 /**
- * X-3: die Ausfuhr der Einstellungen, wie der Knopf "Einstellungen sichern"
- * sie liefert - Kopf (_hinweis, _stand, _profile mit den eigenen Profilen,
- * O10) und die Konfigurationsdatei, wie sie auf der Platte steht. null, wenn
- * die Datei nicht lesbar oder kein JSON ist.
+ * Eine Sicherung dieser Linie aus der Zeit vor dem Kennzeichen _plugin (0.9.30
+ * bis 0.9.50) traegt den lesbaren Kopf _hinweis aus EINST.SICHERUNG_KOPF und
+ * den Kopfschluessel _profile - beides schreibt nur der Sichern-Knopf dieser
+ * Linie, je nach Sprache der Oberflaeche deutsch oder englisch. Gemessen
+ * 14.11.2026 an allen Fassungen 0.9.13 bis 0.9.50 (Ordner und Archive): ab
+ * 0.9.30 beginnt der Kopf mit "Sicherung des Plugins Batterie-Heimspeicher
+ * (BMS)." bzw. "Backup of the plugin Home battery storage (BMS).", und
+ * _profile steht daneben. 0.9.13 bis 0.9.29 gaben die Konfiguration roh ohne
+ * Kopf aus; eine solche Datei ist nicht sicher von einer fremden zu
+ * unterscheiden und wird abgewiesen (Entscheidung des Hausherrn 12.11.2026).
+ * Rueckgabe: die Daten oder null.
  */
-function bm_ausfuhr_feld()
+function bm_sicherung_alt_erkennen($d)
 {
-    $p = bm_paths();
-    $roh = @file_get_contents($p['config']);
-    $ex = ($roh === false) ? null : json_decode((string) $roh, true);
-    if (!is_array($ex)) {
+    if (!is_array($d) || !isset($d['_hinweis']) || !is_string($d['_hinweis']) || !array_key_exists('_profile', $d)) {
         return null;
     }
+    foreach (array('Sicherung des Plugins Batterie-Heimspeicher (BMS).', 'Backup of the plugin Home battery storage (BMS).') as $a) {
+        if (strpos($d['_hinweis'], $a) === 0) {
+            return $d;
+        }
+    }
+    return null;
+}
+
+/**
+ * Der Teil "profile": die eigenen Profile der Datei (Schluessel => Profil). Sie
+ * gehen nicht in die Konfiguration, sondern als profile/<schluessel>.json in den
+ * Datenordner (beim Speichern, vor der Konfiguration). Dieselbe Beurteilung wie
+ * beim Hochladen eines Profils (bm_profil_pruefen()); der Schluessel aus
+ * Kleinbuchstaben, Ziffern und Unterstrich, 1 bis 60 Zeichen. Rueckgabe fuer das
+ * Sicherungsmodul: array(Profile|null, Beanstandungen[], Hinweise[]).
+ */
+function bm_sicherung_profile_lesen($w, $jetzt = null)
+{
+    if (!is_array($w)) {
+        return array(null, array(bm_e('profile: ' . bm_t('EINST.FEHLER_KONFIG_FORM'))));
+    }
+    $bean = array();
+    $aus = array();
+    foreach ($w as $pk => $pr) {
+        $pk = (string) $pk;
+        if (preg_match('/^[a-z0-9_]{1,60}\z/', $pk) !== 1) {
+            $bean[] = bm_e('profile: ' . bm_t('EINST.FEHLER_PROFIL_NAME'));
+            continue;
+        }
+        foreach (bm_profil_pruefen($pr) as $pb) {
+            $bean[] = bm_e('profile/' . $pk) . ': ' . $pb;
+        }
+        $aus[$pk] = $pr;
+    }
+    if ($bean) {
+        return array(null, $bean);
+    }
+    $hinweise = $aus ? array(sprintf(bm_e(bm_t('EINST.KONFIG_PROFILE')), count($aus), bm_e(implode(', ', array_keys($aus)))))
+                     : array();
+    return array($aus, array(), $hinweise);
+}
+
+/** Die eigenen Profile, wie "Einstellungen sichern" sie in den Teil "profile" legt (ohne herkunft und datei). */
+function bm_sicherung_profile_jetzt()
+{
     $eigene = array();
     foreach (bm_profile() as $pk => $pr) {
         if (!empty($pr['datei'])) {
@@ -2258,36 +2325,136 @@ function bm_ausfuhr_feld()
             $eigene[$pk] = $pr;
         }
     }
-    return array('_hinweis' => bm_t('EINST.SICHERUNG_KOPF'),
-                 '_stand' => date('c'),
-                 '_profile' => (object) $eigene) + bm_ansage_fuer_sicherung($ex);     // 0.9.40: nie ein Sprechtoken
+    return $eigene;
 }
 
 /**
- * X-3: welche gespeicherten Werte wuerde das eigene Zurueckspielen
- * abweisen? Die Ausfuhr geht einmal durch json_encode/json_decode - genau so
- * kommt sie beim Zurueckspielen an - und dann durch bm_rueckspiel_pruefen().
- * Rueckgabe: Liste der Schluessel (nur Namen, nie Werte), leer = besteht.
+ * Was nur im ZUSAMMENSPIEL falsch sein kann (wie bis 0.9.50). Rueckgabe fuer das
+ * Sicherungsmodul: Liste von array(Name, Text), Texte fertig maskiert.
+ *  - die Geraetezeilen wie im Formular (C10); ein Profil, das die Datei selbst
+ *    mitbringt, zaehlt als vorhanden (O10);
+ *  - das Ladezustandsfenster (C10);
+ *  - Energie-1 C1: Fremde Schreiber abweisen ohne Fuehrung und ohne erlaubten
+ *    Schreiber.
  */
-function bm_rueckspiel_altwerte($ex = null)
+function bm_sicherung_quer($neu, $r, $daten)
 {
-    if ($ex === null) {
-        $ex = bm_ausfuhr_feld();
+    $aus = array();
+    $bean = array();
+    foreach ($r['beanstandet'] as $x) { $bean[] = $x['name']; }
+    if (!in_array('geraete', $bean, true) && !in_array('profile', $bean, true)) {
+        $zus = (isset($r['teile']['profile']) && is_array($r['teile']['profile'])) ? $r['teile']['profile'] : array();
+        foreach (bm_geraetezeilen_pruefen($neu['geraete'], $zus) as $g) {
+            $aus[] = array('geraete', bm_e($g));
+        }
     }
-    if (!is_array($ex)) {
+    if (!in_array('soc_min', $bean, true) && !in_array('soc_max', $bean, true)
+        && is_numeric($neu['soc_min']) && is_numeric($neu['soc_max']) && (int) $neu['soc_min'] >= (int) $neu['soc_max']) {
+        $aus[] = array('soc_min', bm_e(bm_t('EINST.FEHLER_SOC_FENSTER')));
+    }
+    if (!array_intersect(array('wache_sperren_ein', 'wache_erlaubt', 'fuehrung'), $bean) && bm_wache_kreuzmangel($neu)) {
+        $aus[] = array('wache_sperren_ein', bm_e(bm_t('EINST.FEHLER_WACHE_LEER')));
+    }
+    return $aus;
+}
+
+/**
+ * Vor dem Speichern (Rueckruf 'vorbereiten' des Moduls):
+ *  - der Block tts wird wie bis 0.9.50 vervollstaendigt, und die geltenden
+ *    Sprechtoken bleiben (die Sicherung traegt keine); kam er nicht aus der
+ *    Datei, steht dort schon der geltende;
+ *  - M3: wechselt das Themenpraefix, wird das verlassene in mqtt_praefix_alt
+ *    gemerkt (wie beim Speichern im Formular);
+ *  - Regel dieser Linie seit 0.9.40 (bis 0.9.50 in bm_ansage_sicherung_vor()):
+ *    ansage_aus_datei = 1 - nach dem Zurueckspielen gilt die Sprachausgabe der
+ *    Sicherung, eine liegengebliebene ansage.json aus der Probe vom 01.11. wird
+ *    nicht mehr uebernommen. Den Herkunftsvermerk ansage_token_herkunft haelt
+ *    das Modul ('nie_aus_datei').
+ */
+function bm_sicherung_vorbereiten($neu, $jetzt, $r)
+{
+    if (!in_array('tts', $r['fehlt_behalten'], true) && isset($neu['tts']) && is_array($neu['tts'])) {
+        $jt = (is_array($jetzt) && isset($jetzt['tts']) && is_array($jetzt['tts'])) ? $jetzt['tts'] : array();
+        list($tv) = ansage_vervollstaendigen($neu['tts'], 'aus');
+        $neu['tts'] = ansage_sicherung_tokens_behalten($tv, $jt);
+    }
+    if (is_array($jetzt) && isset($jetzt['mqtt_topic'])) {
+        bm_mqtt_praefix_merken($jetzt, $neu);
+    }
+    $neu['ansage_aus_datei'] = 1;
+    return $neu;
+}
+
+/**
+ * C4 (wie bis 0.9.50 im Handler): die Liste darf keinen Speicher mit offenem
+ * Zwang von seiner Nummer verdraengen. Ein Zustand der Anlage, kein Wert der
+ * Datei - deshalb 'vorbedingung' des Moduls: nicht erfuellt heisst nicht
+ * gespeichert, und die Meldung nennt diesen Satz.
+ */
+function bm_sicherung_vorbedingung($neu, $jetzt, $r)
+{
+    $zus = (isset($r['teile']['profile']) && is_array($r['teile']['profile'])) ? $r['teile']['profile'] : array();
+    $v = bm_zwang_verschoben($neu['geraete'], array_merge(bm_profile(), $zus));
+    return $v !== '' ? array(sprintf(bm_e(bm_t('EINST.FEHLER_ZWANG_OFFEN')), bm_e($v))) : array();
+}
+
+/**
+ * Nach dem Zurueckspielen: was mit dem Dienst geschah (Regeln/05). Er wird
+ * nicht neu gestartet. Gemessen am Quelltext (bin/bms_dienst.php): die Schleife
+ * liest bm_config() bei jedem Umlauf neu, bm_durchlauf() die Geraeteliste bei
+ * jedem Abruf - die Einstellungen gelten also ohne Neustart. Die Profile haelt
+ * ein laufender Dienst aber in bm_profile() fest (static); neue oder geaenderte
+ * eigene Profile kennt er erst nach einem Neustart. Rueckgabe: Saetze, fertig
+ * maskiert.
+ */
+function bm_sicherung_dienst_saetze($r)
+{
+    if (bm_dienst_pid() <= 0) {
+        return array(bm_e(bm_t('EINST.SICH_DIENST_AUS')));
+    }
+    $h = array(bm_e(bm_t('EINST.SICH_DIENST_TAKT')));
+    if (!empty($r['teile']['profile'])) {
+        $h[] = bm_e(bm_t('EINST.SICH_DIENST_PROFILE'));
+    }
+    return $h;
+}
+
+/**
+ * Die Sicherung als Feld: lesbarer Kopf (_hinweis, _plugin, _fassung, _stand,
+ * bei Bedarf _warnung), alle Einstellungen der geltenden Konfiguration und die
+ * eigenen Profile im Teil "profile". Gebaut vom gemeinsamen Sicherungsmodul
+ * (sicherung_bauen()); nie ein Sprechtoken, nie die Vermerke. X-3: wuerde das
+ * eigene Zurueckspielen die Datei abweisen, nennt _warnung die Namen, nie Werte;
+ * geliefert wird sie trotzdem. null, wenn die Konfigurationsdatei nicht als
+ * JSON-Objekt lesbar ist (wie bis 0.9.50: dann keine Sicherung aus Vorgaben).
+ */
+function bm_sicherung_daten()
+{
+    $p = bm_paths();
+    $roh = @file_get_contents($p['config']);
+    if ($roh === false || !is_array(json_decode((string) $roh, true))) {
+        return null;
+    }
+    $eigene = bm_sicherung_profile_jetzt();
+    return sicherung_bauen(bm_sicherung_beschreibung(), bm_config(),
+                           array('profile' => $eigene ? $eigene : new stdClass()));
+}
+
+/**
+ * X-3: welche gespeicherten Werte wuerde das eigene Zurueckspielen abweisen?
+ * Seit 0.9.51 dieselbe Pruefung wie beim Zurueckspielen ueber das
+ * Sicherungsmodul (sicherung_selbstpruefung()) an genau der Datei, die
+ * "Einstellungen sichern" liefert. Rueckgabe: Liste der NAMEN, nie der Werte;
+ * leer = die Sicherung liesse sich zurueckspielen.
+ */
+function bm_rueckspiel_altwerte()
+{
+    $d = bm_sicherung_daten();
+    if (!is_array($d)) {
         return array();
     }
-    $js = json_encode($ex, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    $rund = is_string($js) ? json_decode($js, true) : null;
-    if (!is_array($rund)) {
-        return array('json');
-    }
-    $rp = bm_rueckspiel_pruefen($rund);
-    $namen = $rp['namen'];
-    if (!isset($rp['neu']['geraete']) && !in_array('geraete', $namen, true)) {
-        $namen[] = 'geraete';     // wie im Handler: ohne geraete FEHLER_KONFIG_FORM
-    }
-    return $namen;
+    unset($d['_warnung']);
+    return sicherung_selbstpruefung(bm_sicherung_beschreibung(), $d, bm_ansage_cfg());
 }
 
 function bm_geraete()
@@ -6148,48 +6315,6 @@ function bm_ansage_wert($k, $w)
     return false;
 }
 
-/** Fuer die Sicherung: nie ein Sprechtoken, nie der Herkunftsvermerk. Ausgabeart, Ziele, Regeln und Haken reisen mit. */
-function bm_ansage_fuer_sicherung(array $c)
-{
-    unset($c['ansage_token_herkunft'], $c['ansage_aus_datei']);
-    if (isset($c['tts']) && is_array($c['tts'])) { $c['tts'] = ansage_sicherung_bereinigen($c['tts']); }
-    return $c;
-}
-
-/**
- * Vor dem Zurueckspielen. Eine Datei mit Sprechtoken wird abgewiesen (der Block wird unbrauchbar gemacht, die Wertpruefung nennt ihn). Die geltenden Token und der Vermerk bleiben.
- * Fehlt ein Schluessel (Sicherung einer aelteren Fassung), gilt der geltende Wert: Ein bewusstes AUS geht beim Zurueckspielen nicht verloren.
- */
-function bm_ansage_sicherung_vor($roh)
-{
-    $d = json_decode((string) $roh, true);
-    if (!is_array($d)) { return $roh; }
-    $inhalt = false;
-    foreach (array_keys($d) as $k) { if ((string) $k !== '' && ((string) $k)[0] !== '_') { $inhalt = true; } }
-    if (!$inhalt) { return $roh; }
-    $j = bm_ansage_cfg();
-    unset($d['ansage_token_herkunft'], $d['ansage_aus_datei']);
-    $jt = isset($j['tts']) && is_array($j['tts']) ? $j['tts'] : array();
-    if (array_key_exists('tts', $d)) {
-        $g = '';
-        $p = is_array($d['tts']) ? ansage_wert_pruefen($d['tts'], $g, bm_ansage_modi()) : null;
-        if (ansage_sicherung_mangel($d['tts']) || $p === null) {
-            $d['tts'] = 'ABGEWIESEN';
-        } else {
-            list($tv) = ansage_vervollstaendigen($p, 'aus');
-            $d['tts'] = ansage_sicherung_tokens_behalten($tv, $jt);
-        }
-    } else {
-        $d['tts'] = bm_tts($j);
-    }
-    foreach (array_diff(bm_ansage_schluessel(), array('tts', 'ansage_token_herkunft', 'ansage_aus_datei')) as $k) {
-        if (!array_key_exists($k, $d) && array_key_exists($k, $j)) { $d[$k] = $j[$k]; }
-    }
-    $d['ansage_token_herkunft'] = isset($j['ansage_token_herkunft']) && is_array($j['ansage_token_herkunft']) ? $j['ansage_token_herkunft'] : array();
-    $d['ansage_aus_datei'] = 1;
-    return (string) json_encode($d);
-}
-
 /**
  * Die Hauptkonfiguration. Liegt eine ansage.json aus einer Probe vom 01.11., wird sie EINMAL uebernommen (Vermerk ansage_aus_datei) und bleibt liegen.
  */
@@ -6509,13 +6634,6 @@ function bm_ansage_senden($jetzt = null)
     flock($fh, LOCK_UN);
     fclose($fh);
     return $erg;
-}
-
-/** Die Sicherung vor dem Zurueckspielen (Feld statt Rohtext). */
-function bm_ansage_rueck(array $neu)
-{
-    $j = json_decode((string) bm_ansage_sicherung_vor((string) json_encode($neu)), true);
-    return is_array($j) ? $j : $neu;
 }
 
 /**
@@ -7715,20 +7833,34 @@ function bm_datei_ende($pfad, $bytes = 262144)
 }
 
 /* ==================================================================
- * Gruppe 31 (N12, E-E10): Schluessel, die eine Sicherung aus einer
- * Vorfassung nicht kennt. Fehlen sie beim Zurueckspielen, gilt der
- * GELTENDE Wert, nicht der Werkswert - eine Sicherung aus 0.9.37 setzte
- * sonst endpunkt_ein auf 0, und der Bestand verloere still seinen
- * HTTP-Lesezweig. Stehen sie in der Sicherung, gelten sie (das Zurueckspielen
- * soll die Anlage wiederherstellen - auch die eingreifenden Haken).
+ * Schluessel, die eine Sicherung aus einer Vorfassung nicht kennt (Regeln/05
+ * Punkt 6; Entscheidung des Hausherrn 14.11.2026 fuer diese Linie). Fehlen sie
+ * beim Zurueckspielen, gilt der GELTENDE Wert, nicht der Werkswert, und die
+ * Meldung nennt sie ('fehlt' => 'behalten' im Sicherungsmodul). Stehen sie in
+ * der Sicherung, gelten sie (das Zurueckspielen soll die Anlage
+ * wiederherstellen - auch die eingreifenden Haken).
+ *
+ * Gemessen 14.11.2026 an bm_vorgaben() aller Fassungen mit Kopf (0.9.30 bis
+ * 0.9.51): 0.9.30 kennt 22 Schluessel, 0.9.51 kennt 47. Hinzugekommen sind die
+ * Schreiber-Wache (0.9.33), die Schalter und Werte der Gruppe 31 (0.9.38) und
+ * die Sprachansagen (0.9.40); deren Vermerke ansage_token_herkunft und
+ * ansage_aus_datei kommen nie aus einer Datei. Dazu mqtt_praefix_alt: in 0.9.30
+ * neu und in einer Konfiguration aus 0.9.29, die seither niemand gespeichert
+ * hat, nicht vorhanden; der Vermerk wirkt nicht auf den Betrieb. Bis 0.9.50
+ * fielen die Schreiber-Wache und mqtt_praefix_alt still auf die
+ * Werkseinstellung, und die Sprachansagen behielten still den geltenden Wert.
+ * Die uebrigen 21 Schluessel hat jede Fassung mit Kopf geschrieben ('pflicht').
  * ================================================================== */
 function bm_sicherung_spaete_schluessel()
 {
-    return array('befehle_mqtt_ein', 'endpunkt_ein',
+    return array('mqtt_praefix_alt',
+        'wache_ein', 'wache_fenster_min', 'wache_lb_melden', 'wache_sperren_ein', 'wache_erlaubt', 'fuehrung',
+        'befehle_mqtt_ein', 'endpunkt_ein',
         'spotladen_ein', 'spotladen_geraet', 'spotladen_grenze_ct', 'spotladen_rang', 'spotladen_ziel',
         'spotladen_watt',
         'ausgleich_ein', 'ausgleich_start_mv', 'ausgleich_rueck_mv', 'ausgleich_watt', 'ausgleich_max_min',
-        'ausgleich_abstand_tage');
+        'ausgleich_abstand_tage',
+        'tts', 'ansage_regeln', 'ansage_haken');
 }
 
 /** Die Haken der 0.9.38 (0/1). */
