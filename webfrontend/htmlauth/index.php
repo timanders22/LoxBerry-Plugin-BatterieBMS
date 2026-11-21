@@ -1010,7 +1010,8 @@ if (is_file($bm_p['log'])) {
 $bm_rahmen = class_exists('LBWeb', false);
 if ($bm_rahmen) {
     // Gruppe 31 (N10): der Hilfelink zeigt auf die Wikiseite des Plugins, nicht auf die Wiki-Startseite.
-    LBWeb::lbheader('Batterie-Heimspeicher (BMS)', 'https://wiki.loxberry.de/plugins/batteriebms/start', 'help.html');
+    require_once __DIR__ . '/fassung.php';   // Fassung im Titel: gemeinsames Stueck fassung.php (21.11.2026)
+    LBWeb::lbheader(plugin_kopftitel('Batterie-Heimspeicher (BMS)', __DIR__), 'https://wiki.loxberry.de/plugins/batteriebms/start', 'help.html');
 }
 
 ?>
