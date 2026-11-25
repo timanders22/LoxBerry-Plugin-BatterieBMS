@@ -126,7 +126,9 @@ $bm_selftest = isset($_GET['selftest']) && is_string($_GET['selftest'])
  * Wort "Array" - und ?token=Array oeffnete den Endpunkt (gemessen). Ein
  * untaugliches Token behandelt der Endpunkt wie keines: 403, eine Zeile im
  * Protokoll; ersetzt wird es nur in der angemeldeten Oberflaeche. */
-$bm_soll = bm_token_gueltig($bm_cfg['aktionstoken']) ? $bm_cfg['aktionstoken'] : '';
+/* 0.9.57 (Entscheidung des Hausherrn 24.11.2026, Punkt 2 und 11): ein formwidriges, nicht leeres Token gilt weiter
+ * (gemeldet ueber bm_lade_beanstandungen() in der Oberflaeche); Liste und Zahl gelten weiter wie keines (C9). */
+$bm_soll = (is_string($bm_cfg['aktionstoken']) && trim($bm_cfg['aktionstoken']) !== '') ? $bm_cfg['aktionstoken'] : '';
 $bm_ist = (isset($_GET['token']) && is_string($_GET['token']))
         ? (string) $_GET['token'] : '';
 if ($bm_soll === '') {

@@ -1,6 +1,8 @@
 <?php
 require_once __DIR__ . '/sprachausgabe.php';     // Stamm, fuer die Vorgaben der Sprachansagen schon beim ersten Lesen der Konfiguration
+require_once __DIR__ . '/meldung.php';     // Statusmeldungen an SignalBot (seit 0.9.57)
 require_once __DIR__ . '/sicherung.php';         // gemeinsames Sicherungsmodul (seit 0.9.51)
+require_once __DIR__ . '/haus_bereiche.php';     // gemeinsame Bereiche unter haus/ (seit 0.9.57, Regeln/07)
 /**
  * Batterie-Heimspeicher (BMS) - gemeinsame Bibliothek
  *
@@ -1935,6 +1937,73 @@ function bm_json_leere_objekte($a, $o)
     return $a;
 }
 
+/* ==================================================================
+ * Lade-Beanstandungen (0.9.57; Regeln/05, Sicherungsmodul 1.3.0)
+ *
+ * bm_config() bringt eine von Hand verbogene Datei fuer den Betrieb in ihre Grenzen (EVCC, Spotpreis-Laden,
+ * Ausgleichsladen, Haken 0/1). Das bleibt - aber jede solche Ersetzung wird gemeldet (Reiter Test rot, Seite gelb,
+ * einmal ins Protokoll) und nie in die Datei zurueckgeschrieben; ebenso jeder gespeicherte Wert, den die Pruefung der
+ * Sicherung (bm_wert_pruefen(), bm_sicherung_quer()) abweisen wuerde.
+ * ================================================================== */
+
+/** Die rohen Werte von batteriebms.json (ohne jede Normierung), null = keine lesbare Datei. Schreibt nichts. */
+function bm_lade_roh()
+{
+    $p = bm_paths();
+    clearstatcache(true, $p['config']);
+    $roh = is_file($p['config']) ? trim((string) @file_get_contents($p['config'])) : '';
+    $d = ($roh !== '' && $roh[0] === '{') ? json_decode($roh, true) : null;
+    return is_array($d) ? $d : null;
+}
+
+/** Die Beschreibung fuer die Lade-Beanstandungen; geheim sind die Sprechtoken (aktionstoken und der Teil profile
+ *  immer). $maskiert = false fuer Vergleich und Schreiben; Seite und Reiter Test geben die Saetze unmaskiert aus und
+ *  nehmen deshalb die maskierte Form. */
+function bm_lade_b($maskiert = true)
+{
+    $b = bm_sicherung_beschreibung();
+    $b['geheim'] = array_map(function ($n) { return 'tts.' . $n; }, ansage_geheim());
+    $b['e'] = $maskiert ? 'bm_e' : function ($s) { return (string) $s; };
+    return $b;
+}
+
+/** Die Lade-Beanstandungen: rohe Dateiwerte gegen den verwendeten Stand ($cfg, sonst bm_config()). */
+function bm_lade_beanstandungen($cfg = null, $maskiert = true)
+{
+    $d = bm_lade_roh();
+    if ($d === null) { return array(); }
+    return sicherung_lade_beanstandungen(bm_lade_b($maskiert), $d, is_array($cfg) ? $cfg : bm_config());
+}
+
+/** Vor dem Schreiben: jedes beanstandete Feld, das $cfg nicht geaendert hat, bekommt seinen Dateiwert zurueck. */
+function bm_lade_behalten(array $cfg)
+{
+    $d = bm_lade_roh();
+    if ($d === null) { return $cfg; }
+    $v = bm_config();
+    list($cfg, ) = sicherung_lade_behalten($cfg, $d, $v, sicherung_lade_beanstandungen(bm_lade_b(false), $d, $v));
+    return $cfg;
+}
+
+/** Dienst (bin/bms_dienst.php, beim Start): fehlende Einstellungen eintragen, dann die Lade-Beanstandungen einmal
+ *  melden. Rueckgabe wie bm_config_vervollstaendigen(). */
+function bm_dienst_pflege()
+{
+    $r = bm_config_vervollstaendigen();
+    bm_lade_melden(bm_lade_beanstandungen());     // Kennung D
+    return $r;
+}
+
+/** Einmal je Aenderung ins Protokoll (nur Namen und Gruende, nie Werte). */
+function bm_lade_melden(array $beanst)
+{
+    $d = bm_paths()['datadir'];
+    if ($d === '' || (!is_dir($d) && !@mkdir($d, 0775, true))) { return; }
+    if (sicherung_lade_melden_faellig($beanst, $d . '/lade_beanstandungen.merk')) {
+        bm_log(sicherung_lade_protokollzeile($beanst));
+    }
+}
+
 /**
  * Fehlende Schluessel EINMAL mit ihrer Vorgabe in die Datei schreiben (seit 0.9.47).
  *
@@ -1967,7 +2036,13 @@ function bm_config_vervollstaendigen()
     }
     $p = bm_paths();
     clearstatcache(true, $p['config']);
-    if (!is_file($p['config']) || !bm_konfig_taugt((string) @file_get_contents($p['config']))) {
+    /* 0.9.57 (Lade-Beanstandungen, Regeln/05): vervollstaendigt wird jede Datei mit nicht leerem Token, auch einem
+     * formwidrigen (es bleibt stehen und wird gemeldet); bis 0.9.56 nur eine, die bm_konfig_taugt() bestand - bei einem
+     * formwidrigen Token fehlten neue Schluessel fuer immer. Die Zweitschrift zieht bm_config_speichern() weiter nur mit
+     * formgueltigem Token nach. */
+    $bm_vd = is_file($p['config']) ? json_decode(trim((string) @file_get_contents($p['config'])), true) : null;
+    if (!is_array($bm_vd) || !isset($bm_vd['aktionstoken']) || !is_string($bm_vd['aktionstoken'])
+        || $bm_vd['aktionstoken'] === '') {
         return array();
     }
     if (!is_dir($p['datadir'])) {
@@ -1985,7 +2060,9 @@ function bm_config_vervollstaendigen()
     // zweiter Blick unter der Sperre - die Oberflaeche kann eben gespeichert haben
     clearstatcache(true, $p['config']);
     $roh = is_file($p['config']) ? (string) @file_get_contents($p['config']) : '';
-    if (bm_konfig_taugt($roh)) {
+    $bm_vd = json_decode(trim($roh), true);     // 0.9.57: dasselbe Merkmal wie oben (nicht leeres Token)
+    if (is_array($bm_vd) && isset($bm_vd['aktionstoken']) && is_string($bm_vd['aktionstoken'])
+        && $bm_vd['aktionstoken'] !== '') {
         $datei = json_decode(trim($roh), true);
         // Ein leeres Objekt der Datei ({}) bliebe nach json_decode(..., true) ein leeres Feld und kaeme beim
         // Schreiben als [] zurueck - der Rohwert wird erhalten, bevor ergaenzt wird (11.11.2026).
@@ -2014,9 +2091,14 @@ function bm_config_vervollstaendigen()
     return $fehlend;
 }
 
-function bm_config_speichern($cfg)
+function bm_config_speichern($cfg, $lade_behalten = true)
 {
     $p = bm_paths();
+    /* 0.9.57 (Lade-Beanstandungen, Regeln/05, Entscheidung des Hausherrn "Dateiwert behalten"): ein beim Laden
+     * beanstandetes Feld, das der neue Stand nicht geaendert hat, behaelt seinen gespeicherten Wert - jeder Speicherweg
+     * liest bm_config(), aendert einen Teil und schreibt hier ganz zurueck. Nicht beim Zurueckspielen und nicht beim
+     * Knopf "Angezeigte Werte uebernehmen" ($lade_behalten = false). */
+    if ($lade_behalten && is_array($cfg)) { $cfg = bm_lade_behalten($cfg); }
     // Die Konfiguration enthaelt das Aktionstoken - deshalb 0600, nicht 0644.
     if (!bm_json_schreiben($p['config'], $cfg, 0600)) {
         return false;
@@ -2216,6 +2298,7 @@ function bm_sicherung_beschreibung()
                      }),
         'ansage_regeln' => sicherung_block(array_keys(ansage_regeln_vorgaben())),
         'ansage_haken' => sicherung_block(array('alarm', 'ausgleich')),
+        'meldung'      => meld_sicherung_knoten(bm_ansage_anlaesse(), bm_meld_k()),     // 0.9.57
         /* Die Felder einer Geraetezeile, wie das Formular sie schreibt (index.php, Handler "Einstellungen
          * speichern"): gemessen 14.11.2026 an allen Fassungen 0.9.13 bis 0.9.51 - name, profil, ip, geraetedatei,
          * schreiben, vorzeichen, die Zahlenfelder port, unit, baud, max_laden, max_entladen, nennkapaz; tuerme seit
@@ -2243,6 +2326,10 @@ function bm_sicherung_beschreibung()
         'teile' => array('profile' => 'bm_sicherung_profile_lesen'),
         'pruefen' => function ($k, $w) {
             $g = bm_wert_pruefen((string) $k, $w);
+            /* 0.9.57: kein Praefix auf einem gemeinsamen Bereich unter haus/ (Regeln/07) - wie im Formular. */
+            if ($g === '' && $k === 'mqtt_topic' && hb_bereich($w) !== '') {
+                $g = sprintf(bm_t('HAUSBEREICH.SICH_W'), hb_bereich($w));
+            }
             return $g === '' ? '' : bm_e((string) $k) . ': ' . bm_e($g);
         },
         'quer' => 'bm_sicherung_quer',
@@ -2626,17 +2713,19 @@ function bm_token()
     if (bm_nur_lesen()) {
         return '';
     }
-    /* Steht ein Token da, das nicht taugt (Liste, zu kurz, fremde Zeichen),
-     * wird es ersetzt - und das gesagt, einmal, damit niemand den Fehler in
-     * Loxone sucht. Eine Liste war nie ein benutzbares Token; ein zu kurzes
-     * konnte nur von Hand oder aus einer Sicherung vor 0.9.30 kommen. */
-    if (is_array($cfg['aktionstoken'])
-        || (is_string($cfg['aktionstoken']) && trim($cfg['aktionstoken']) !== '')) {
-        bm_log_gebremst('token_untauglich', 'Das gespeicherte Aktionstoken taugt nicht (erlaubt '
-            . 'sind 1 bis 64 Zeichen (Buchstaben, Ziffern, Punkt, Bindestrich, Unterstrich)). Es wird ein neues erzeugt - alle Adressen '
-            . 'im Miniserver muessen im Reiter "Einbindung in Loxone" neu uebernommen werden.', 3600);
-        $cfg['aktionstoken'] = '';
+    /* 0.9.57 (Lade-Beanstandungen, Regeln/05; Entscheidungen des Hausherrn 24.11.2026 Nr. 1 und 2): ein vorhandenes
+     * Aktionstoken wird nie ersetzt oder geleert - ein formwidriges bleibt stehen und wird gemeldet
+     * (bm_lade_beanstandungen()); der Endpunkt nimmt es an (Punkt 2 und 11). Ein neues entsteht nur, wenn der
+     * Schluessel in der Datei fehlt (Neuinstallation "{}", unlesbare Datei); das Formularmerkmal haengt am eigenen
+     * Merkwort (bm_formtoken()), nicht am Token. Bis 0.9.56 wuerfelte jedes Oeffnen der Oberflaeche ein neues und
+     * schrieb die ganze, von bm_config() begrenzte Konfiguration zurueck. */
+    $bm_tr = bm_lade_roh();
+    if (is_array($bm_tr) && array_key_exists('aktionstoken', $bm_tr)) {
+        return is_string($cfg['aktionstoken']) ? $cfg['aktionstoken'] : '';
     }
+    /* 0.9.57 (Entscheidung des Hausherrn 24.11.2026, Punkt 9): hier stand bis 0.9.56 der Zweig "Token taugt nicht ->
+     * ersetzen". Seit dem Rueckgabeweg oben (Schluessel in der Datei: nie ersetzen) wurde er nie mehr erreicht und ist
+     * entfernt. */
     /* Fehlt das Token, obwohl eine Konfiguration BESTEHT, ist das kein
      * Neuanfang, sondern ein Verlust - meist aus einer unvollstaendigen
      * zurueckgespielten Sicherung (B05). Gemessen: alle Adressen im
@@ -2666,7 +2755,8 @@ function bm_token()
     }
     if (@flock($fp, LOCK_EX)) {
         $cfg = bm_config();                      // zweiter Blick unter der Sperre
-        if (!bm_token_gueltig($cfg['aktionstoken'])) {
+        /* 0.9.57 (Punkt 2 und 11): ein inzwischen geschriebenes formwidriges, nicht leeres Token bleibt. */
+        if (!is_string($cfg['aktionstoken']) || trim($cfg['aktionstoken']) === '') {
             $cfg['aktionstoken'] = bm_token_erzeugen();
             if (!bm_config_speichern($cfg)) {
                 bm_log('Das neu erzeugte Aktionstoken liess sich NICHT speichern. '
@@ -6282,19 +6372,20 @@ function bm_restwerte(array $e, array $g)
 /** Die Schluessel der Sprachansagen in der Hauptkonfiguration. */
 function bm_ansage_schluessel()
 {
-    return array('tts', 'ansage_regeln', 'ansage_haken', 'ansage_token_herkunft', 'ansage_aus_datei');
+    return array('tts', 'ansage_regeln', 'ansage_haken', 'meldung', 'ansage_token_herkunft', 'ansage_aus_datei');
 }
 
 /** Die Vorgaben: nie gesetzt = ab Werk EIN. Ein gespeicherter Block bleibt, auch 'aus'. */
 function bm_ansage_vorgaben()
 {
-    return array('tts' => ansage_werk_block(), 'ansage_regeln' => ansage_regeln_vorgaben(), 'ansage_haken' => array('alarm' => 1, 'ausgleich' => 1), 'ansage_token_herkunft' => array(), 'ansage_aus_datei' => 0);
+    return array('tts' => ansage_werk_block(), 'ansage_regeln' => ansage_regeln_vorgaben(), 'ansage_haken' => array('alarm' => 1, 'ausgleich' => 1), 'meldung' => meld_vorgaben(bm_meld_haken_vorgabe(), bm_meld_haken_vorgabe()), 'ansage_token_herkunft' => array(), 'ansage_aus_datei' => 0);
 }
 
 /** Wertpruefung fuer die Sprachansagen: null = nicht meine Schluessel, sonst tauglich ja/nein. */
 function bm_ansage_wert($k, $w)
 {
     if (!in_array((string) $k, bm_ansage_schluessel(), true)) { return null; }
+    if ((string) $k === 'meldung') { return !meld_block_pruefen($w, bm_ansage_anlaesse()); }     // 0.9.57
     $g = '';
     switch ((string) $k) {
         case 'tts':
@@ -6376,7 +6467,16 @@ function bm_ansage_anlaesse()
 }
 
 /** Ist der Haken dieses Anlasses gesetzt? Fehlt er, gilt die Vorgabe der Linie. */
+/** 0.9.57: Will die Ansage ODER die Meldung an SignalBot diesen Anlass? So legt die Erkennung ihn fuer beide Wege hin;
+ * bm_ansage_senden() trennt sie wieder (bm_meld_nur_ansage()). */
 function bm_ansage_anlass_an($a, $cfg = null)
+{
+    if ($cfg === null) { $cfg = bm_ansage_cfg(); }
+    return bm_ansage_anlass_sprache($a, $cfg) || meld_anlass_an(bm_meld_block($cfg), (string) $a);
+}
+
+/** Ist der Haken dieses Anlasses fuer die ANSAGE gesetzt? (bis 0.9.57 hiess das bm_ansage_anlass_an()) */
+function bm_ansage_anlass_sprache($a, $cfg = null)
 {
     if ($cfg === null) { $cfg = bm_ansage_cfg(); }
     $h = (isset($cfg['ansage_haken']) && is_array($cfg['ansage_haken'])) ? $cfg['ansage_haken'] : array();
@@ -6409,12 +6509,14 @@ function bm_ansage_post(array $post)
     $h = array();
     $neu = ansage_formular_lesen($post, bm_tts($cfg), $m, $b, array('modi' => bm_ansage_modi(), 'ziele' => true, 'token_vor_ort' => true, 'aus_gewinnt' => true), $k, $h);
     list($r, $hk) = ansage_regeln_formular($post, bm_ansage_regeln($cfg), bm_ansage_anlaesse(), $m, $b, $k);
+    // 0.9.57: der Block 'Meldungen an SignalBot' (eine Beanstandung haelt das ganze Formular an, wie die Regeln)
+    $meld = meld_formular_lesen($post, array_key_exists('meldung', $cfg) ? $cfg['meldung'] : null, bm_ansage_anlaesse(), $m, $b, bm_meld_k(), bm_meld_haken_vorgabe());
     if ($m) {
         $t = array();
         foreach ($m as $x) { $t[] = $x['text']; }
         $e = array('_bean' => array_values($b));
         foreach ($post as $n => $w) {
-            if (strncmp((string) $n, 'tts_', 4) === 0 || strncmp((string) $n, 'ansage_', 7) === 0) {
+            if (strncmp((string) $n, 'tts_', 4) === 0 || strncmp((string) $n, 'ansage_', 7) === 0 || strncmp((string) $n, 'meld_', 5) === 0) {
                 if ((string) $n !== 'tts_alexa_token' && (string) $n !== 'tts_google_token') { $e[$n] = $w; }
             }
         }
@@ -6426,6 +6528,7 @@ function bm_ansage_post(array $post)
     $cfg['ansage_token_herkunft'] = ansage_token_herkunft_formular($post, isset($cfg['ansage_token_herkunft']) ? $cfg['ansage_token_herkunft'] : array());
     $cfg['ansage_regeln'] = $r;
     $cfg['ansage_haken'] = $hk;
+    $cfg['meldung'] = $meld;
     $t = array();
     foreach ($h as $x) { $t[] = $x['text']; }
     return array(bm_ansage_cfg_schreiben($cfg), array(), $t);
@@ -6449,8 +6552,14 @@ function bm_ansage_form_html($felder)
     $o[] = '<form action="index.php" method="post" autocomplete="off">' . $felder;
     $o[] = ansage_formular_html(bm_tts($cfg), $h + array('modi' => bm_ansage_modi(), 'ziele' => true, 'ziele_post' => isset($ein['tts_ziel_art']) ? $ein : null), $k);
     $o[] = ansage_regeln_html(bm_ansage_regeln($cfg), isset($cfg['ansage_haken']) && is_array($cfg['ansage_haken']) ? $cfg['ansage_haken'] : array('alarm' => 1, 'ausgleich' => 1), bm_ansage_anlaesse(), $h + array('token_vor_ort' => true), $k);
+    // 0.9.57: Statusmeldungen an SignalBot (gemeinsames Modul meldung.php), im selben Formular
+    $o[] = '<h3>' . $e(bm_t('SIGNALMELDUNG.TITEL')) . '</h3>';
+    $o[] = meld_formular_html(bm_meld_block($cfg), bm_ansage_anlaesse(), $h, bm_meld_k());
+    list(, $meld_lage) = meld_pruefzeile(bm_meld_block($cfg), bm_meld_bean($cfg), bm_meld_k());
+    $o[] = '<div class="sm-hilfe">' . $e(bm_t('SIGNALMELDUNG.F_TEST') . ' ' . $meld_lage) . '</div>';
     $o[] = '<div class="sm-knopfreihe"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="ansage_speichern" value="1">' . $e(bm_t('ANSAGEPLUGIN.K_SPEICHERN')) . '</button>';
     $o[] = '<button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="ansage_test" value="1">' . $e(bm_t('ANSAGEPLUGIN.K_TEST')) . '</button></div>';
+    $o[] = '<div class="sm-knopfreihe"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="meld_test" value="1">' . $e(bm_t('SIGNALMELDUNG.K_TEST')) . '</button></div>';     // 0.9.57
     $o[] = '</form>';
     $o[] = bm_ansage_lage_html($cfg);
     return implode("\n", $o) . "\n";
@@ -6620,6 +6729,8 @@ function bm_ansage_senden($jetzt = null)
         $conf = bm_ansage_cfg();
         bm_ansage_token_pflegen($conf);
         $conf = bm_ansage_cfg();
+        bm_meld_senden($frisch, $conf);     // 0.9.57: dieselben Anlaesse an SignalBot (eigene Haken)
+        $frisch = bm_meld_nur_ansage($frisch, $conf);     // die Ansage nur mit ihrem eigenen Haken
         $a = ansage_regel_sprechen($frisch, bm_tts($conf), bm_ansage_regeln($conf), bm_ansage_k());
         $erg = $a['regel'] !== '' ? $a['regel'] : 'gesprochen';
         if ($a['r'] !== null) {
@@ -9126,4 +9237,112 @@ function bm_vorlage_ausgang_mqtt()
     $m = bm_mqtt_zustand();
     $port = !empty($m['udpport']) ? (int) $m['udpport'] : 11884;
     return array('VQ_BMS_MQTT.xml', bb_vorlage($liste, bm_hostname(), $port));
+}
+
+/**
+ * 0.9.57 (Entscheidung des Hausherrn 23.11.2026 "Nur gemeinsame Bereiche", Regeln/07): Zeile im Reiter Test -
+ * faellt das gespeicherte Themen-Praefix auf einen gemeinsamen Bereich unter haus/? Speichern und Zurueckspielen
+ * weisen ein solches Praefix ab; ein schon gespeichertes bleibt in Betrieb und ist hier rot, grau bei ausgeschaltetem MQTT.
+ * Liste und Pruefung aus dem gemeinsamen Modul haus_bereiche.php. Rueckgabe array(stand, html).
+ */
+function bm_pruef_praefix_haus($cfg)
+{
+    $p = (bm_mqtt_thema_saeubern((string) $cfg['mqtt_topic']) !== '' ? bm_mqtt_thema_saeubern((string) $cfg['mqtt_topic']) : 'batteriebms');
+    $b = hb_bereich($p);
+    if ($b !== '') {
+        if (!(!empty($cfg['mqtt_ein']))) {
+            return array(-1, sprintf(bm_t('HAUSBEREICH.A_AUS'), bm_e($p), bm_e($b)));
+        }
+        return array(0, sprintf(bm_t('HAUSBEREICH.A_NEIN'), bm_e($p), bm_e($b)));
+    }
+    return array(1, sprintf(bm_t('HAUSBEREICH.A_JA'), bm_e($p)));
+}
+
+/**
+ * 0.9.57: einmal je Aenderung eine Protokollzeile, solange das Praefix auf einen gemeinsamen Bereich faellt; der
+ * Versand bleibt, wie er ist. Gemerkt in praefix_haus_gemeldet.txt im Datenordner. Rueckgabe der Bereich oder ''.
+ */
+function bm_praefix_haus_melden($cfg, $merk = null)
+{
+    $p = (bm_mqtt_thema_saeubern((string) $cfg['mqtt_topic']) !== '' ? bm_mqtt_thema_saeubern((string) $cfg['mqtt_topic']) : 'batteriebms');
+    if ($merk === null) {
+        $merk = bm_paths()['datadir'] . '/praefix_haus_gemeldet.txt';
+    }
+    $b = hb_melden_faellig($p, $merk);
+    if ($b !== '') {
+        bm_log(hb_logtext($p, $b));
+    }
+    return $b;
+}
+
+if (!function_exists('bm_meld_block')) {
+
+/* ---------------- Statusmeldungen an SignalBot (0.9.57, gemeinsames Modul meldung.php) ----------------
+ *
+ * Auftrag des Hausherrn 23.11.2026, Entscheidungen 23.11.2026 ("haus/meldung (Empfehlung)", "Wie empfohlen"): dieselben
+ * Anlaesse wie die Ansage, eigener Haken je Anlass, ab Werk aus; Sperre, Bremse und Versand im Modul. Die Erkennung legt
+ * einen Anlass hin, wenn Ansage ODER Meldung ihn will (bm_ansage_anlass_an()); der Sender trennt die Wege wieder.
+ */
+
+/** Die ab-Werk-Haken der Ansage dieser Linie: so stehen auch die Haken der Meldung, solange der Block nie gespeichert ist. */
+function bm_meld_haken_vorgabe()
+{
+    return array('alarm' => 1, 'ausgleich' => 1);
+}
+
+/** Der wirksame Block 'meldung' fuer den Betrieb (ungueltig gespeichert gilt als aus und wird im Formular genannt). */
+function bm_meld_block($cfg = null)
+{
+    if ($cfg === null) { $cfg = bm_ansage_cfg(); }
+    list($b) = meld_block(array_key_exists('meldung', $cfg) ? $cfg['meldung'] : null, bm_ansage_anlaesse(), bm_meld_haken_vorgabe());
+    return $b;
+}
+
+/** Die Beanstandungen eines gespeicherten Blocks (leer = gueltig). */
+function bm_meld_bean($cfg = null)
+{
+    if ($cfg === null) { $cfg = bm_ansage_cfg(); }
+    list(, $f) = meld_block(array_key_exists('meldung', $cfg) ? $cfg['meldung'] : null, bm_ansage_anlaesse(), bm_meld_haken_vorgabe());
+    return $f;
+}
+
+/** Der Kontext des Moduls: Datenordner (data/plugins/<ordner>, daraus der Absender) und Texte - wie bei der Ansage. */
+function bm_meld_k()
+{
+    return bm_ansage_k();
+}
+
+/** Fuer die Ansage nur Eintraege, deren Ansage-Haken gesetzt ist; ein Eintrag ohne bekannten Anlass bleibt wie bisher. */
+function bm_meld_nur_ansage(array $l, $cfg = null)
+{
+    if ($cfg === null) { $cfg = bm_ansage_cfg(); }
+    $anl = bm_ansage_anlaesse();
+    $aus = array();
+    foreach ($l as $e) {
+        if (is_array($e) && array_key_exists(meld_anlass_von($e), $anl) && !bm_ansage_anlass_sprache(meld_anlass_von($e), $cfg)) { continue; }
+        $aus[] = $e;
+    }
+    return $aus;
+}
+
+/** Die Eintraege an SignalBot melden. Protokoll: eine Zeile, wenn gesendet oder gescheitert (nie der Text). */
+function bm_meld_senden(array $l, $cfg = null)
+{
+    if ($cfg === null) { $cfg = bm_ansage_cfg(); }
+    $b = bm_meld_block($cfg);
+    if (empty($b['ein']) || !$l) { return null; }
+    $a = meld_regel_senden($l, $b, bm_meld_k());
+    if ($a['regel'] === '' || in_array($a['regel'], array('BREMSE', 'STAND', 'ORDNER'), true)) {
+        bm_log(meld_regel_kurz($a));
+    }
+    return $a;
+}
+
+/** Der Knopf "Testmeldung senden": array(angenommen, Satz). Geht an Haken, Sperre und Bremse vorbei. */
+function bm_meld_test()
+{
+    $r = meld_testmeldung(bm_meld_k());
+    bm_log('Testmeldung an SignalBot: ' . ($r[0] ? 'angenommen' : 'nicht angenommen'));
+    return $r;
+}
 }

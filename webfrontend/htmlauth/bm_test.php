@@ -265,6 +265,9 @@ function bm_pruefungen()
      * Entscheidung. Dasselbe Muster steht ein paar Zeilen weiter unten bei
      * der Erweiterung sockets. */
     $mqttEin = !empty($cfg['mqtt_ein']);
+    // 0.9.57: faellt das Themen-Praefix auf einen gemeinsamen Bereich unter haus/ (Regeln/07)?
+    $bm_hb = bm_pruef_praefix_haus($cfg);
+    $zeilen[] = bm_pruefzeile($bm_hb[0], bm_t('HAUSBEREICH.F_TEST'), $bm_hb[1]);
     $zeilen[] = bm_pruefzeile($mqttEin ? 1 : -1, bm_t('TEST.F_MQTT_EIN'),
         bm_t($mqttEin ? 'TEST.A_MQTT_EIN_JA' : 'TEST.A_MQTT_EIN_NEIN'));
 
@@ -613,6 +616,12 @@ function bm_pruefungen()
 
     // Gruppe 31 (0.9.38): Temperaturschutz, Strompreis, Spotpreis-Laden, Ausgleichsladen, Bruecke, Lesezweig.
     $zeilen = array_merge($zeilen, bm_pruefungen_g31($cfg, $werte));
+    /* 0.9.57: Lade-Beanstandungen (Regeln/05, Sicherungsmodul 1.3.0) - rot, solange ein gespeicherter Wert beim Laden
+     * nicht so gilt, wie er gespeichert ist. Die Saetze kommen fertig maskiert, die Texte des Moduls maskiert bm_e(). */
+    $bm_lb = bm_lade_b(true);
+    $bm_la = bm_lade_beanstandungen($cfg, true);
+    $zeilen[] = bm_pruefzeile($bm_la ? 0 : 1, bm_e(sicherung_t('K_LADE_FRAGE', $bm_lb)),
+        $bm_la ? implode(' ', sicherung_lade_saetze($bm_lb, $bm_la)) : bm_e(sicherung_t('K_LADE_KEINE', $bm_lb)));
 
     return $zeilen;
 }

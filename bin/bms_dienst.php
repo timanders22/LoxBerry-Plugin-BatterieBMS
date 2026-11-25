@@ -1685,6 +1685,7 @@ function bm_durchlauf(&$letzteZellen, array &$ausfall = array())
         // Gruppe 31: die Ausfaelle dieses Durchlaufs reisen nur zum Senden mit, nicht ins Abbild.
         $bm_mq = $abbild;
         $bm_mq['ausfall'] = $bm_ausfall_jetzt;
+        bm_praefix_haus_melden($cfg);   // 0.9.57: Praefix im gemeinsamen Bereich? melden, nicht anhalten
         bm_veroeffentlichen($bm_mq, (string) $cfg['mqtt_topic']);
     }
     return $abbild;
@@ -3946,5 +3947,5 @@ if (function_exists('pcntl_signal')) {
 /* 0.9.47 (Regeln/05): fehlende Schluessel beim Dienststart einmal mit ihrer
  * Vorgabe in die Datei schreiben - vor dem ersten bm_config() der Schleife.
  * Bis 0.9.46 ergaenzte die Linie sie nur im Speicher. */
-bm_config_vervollstaendigen();
+bm_dienst_pflege();     // 0.9.57: vervollstaendigen und Lade-Beanstandungen einmal melden (Regeln/05)
 exit(bm_dienst_schleife(in_array('--einmal', $bm_argv, true)));

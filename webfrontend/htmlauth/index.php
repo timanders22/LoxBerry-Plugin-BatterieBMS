@@ -263,7 +263,7 @@ if ($bm_post && isset($_POST['konfig_import'])) {
                     }
                 }
             }
-            if (!bm_config_speichern($neu)) {
+            if (!bm_config_speichern($neu, false)) {     // 0.9.57: Werte einer Sicherung sind ausdruecklich (Regeln/05)
                 $bm_fehler[] = sprintf(bm_t('EINST.FEHLER_SPEICHERN'), bm_e($bm_p['config']));
                 return false;
             }
@@ -781,6 +781,15 @@ if ($bm_post && isset($_POST['save_mqtt'])) {
         // Entscheidung 16: gesagt wird es, gespeichert wurde es schon bisher nicht.
         $bm_fehler[] = bm_t('EINST.FEHLER_NICHTS_GESPEICHERT');
         $bm_eingaben = bm_eingaben_sammeln('mqtt', $_POST, $bm_mark);   // X-2
+    } elseif (hb_bereich($bm_mtopic) !== '' && $bm_mtopic !== (string) bm_config()['mqtt_topic']) {   // nur NEUE Eingaben: ein schon gespeichertes Praefix sperrt das Speichern
+        // des Reiters nicht (Regeln/07; Bauart Einspeisebremse 0.9.25)
+        /* 0.9.57 (Entscheidung des Hausherrn 23.11.2026 "Nur gemeinsame Bereiche", Regeln/07): kein Praefix auf einem
+         * gemeinsamen Bereich unter haus/ - nur hier und beim Zurueckspielen, nicht in der Pruefung beim Lesen der
+         * Konfiguration: ein schon gespeichertes bleibt in Betrieb, der Reiter Test meldet es. */
+        $bm_fehler[] = sprintf(bm_t('HAUSBEREICH.FEHLER'), $bm_mtopic, hb_bereich($bm_mtopic));
+        $bm_mark[] = 'mqtt_topic';
+        $bm_fehler[] = bm_t('EINST.FEHLER_NICHTS_GESPEICHERT');
+        $bm_eingaben = bm_eingaben_sammeln('mqtt', $_POST, $bm_mark);   // X-2
     } else {
         $bm_mcfg['mqtt_topic'] = $bm_mtopic;
     }
@@ -845,6 +854,12 @@ if ($bm_post && isset($_POST['endpunkt'])) {
 /* ---------------- Gruppe 31 (E2): Zwang am Geraet geprueft - Sollwert verwerfen ----------------
  * Nur mit Bestaetigungshaken (Regeln/04). Das Plugin schreibt dabei NICHTS an den Speicher. */
 /* 0.9.40: Sprachansagen, eigenes Formular. Die Testansage spricht immer. */
+/* 0.9.57: Testmeldung an SignalBot (Knopf unter den Sprachansagen) - wie die Testansage darunter. */
+if ($bm_post && isset($_POST['meld_test'])) {
+    list($bm_at, $bm_ag) = bm_meld_test();
+    if ($bm_at) { $bm_meldungen[] = bm_e(bm_t('SIGNALMELDUNG.T_OK')); } else { $bm_fehler[] = bm_e($bm_ag); }
+    $bm_tab = 'tab-settings';
+}
 if ($bm_post && isset($_POST['ansage_test'])) {
     list($bm_at, $bm_ag) = bm_ansage_test();
     if ($bm_at) { $bm_meldungen[] = bm_e(bm_t('ANSAGEPLUGIN.M_TEST_OK')); } else { $bm_fehler[] = bm_e(bm_t('ANSAGEPLUGIN.M_TEST_FEHL') . ' ' . $bm_ag); }
@@ -950,6 +965,30 @@ if ($bm_post && isset($_POST['selbsttest'])) {
  * Die Herunterladeknoepfe enden vorher mit exit und kommen hier nicht an.
  * Laesst sich die Einmalmeldung nicht ablegen, wird wie bisher direkt
  * gezeichnet - lieber ein doppelter POST als eine verschluckte Meldung. */
+/* 0.9.57: Lade-Beanstandungen - angezeigte Werte uebernehmen, nur mit Haken (Entscheidung des Hausherrn 24.11.2026,
+ * "Haken im gelben Kasten"); ohne ihn bleibt die Datei byte-gleich. Geschrieben ohne "Dateiwert behalten". Der
+ * Wachposten weiter oben hat $_POST bei fremdem Merkmal schon geleert. Meldungen vormaskiert (Ausgabe unmaskiert). */
+if ($bm_post && sicherung_lade_eingang($_POST) !== '') {
+    $bm_lb = bm_lade_b(false);
+    if (sicherung_lade_eingang($_POST) !== 'ja') {
+        $bm_fehler[] = bm_e(sicherung_t('K_LADE_HAKEN_FEHLT', $bm_lb));
+    } else {
+        $bm_ld = bm_lade_roh();
+        $bm_lv = bm_config();
+        $bm_un = array();
+        if ($bm_ld !== null) {
+            list($bm_lneu, $bm_un) = sicherung_lade_uebernehmen_stand($bm_ld, $bm_lv, sicherung_lade_beanstandungen($bm_lb, $bm_ld, $bm_lv));
+            if ($bm_un && !bm_config_speichern($bm_lneu, false)) {
+                $bm_fehler[] = bm_e(sicherung_t('K_SCHREIBFEHLER', $bm_lb));
+                $bm_un = array();
+            }
+        }
+        if ($bm_un) {
+            bm_log('Lade-Beanstandungen: angezeigte Werte uebernommen: ' . implode(', ', array_map('sicherung_name', $bm_un)));
+            $bm_meldungen[] = sprintf(bm_e(sicherung_t('K_LADE_UEBERNOMMEN', $bm_lb)), bm_e(implode(', ', $bm_un)));
+        }
+    }
+}
 if ($bm_post) {
     if (bm_einmal_schreiben(array('meldungen' => array_values($bm_meldungen),
                                   'fehler' => array_values($bm_fehler),
@@ -1136,7 +1175,12 @@ if ($bm_rahmen) {
 <?php foreach ($bm_fehler as $bm_f) { ?><li><?= $bm_f ?></li><?php } ?>
 </ul></div>
 <?php } ?>
+<?php /* 0.9.57: Lade-Beanstandungen (Regeln/05) - gelber Kasten; einmal je Aenderung ins Protokoll. */
+$bm_lade = bm_lade_beanstandungen($bm_cfg);
+bm_lade_melden($bm_lade); ?>
 
+<?= sicherung_lade_kasten(bm_lade_b(true), isset($bm_lade) ? $bm_lade : bm_lade_beanstandungen($bm_cfg),
+        bm_fmt() . '<input data-role="none" type="hidden" name="activetab" value="' . bm_e($bm_tab) . '">') ?>
 <!-- ================= Statuskacheln ================= -->
 <div class="sm-kacheln">
   <div class="sm-kachel"><?= bm_e(bm_t('ALLG.DIENST')) ?>
