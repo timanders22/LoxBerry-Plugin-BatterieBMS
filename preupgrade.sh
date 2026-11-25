@@ -5,6 +5,10 @@
 # Wichtig: Der Dienst haelt eine Modbus-Verbindung offen. Manche Speicher
 # lassen nur EINE Verbindung gleichzeitig zu (belegt fuer die BYD-BCU). Bleibt
 # ein alter Prozess stehen, kommt der neue nicht mehr an das Geraet heran.
+# [upgrade_daten] Argumente des Installers festhalten - unten sichert der gemeinsame Baustein
+# [upgrade_daten] upgrade_daten.sh (neben diesem Skript) den ganzen Datenordner.
+UPGD_ORDNER="$3"; UPGD_WURZEL="$5"
+
 ARGV3=$3
 PFOLDER="${ARGV3:-batteriebms}"
 # 05.11.2026: ein Ordnername mit "/" oder "." waere ein Pfad hinaus (dieselbe Formel wie MGiSmart und Govee).
@@ -390,12 +394,42 @@ fi
 if [ $FEHLER -ne 0 ]; then
     # 05.11.2026: nach dem Abbruch laufen postinstall und postupgrade nie; die Marke raeumte sonst niemand weg.
     rm -f "$MARKE" 2>/dev/null
+    # 26.11.2026: "dienst.sh stop" oben hat soll_laufen entfernt; lief der Dienst, kommt der Merker zurueck,
+    # und der Minutenwaechter startet ihn wieder - sonst blieb er nach dem Abbruch aus.
+    [ -f "$LIEF" ] && : > "$BASE/data/plugins/$PFOLDER/soll_laufen" 2>/dev/null
     exit 2
 fi
 if [ -n "$ZWANG_OFFEN" ]; then
     # I4: mit offenem Zwang kein <OK> - die <WARNING> oben ist die Aussage.
     echo "<INFO> preupgrade beendet - mit offenem Zwang (siehe <WARNING> oben)."
-    exit 0
+else
+    echo "<OK> preupgrade abgeschlossen."
 fi
-echo "<OK> preupgrade abgeschlossen."
+# 25.11.2026: ein Ende fuer beide Zweige - der gemeinsame Baustein sichert davor den Datenordner.
+# befehle/ und antworten/ ueberleben das Update bewusst nicht: die Befehlsbruecke legt befehle/ samt
+# Optionsdatei beim Start neu an, postinstall.sh beide Ordner leer (Regeln/06, Entscheidung des Hausherrn
+# 15.11.2026). Alles andere im Datenordner traegt der Baustein unten ueber das Update.
+UPGD_OHNE="befehle antworten"
+# Fehlerweg fuer den gemeinsamen Baustein (unten): misslingt das Sichern des Datenordners, bricht das Update
+# mit Rueckgabe 2 ab und die bisherige Fassung bleibt. "dienst.sh stop" oben hat den Merker soll_laufen
+# entfernt; wie im eigenen Abbruch weiter oben kommt er zurueck, wenn der Dienst lief, und der Minutenwaechter startet ihn wieder.
+# Die Marke entfernt der Baustein selbst.
+upgd_bei_fehler() {
+    [ -f "$LIEF" ] || return 0
+    if : 2>/dev/null > "$BASE/data/plugins/$PFOLDER/soll_laufen"; then
+        echo "<INFO> Der Dienst lief vorher - der Merker soll_laufen ist wieder angelegt, der Waechter startet ihn."
+        return 0
+    fi
+    echo "<WARNING> Der Merker soll_laufen liess sich nicht wieder anlegen - den Dienst bitte im Reiter Einstellungen starten."
+    return 1
+}
+# [upgrade_daten] Gemeinsamer Baustein (Werkzeuge/gemeinsam/upgrade_daten.sh): den ganzen Datenordner
+# [upgrade_daten] neben den Ordner sichern; misslingt das, bricht die Aktualisierung mit Rueckgabe 2 ab.
+if [ -f "$(dirname "$0")/upgrade_daten.sh" ] && . "$(dirname "$0")/upgrade_daten.sh"; then
+    upgrade_daten_sichern "$UPGD_ORDNER" "$UPGD_WURZEL" || exit 2
+else
+    echo "<FAIL> Der Baustein upgrade_daten.sh fehlt neben $(basename "$0") - die Aktualisierung wird abgebrochen,"
+    echo "<FAIL> die bisherige Fassung bleibt installiert."
+    exit 2
+fi
 exit 0
